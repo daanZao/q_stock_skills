@@ -1,0 +1,25 @@
+[project]
+name = "qstock-mcp"
+version = "0.1.0"
+description = "面向 AI agent 的证券数据 MCP 服务：init / fetch / proxy / query / conclusions"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2",
+    "psycopg2-binary",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+qstock-mcp = "qstock_mcp.server:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qstock_mcp = ["sql/*.sql"]
