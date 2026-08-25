@@ -9,7 +9,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "mypy"]
+# 真实数据源库：适配层懒加载，未安装时对应源报明确错误
+sources = ["efinance", "akshare", "baostock"]
 
 [project.scripts]
 qstock-mcp = "qstock_mcp.server:main"
