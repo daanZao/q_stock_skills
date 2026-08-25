@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# 智能体
+.agents/
+.claude/
+.kimi-code/
+
+
+
 # Distribution / packaging
 .Python
 build/
@@ -216,3 +223,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 本地草稿
+.scratch/
