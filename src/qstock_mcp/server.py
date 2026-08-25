@@ -6,7 +6,7 @@
 
 from mcp.server.mcpserver import MCPServer
 
-from . import tools_daily, tools_init
+from . import tools_daily, tools_init, tools_snapshot
 
 mcp = MCPServer("qstock-mcp")
 
@@ -43,6 +43,21 @@ def query_daily(
 ) -> dict:
     """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间，参数同 fetch_daily。"""
     return tools_daily.query_daily(stock_code, days=days, start=start, end=end, adj=adj)
+
+
+@mcp.tool()
+def fetch_market_snapshot(trade_date: str | None = None) -> dict:
+    """抓取全市场快照（约 5000+ 只 A 股）并落库：单次调用，efinance → akshare → baostock fallback，按 (trade_date, stock_code) 幂等 upsert。
+
+    API 返回的最新交易日优先于传入的 trade_date（yyyymmdd 或 yyyy-mm-dd）。
+    """
+    return tools_snapshot.fetch_market_snapshot(trade_date)
+
+
+@mcp.tool()
+def query_snapshot(trade_date: str | None = None, stock_code: str | None = None) -> dict:
+    """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。日期格式 yyyymmdd 或 yyyy-mm-dd。"""
+    return tools_snapshot.query_snapshot(trade_date, stock_code)
 
 
 def main() -> None:

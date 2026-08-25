@@ -8,30 +8,16 @@ akshare → baostock fallback；全失败时报错并给出 attempted_sources，
 """
 
 import logging
-from typing import Any, NamedTuple
-
-import psycopg2
+from typing import NamedTuple
 
 from .adapters import DailyAdapter, default_adapters
 from .dates import resolve_range
-from .db import MissingDsnError, get_dsn
+from .db import connect
 from .fetch_chain import AllSourcesFailed, fetch_with_fallback
 from .gaps import head_tail_gaps
 from .repository import select_daily, select_dates, upsert_daily
 
 log = logging.getLogger(__name__)
-
-
-def _connect() -> tuple[Any, str | None]:
-    try:
-        dsn = get_dsn()
-    except MissingDsnError as e:
-        return None, str(e)
-    try:
-        return psycopg2.connect(dsn), None
-    except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
-        log.exception("数据库连接失败")
-        return None, f"数据库连接失败: {e}"
 
 
 def _ensure_coverage(
@@ -93,7 +79,7 @@ def _run(stock_code: str, days, start, end, adj, adapters, tool: str):
         return None, _error(tool, params, str(e))
     if adapters is None:
         adapters = default_adapters()
-    conn, err = _connect()
+    conn, err = connect()
     if err:
         return None, _error(tool, params, err)
     try:

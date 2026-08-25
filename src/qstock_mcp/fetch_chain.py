@@ -1,13 +1,15 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
-只依赖适配器协议（name + fetch_daily），不感知具体数据库/第三方库，
-测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、全失败报错。
+只依赖适配器协议（name + fetch_daily / fetch_market_snapshot），不感知具体
+数据库/第三方库，测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数与最后错误）。
 """
 
-from .adapters.base import DailyAdapter
+from typing import Callable, Sequence
+
+from .adapters.base import DailyAdapter, SnapshotAdapter
 
 DEFAULT_MAX_RETRIES = 2
 
@@ -21,23 +23,16 @@ class AllSourcesFailed(RuntimeError):
         super().__init__(f"全部数据源失败（{summary}）")
 
 
-def fetch_with_fallback(
-    adapters: list[DailyAdapter],
-    stock_code: str,
-    start: str,
-    end: str,
-    adj: str = "qfq",
-    max_retries: int = DEFAULT_MAX_RETRIES,
-) -> dict:
-    """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。"""
+def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
+    """按顺序尝试各数据源，成功返回 {result, source, attempted_sources}。"""
     attempted: list[dict] = []
     for adapter in adapters:
         error = None
         for _ in range(max_retries + 1):
             try:
-                rows = adapter.fetch_daily(stock_code, start, end, adj)
+                result = call(adapter)
                 return {
-                    "rows": rows,
+                    "result": result,
                     "source": adapter.name,
                     "attempted_sources": attempted,
                 }
@@ -47,3 +42,38 @@ def fetch_with_fallback(
             {"source": adapter.name, "attempts": max_retries + 1, "error": error}
         )
     raise AllSourcesFailed(attempted)
+
+
+def fetch_with_fallback(
+    adapters: Sequence[DailyAdapter],
+    stock_code: str,
+    start: str,
+    end: str,
+    adj: str = "qfq",
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。"""
+    r = _with_fallback(
+        adapters,
+        lambda a: a.fetch_daily(stock_code, start, end, adj),
+        max_retries,
+    )
+    return {
+        "rows": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_snapshot_with_fallback(
+    adapters: Sequence[SnapshotAdapter],
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """单次全市场快照，成功返回 {trade_date, rows, source, attempted_sources}。"""
+    r = _with_fallback(adapters, lambda a: a.fetch_market_snapshot(), max_retries)
+    return {
+        "trade_date": r["result"]["trade_date"],
+        "rows": r["result"]["rows"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }

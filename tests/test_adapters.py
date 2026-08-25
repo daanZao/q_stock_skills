@@ -6,7 +6,7 @@
 
 import pytest
 
-from qstock_mcp.adapters._eastmoney import map_eastmoney_rows
+from qstock_mcp.adapters._eastmoney import map_eastmoney_rows, map_spot_rows, spot_trade_date
 from qstock_mcp.adapters.baostock_adapter import (
     BaostockAdapter,
     map_baostock_rows,
@@ -84,3 +84,91 @@ def test_to_baostock_code():
     assert to_baostock_code("688981") == "sh.688981"  # 科创板归 sh
     with pytest.raises(FetchError):
         to_baostock_code("110001")  # 未覆盖前缀明确报错
+
+
+# --- 全市场快照映射（issue #4）：efinance 与 akshare(spot_em) 同为东财列 ---
+
+AKSHARE_SPOT_RECORD = {
+    "代码": "600519",
+    "名称": "贵州茅台",
+    "最新价": "1700.0",
+    "涨跌幅": "2.0",
+    "涨跌额": "33.3",
+    "成交量": "12345",
+    "成交额": "125000.5",
+    "振幅": "3.0",
+    "最高": "1710.0",
+    "最低": "1680.0",
+    "今开": "1690.0",
+    "昨收": "1666.7",
+    "量比": "1.2",
+    "换手率": "0.5",
+    "市盈率-动态": "25.0",
+    "市净率": "8.0",
+    "总市值": "2.1e12",
+    "流通市值": "2.1e12",
+}
+
+
+def test_spot_mapping_akshare_columns():
+    (row,) = map_spot_rows([AKSHARE_SPOT_RECORD])
+    assert row == {
+        "stock_code": "600519",
+        "stock_name": "贵州茅台",
+        "latest_price": 1700.0,
+        "change_percent": 2.0,
+        "change_amount": 33.3,
+        "amplitude": 3.0,
+        "high": 1710.0,
+        "low": 1680.0,
+        "open": 1690.0,
+        "pre_close": 1666.7,
+        "volume_ratio": 1.2,
+        "turnover_rate": 0.5,
+        "pe_ratio": 25.0,
+        "pb_ratio": 8.0,
+        "volume": 12345,
+        "amount": 125000.5,
+        "market_cap": 2.1e12,
+        "float_cap": 2.1e12,
+    }
+
+
+def test_spot_mapping_efinance_column_aliases():
+    # efinance 实测列名（EASTMONEY_QUOTE_FIELDS）：昨日收盘/动态市盈率，且无振幅/市净率列
+    record = dict(AKSHARE_SPOT_RECORD)
+    record["昨日收盘"] = record.pop("昨收")
+    record["动态市盈率"] = record.pop("市盈率-动态")
+    del record["振幅"], record["市净率"]
+    (row,) = map_spot_rows([record])
+    assert row["stock_code"] == "600519"
+    assert row["pre_close"] == 1666.7
+    assert row["pe_ratio"] == 25.0
+    # efinance 无振幅/市净率列 → null，不伪造
+    assert row["amplitude"] is None
+    assert row["pb_ratio"] is None
+
+
+def test_spot_mapping_dash_becomes_none():
+    (row,) = map_spot_rows([dict(AKSHARE_SPOT_RECORD, 最新价="-", 量比="-")])
+    assert row["latest_price"] is None
+    assert row["volume_ratio"] is None
+
+
+def test_spot_trade_date_from_efinance_column():
+    records = [
+        {"最新交易日": "2024-01-04"},
+        {"最新交易日": "2024-01-05"},
+        {"最新交易日": "-"},
+    ]
+    assert spot_trade_date(records) == "20240105"
+
+
+def test_spot_trade_date_absent_returns_none():
+    assert spot_trade_date([{"代码": "600519"}]) is None
+    assert spot_trade_date([]) is None
+
+
+def test_baostock_rejects_market_snapshot():
+    with pytest.raises(FetchError, match="不支持全市场快照"):
+        BaostockAdapter().fetch_market_snapshot()

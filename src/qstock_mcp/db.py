@@ -1,12 +1,17 @@
 """数据库连接与建表。
 
 连接串只从环境变量 `PG_DSN` 读取，不写死（决策见 docs/adr/0002）。
+connect() 把连接失败收敛为自描述错误字符串（工具层约定：不抛异常）。
 """
 
+import logging
 import os
 from importlib import resources
+from typing import Any
 
 import psycopg2
+
+log = logging.getLogger(__name__)
 
 
 class MissingDsnError(RuntimeError):
@@ -21,6 +26,19 @@ def get_dsn() -> str:
             "例如 postgresql://localhost/qstock"
         )
     return dsn
+
+
+def connect() -> tuple[Any, str | None]:
+    """按需建立连接：成功返回 (conn, None)，失败返回 (None, 错误描述)。"""
+    try:
+        dsn = get_dsn()
+    except MissingDsnError as e:
+        return None, str(e)
+    try:
+        return psycopg2.connect(dsn), None
+    except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
+        log.exception("数据库连接失败")
+        return None, f"数据库连接失败: {e}"
 
 
 def ensure_schema(conn) -> list[str]:

@@ -2,6 +2,7 @@
 
 约束（issue #3）：北交所代码（4/8/9 开头）明确拒绝；baostock 无振幅/换手/涨跌额列，
 对应字段置 null（不伪造）。日期参数为 yyyy-mm-dd，adjustflag: 1 后复权/2 前复权/3 不复权。
+baostock 无全市场快照接口，fetch_market_snapshot 明确拒绝（issue #4）。
 """
 
 from ._eastmoney import _int, _num
@@ -79,3 +80,7 @@ class BaostockAdapter:
             return map_baostock_rows(list(rs.fields), rows)
         finally:
             bs.logout()
+
+    def fetch_market_snapshot(self) -> dict:
+        """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
+        raise FetchError("baostock 不支持全市场快照")
