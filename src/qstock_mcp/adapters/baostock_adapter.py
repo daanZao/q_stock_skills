@@ -5,6 +5,8 @@
 baostock 无全市场快照接口，fetch_market_snapshot 明确拒绝（issue #4）。
 """
 
+from typing import NoReturn
+
 from ._eastmoney import _int, _num
 from .base import FetchError, is_bse_code
 
@@ -84,3 +86,22 @@ class BaostockAdapter:
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
         raise FetchError("baostock 不支持全市场快照")
+
+    def _unsupported_board(self, section: str) -> NoReturn:
+        """baostock 无盘面快照接口（issue #5），明确拒绝（不伪造）。"""
+        raise FetchError(f"baostock 不支持盘面 section: {section}")
+
+    def fetch_indices(self, trade_date: str) -> list[dict]:
+        self._unsupported_board("indices")
+
+    def fetch_boards(self, trade_date: str) -> list[dict]:
+        self._unsupported_board("boards")
+
+    def fetch_zt_pool(self, trade_date: str) -> list[dict]:
+        self._unsupported_board("zt_pool")
+
+    def fetch_strong_stocks(self, trade_date: str) -> list[dict]:
+        self._unsupported_board("strong_stocks")
+
+    def fetch_lhb(self, trade_date: str) -> dict:
+        self._unsupported_board("lhb")

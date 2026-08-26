@@ -3,6 +3,7 @@
 from .base import (
     BAR_FIELDS,
     SNAPSHOT_FIELDS,
+    BoardAdapter,
     DailyAdapter,
     DataAdapter,
     FetchError,
@@ -13,6 +14,7 @@ from .base import (
 __all__ = [
     "BAR_FIELDS",
     "SNAPSHOT_FIELDS",
+    "BoardAdapter",
     "DailyAdapter",
     "DataAdapter",
     "FetchError",

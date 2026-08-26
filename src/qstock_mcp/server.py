@@ -6,7 +6,7 @@
 
 from mcp.server.mcpserver import MCPServer
 
-from . import tools_daily, tools_init, tools_snapshot
+from . import tools_board, tools_daily, tools_init, tools_snapshot
 
 mcp = MCPServer("qstock-mcp")
 
@@ -58,6 +58,30 @@ def fetch_market_snapshot(trade_date: str | None = None) -> dict:
 def query_snapshot(trade_date: str | None = None, stock_code: str | None = None) -> dict:
     """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。日期格式 yyyymmdd 或 yyyy-mm-dd。"""
     return tools_snapshot.query_snapshot(trade_date, stock_code)
+
+
+@mcp.tool()
+def fetch_board_snapshot(trade_date: str | None = None, sections: str | None = None) -> dict:
+    """抓取盘面快照并落库：指数/板块/涨跌停池/强势股/龙虎榜五 section 独立抓取（单 section 失败不拖垮其他），各表按业务键幂等 upsert。
+
+    trade_date: yyyymmdd 或 yyyy-mm-dd，缺省今天；sections: 逗号分隔子集
+    （可选 indices,boards,zt_pool,strong_stocks,lhb），缺省全量。
+    盘中龙虎榜无数据返回 rows:0 + note（盘后发布，非失败）。
+    """
+    return tools_board.fetch_board_snapshot(trade_date, sections)
+
+
+@mcp.tool()
+def query_board_data(
+    table: str, trade_date: str | None = None, code: str | None = None
+) -> dict:
+    """库内盘面数据查询：按表/日期/代码过滤；日期缺省取该表库内最新日期。
+
+    table 可选：market_indices/market_boards/zt_pool/strong_stocks/lhb_basic/
+    lhb_stock_detail/lhb_stock_statistic/lhb_yyb_capital/lhb_yyb_most。
+    code 为各表业务代码（指数代码/板块名称/股票代码/营业部名称）。
+    """
+    return tools_board.query_board_data(table, trade_date, code)
 
 
 def main() -> None:

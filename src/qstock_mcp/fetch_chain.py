@@ -1,7 +1,8 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
-只依赖适配器协议（name + fetch_daily / fetch_market_snapshot），不感知具体
-数据库/第三方库，测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、全失败报错。
+只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section>），
+不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、
+全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数与最后错误）。
@@ -9,7 +10,7 @@
 
 from typing import Callable, Sequence
 
-from .adapters.base import DailyAdapter, SnapshotAdapter
+from .adapters.base import BoardAdapter, DailyAdapter, SnapshotAdapter
 
 DEFAULT_MAX_RETRIES = 2
 
@@ -74,6 +75,29 @@ def fetch_snapshot_with_fallback(
     return {
         "trade_date": r["result"]["trade_date"],
         "rows": r["result"]["rows"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_section_with_fallback(
+    adapters: Sequence[BoardAdapter],
+    section: str,
+    trade_date: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """单 section 盘面抓取（issue #5），成功返回 {data, source, attempted_sources}。
+
+    section 取值与 BoardAdapter 方法同名：indices/boards/zt_pool/strong_stocks/lhb。
+    data 为行列表（lhb 为 {表名: 行列表}）；空结果视为成功，不触发 fallback。
+    """
+    r = _with_fallback(
+        adapters,
+        lambda a: getattr(a, f"fetch_{section}")(trade_date),
+        max_retries,
+    )
+    return {
+        "data": r["result"],
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
