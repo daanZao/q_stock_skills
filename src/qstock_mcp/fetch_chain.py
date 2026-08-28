@@ -1,8 +1,8 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
-只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section>），
-不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、
-全失败报错。
+只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section> /
+fetch_fundamentals），不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖
+fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数与最后错误）。
@@ -10,7 +10,7 @@
 
 from typing import Callable, Sequence
 
-from .adapters.base import BoardAdapter, DailyAdapter, SnapshotAdapter
+from .adapters.base import BoardAdapter, DailyAdapter, FundamentalsAdapter, SnapshotAdapter
 
 DEFAULT_MAX_RETRIES = 2
 
@@ -75,6 +75,28 @@ def fetch_snapshot_with_fallback(
     return {
         "trade_date": r["result"]["trade_date"],
         "rows": r["result"]["rows"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_fundamentals_with_fallback(
+    adapters: Sequence[FundamentalsAdapter],
+    stock_code: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """基本面透传（issue #6），成功返回 {data, source, attempted_sources}。
+
+    data 为适配器返回的 {section: 原始记录} 透传 payload；无数据的源由适配器
+    自行抛 FetchError（空 payload 不落到这里），全失败抛 AllSourcesFailed。
+    """
+    r = _with_fallback(
+        adapters,
+        lambda a: a.fetch_fundamentals(stock_code),
+        max_retries,
+    )
+    return {
+        "data": r["result"],
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }

@@ -6,7 +6,7 @@
 
 from mcp.server.mcpserver import MCPServer
 
-from . import tools_board, tools_daily, tools_init, tools_snapshot
+from . import tools_board, tools_daily, tools_fundamentals, tools_init, tools_snapshot
 
 mcp = MCPServer("qstock-mcp")
 
@@ -82,6 +82,17 @@ def query_board_data(
     code 为各表业务代码（指数代码/板块名称/股票代码/营业部名称）。
     """
     return tools_board.query_board_data(table, trade_date, code)
+
+
+@mcp.tool()
+def get_fundamentals(stock_code: str) -> dict:
+    """基本面数据透传（proxy 能力面）：按个股代码返回上游原始数据（财务指标、估值等），不规格化、不落库。
+
+    输出自描述 JSON：data 为 {section: 原始记录}（字段名保留上游），source 为实际
+    数据源（akshare → efinance → baostock fallback）；全失败返回 status:"error"
+    与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
+    """
+    return tools_fundamentals.get_fundamentals(stock_code)
 
 
 def main() -> None:

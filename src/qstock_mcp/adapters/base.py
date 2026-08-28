@@ -204,10 +204,54 @@ class BoardAdapter(Protocol):
     def fetch_lhb(self, trade_date: str) -> dict: ...
 
 
-class DataAdapter(DailyAdapter, SnapshotAdapter, BoardAdapter, Protocol):
-    """同时支持日线、全市场快照与盘面快照的适配器（default_adapters 链的元素类型）。"""
+class FundamentalsAdapter(Protocol):
+    """基本面透传（issue #6）协议：proxy 能力面，不规格化、不落库。
+
+    fetch_fundamentals 返回 {section: 原始记录} 的透传 payload：section 名对应
+    上游接口，记录保留上游原始字段名（仅做 JSON 安全化），工具层原样回传。
+    失败抛 FetchError；空 payload（所有 section 均无数据）视为该源失败。
+    """
+
+    name: str
+
+    def fetch_fundamentals(self, stock_code: str) -> dict: ...
+
+
+class DataAdapter(
+    DailyAdapter, SnapshotAdapter, BoardAdapter, FundamentalsAdapter, Protocol
+):
+    """同时支持日线、全市场快照、盘面快照与基本面透传的适配器（fallback 链元素类型）。"""
 
 
 def is_bse_code(stock_code: str) -> bool:
     """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。"""
     return stock_code[:1] in ("4", "8", "9")
+
+
+def json_safe(value):
+    """上游值 → JSON 安全值（透传的序列化步骤，不改键名与语义）。
+
+    NaN/NaT/Inf → None；numpy 标量 → Python 标量；日期时间 → ISO 字符串；
+    dict/list 递归。不 import pandas/numpy（可选依赖），全部鸭子类型判定。
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float("inf") else None
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    item = getattr(value, "item", None)  # numpy 标量
+    if callable(item):
+        try:
+            return json_safe(item())
+        except Exception:  # noqa: BLE001 - 序列化失败按 None 处理
+            return None
+    iso = getattr(value, "isoformat", None)  # date/datetime/Timestamp
+    if callable(iso):
+        try:
+            return iso()
+        except Exception:  # noqa: BLE001 - NaT 等不支持 isoformat
+            return None
+    return str(value)

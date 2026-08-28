@@ -263,3 +263,35 @@ class FakeBoardAdapter:
 
     def fetch_lhb(self, trade_date):
         return self._get("lhb")
+
+
+# ---------------------------------------------------------------- 基本面透传（issue #6）
+
+FUNDAMENTALS_PAYLOAD = {
+    "financial_abstract": [
+        {"选项": "常用指标", "指标": "营业总收入", "20251231": 1.7e11},
+        {"选项": "常用指标", "指标": "归母净利润", "20251231": 8.6e10},
+    ],
+    "valuation_indicator": [
+        {"trade_date": "2024-01-05", "pe": 30.0, "pb": 10.0, "total_mv": 2.1e12}
+    ],
+}
+
+
+class FakeFundamentalsAdapter:
+    """记录调用、按脚本成败的 fake 基本面透传源。
+
+    payload 为 None 时返回 FUNDAMENTALS_PAYLOAD；否则固定返回 payload。
+    """
+
+    def __init__(self, name, *, fail_times=0, payload=None):
+        self.name = name
+        self._fail_times = fail_times
+        self._payload = payload
+        self.calls = []
+
+    def fetch_fundamentals(self, stock_code):
+        self.calls.append(stock_code)
+        if len(self.calls) <= self._fail_times:
+            raise FetchError(f"{self.name} boom")
+        return self._payload if self._payload is not None else FUNDAMENTALS_PAYLOAD

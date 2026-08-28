@@ -18,7 +18,7 @@ from ._board_em import (
     map_zt_pool_rows,
 )
 from ._eastmoney import map_eastmoney_rows, map_spot_rows
-from .base import FetchError
+from .base import FetchError, json_safe
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,39 @@ class AkshareAdapter:
         if df is None or df.empty:
             return {"trade_date": None, "rows": []}
         return {"trade_date": None, "rows": map_spot_rows(df.to_dict("records"))}
+
+    # ---------------------------------------------------------------- 基本面透传（issue #6）
+
+    def fetch_fundamentals(self, stock_code: str) -> dict:
+        """财务摘要 + 估值指标透传：section 名对应上游接口，字段名原样保留。
+
+        section 级容错：拿到什么传什么（失败 section 记入 errors 键），
+        全部无数据才抛 FetchError 触发 fallback。
+        """
+        ak = _ak()
+        payload: dict = {}
+        errors: list[str] = []
+        for section, call in [
+            ("financial_abstract", lambda: ak.stock_financial_abstract(symbol=stock_code)),
+            ("valuation_indicator", lambda: ak.stock_a_indicator_lg(symbol=stock_code)),
+        ]:
+            try:
+                df = call()
+            except Exception as e:  # noqa: BLE001 - 单 section 失败不拖垮其他
+                errors.append(f"{section}: {e}")
+                continue
+            if df is not None and not df.empty:
+                payload[section] = json_safe(df.to_dict("records"))
+            else:
+                errors.append(f"{section}: 空返回")
+        if not payload:
+            raise FetchError(
+                f"akshare 基本面无数据（{stock_code}）: {'; '.join(errors) or '空返回'}"
+            )
+        if errors:
+            log.warning("akshare 基本面部分 section 失败: %s", "; ".join(errors))
+            payload["errors"] = errors
+        return payload
 
     # ---------------------------------------------------------------- 盘面快照（issue #5）
 

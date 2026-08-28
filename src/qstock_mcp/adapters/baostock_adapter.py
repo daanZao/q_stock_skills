@@ -5,13 +5,29 @@
 baostock 无全市场快照接口，fetch_market_snapshot 明确拒绝（issue #4）。
 """
 
+from datetime import date
 from typing import NoReturn
 
 from ._eastmoney import _int, _num
-from .base import FetchError, is_bse_code
+from .base import FetchError, is_bse_code, json_safe
 
 _FIELDS = "date,open,high,low,close,volume,amount,pctChg"
 _ADJUSTFLAG = {"qfq": "2", "hfq": "1", "none": "3"}
+
+
+def _login():
+    """懒加载 baostock 并登录，返回模块句柄；失败抛 FetchError。调用方负责 logout。"""
+    try:
+        import baostock as bs
+    except ImportError as e:
+        raise FetchError("baostock 未安装：pip install qstock-mcp[sources]") from e
+    try:
+        lg = bs.login()
+    except Exception as e:
+        raise FetchError(f"baostock 登录失败: {e}") from e
+    if lg.error_code != "0":
+        raise FetchError(f"baostock 登录失败: {lg.error_msg}")
+    return bs
 
 
 def to_baostock_code(stock_code: str) -> str:
@@ -55,16 +71,7 @@ class BaostockAdapter:
         if is_bse_code(stock_code):
             raise FetchError(f"baostock 不支持北交所代码 {stock_code}（4/8/9 开头）")
         bs_code = to_baostock_code(stock_code)
-        try:
-            import baostock as bs
-        except ImportError as e:
-            raise FetchError("baostock 未安装：pip install qstock-mcp[sources]") from e
-        try:
-            lg = bs.login()
-        except Exception as e:
-            raise FetchError(f"baostock 登录失败: {e}") from e
-        if lg.error_code != "0":
-            raise FetchError(f"baostock 登录失败: {lg.error_msg}")
+        bs = _login()
         try:
             rs = bs.query_history_k_data_plus(
                 bs_code,
@@ -86,6 +93,55 @@ class BaostockAdapter:
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
         raise FetchError("baostock 不支持全市场快照")
+
+    # ---------------------------------------------------------------- 基本面透传（issue #6）
+
+    def fetch_fundamentals(self, stock_code: str) -> dict:
+        """最近季度利润/成长数据透传：字段名原样保留上游。
+
+        北交所代码明确拒绝（同日线约束）；接口按年+季度查询，从当前季度
+        向前最多回溯 4 季取最新有数据的一季。profit/growth 彼此独立，
+        均无数据才抛 FetchError 结束 fallback 链。
+        """
+        if is_bse_code(stock_code):
+            raise FetchError(f"baostock 不支持北交所代码 {stock_code}（4/8/9 开头）")
+        bs_code = to_baostock_code(stock_code)
+        bs = _login()
+        try:
+            today = date.today()
+            year, quarter = today.year, (today.month - 1) // 3 + 1
+            payload: dict = {}
+            errors: list[str] = []
+            for _ in range(4):
+                for section, query in [
+                    ("profit", bs.query_profit_data),
+                    ("growth", bs.query_growth_data),
+                ]:
+                    if section in payload:
+                        continue
+                    rs = query(code=bs_code, year=year, quarter=quarter)
+                    if rs.error_code != "0":
+                        errors.append(f"{section} {year}Q{quarter}: {rs.error_msg}")
+                        continue
+                    rows = []
+                    while rs.next():
+                        rows.append(dict(zip(rs.fields, rs.get_row_data())))
+                    if rows:
+                        payload[section] = rows
+                if len(payload) == 2:
+                    break
+                quarter -= 1
+                if quarter == 0:
+                    year, quarter = year - 1, 4
+        finally:
+            bs.logout()
+        if not payload:
+            raise FetchError(
+                f"baostock 基本面无数据（{stock_code}）: {'; '.join(errors) or '空返回'}"
+            )
+        if errors:
+            payload["errors"] = errors
+        return json_safe(payload)
 
     def _unsupported_board(self, section: str) -> NoReturn:
         """baostock 无盘面快照接口（issue #5），明确拒绝（不伪造）。"""
