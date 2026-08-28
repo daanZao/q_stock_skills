@@ -4,9 +4,18 @@
 数据库连接在工具调用时按需建立，server 启动本身不依赖 PG 可达。
 """
 
+from typing import Any
+
 from mcp.server.mcpserver import MCPServer
 
-from . import tools_board, tools_daily, tools_fundamentals, tools_init, tools_snapshot
+from . import (
+    tools_board,
+    tools_conclusions,
+    tools_daily,
+    tools_fundamentals,
+    tools_init,
+    tools_snapshot,
+)
 
 mcp = MCPServer("qstock-mcp")
 
@@ -93,6 +102,38 @@ def get_fundamentals(stock_code: str) -> dict:
     与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
     """
     return tools_fundamentals.get_fundamentals(stock_code)
+
+
+@mcp.tool()
+def save_conclusion(
+    subject_type: str,
+    subject_code: str,
+    trade_date: str,
+    conclusion_type: str,
+    payload: Any,
+) -> dict:
+    """写入一条分析结论：业务唯一键 (subject_type, subject_code, trade_date, conclusion_type)，同键重复写入为 upsert（outcome 报告 inserted/updated）。
+
+    payload 为任意 JSON，结构由写入方 skill 自行约定，server 不校验。
+    subject_type: market | stock；market 级结论 subject_code 用 '_market'。
+    trade_date: yyyymmdd 或 yyyy-mm-dd；conclusion_type 如 daily_review.close / sepa.stage。
+    """
+    return tools_conclusions.save_conclusion(
+        subject_type, subject_code, trade_date, conclusion_type, payload
+    )
+
+
+@mcp.tool()
+def query_conclusions(
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    trade_date: str | None = None,
+    conclusion_type: str | None = None,
+) -> dict:
+    """库内结论查询：按 subject_type / subject_code / trade_date / conclusion_type 任意组合过滤，全部缺省返回全表。日期格式 yyyymmdd 或 yyyy-mm-dd。"""
+    return tools_conclusions.query_conclusions(
+        subject_type, subject_code, trade_date, conclusion_type
+    )
 
 
 def main() -> None:

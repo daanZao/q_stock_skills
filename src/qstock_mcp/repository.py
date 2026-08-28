@@ -5,7 +5,9 @@ stock_daily 业务键 (stock_code, trade_date, adj)；market_snapshot 业务键
 （不产生重复行，更新为最新值）。
 """
 
-from psycopg2.extras import execute_values
+from typing import Any
+
+from psycopg2.extras import Json, execute_values
 
 from .adapters.base import (
     BAR_FIELDS,
@@ -255,3 +257,69 @@ def select_board_rows(
             {k: v for k, v in zip(cols, row) if k not in _INTERNAL_COLS}
             for row in cur.fetchall()
         ]
+
+
+# ---------------------------------------------------------------- 结论存储（issue #7）
+
+# 业务唯一键 (subject_type, subject_code, trade_date, conclusion_type) 在 schema 层
+# 钉死（sql/008_conclusions.sql，docs/adr/0003）；payload 结构 server 不校验。
+# inserted/updated 判定用 CTE 预查业务键（语句级快照），不用 xmax 内部列。
+_UPSERT_CONCLUSION_SQL = """
+WITH prior AS (
+    SELECT 1 FROM conclusions
+    WHERE subject_type = %s AND subject_code = %s
+      AND trade_date = %s AND conclusion_type = %s
+), write AS (
+    INSERT INTO conclusions (subject_type, subject_code, trade_date, conclusion_type, payload)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (subject_type, subject_code, trade_date, conclusion_type) DO UPDATE SET
+        payload = EXCLUDED.payload,
+        updated_at = CURRENT_TIMESTAMP
+)
+SELECT EXISTS (SELECT 1 FROM prior)
+"""
+
+_CONCLUSION_COLS = ("subject_type", "subject_code", "trade_date", "conclusion_type", "payload")
+
+
+def upsert_conclusion(
+    conn,
+    subject_type: str,
+    subject_code: str,
+    trade_date: str,
+    conclusion_type: str,
+    payload: Any,
+) -> str:
+    """按业务键 upsert 一条结论；返回 "inserted" 或 "updated"。"""
+    key = (subject_type, subject_code, trade_date, conclusion_type)
+    with conn.cursor() as cur:
+        cur.execute(_UPSERT_CONCLUSION_SQL, key + key + (Json(payload),))
+        existed = cur.fetchone()[0]
+    conn.commit()
+    return "updated" if existed else "inserted"
+
+
+def select_conclusions(
+    conn,
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    trade_date: str | None = None,
+    conclusion_type: str | None = None,
+) -> list[dict]:
+    """按主体/日期/结论类型过滤查询；全为 None 时返回全表（慎用）。内部列不返回。"""
+    filters = {
+        "subject_type": subject_type,
+        "subject_code": subject_code,
+        "trade_date": trade_date,
+        "conclusion_type": conclusion_type,
+    }
+    where = [f"{col} = %s" for col, val in filters.items() if val is not None]
+    args = [val for val in filters.values() if val is not None]
+    sql = (
+        f"SELECT {', '.join(_CONCLUSION_COLS)} FROM conclusions"
+        + (" WHERE " + " AND ".join(where) if where else "")
+        + " ORDER BY trade_date, subject_code, conclusion_type"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        return [dict(zip(_CONCLUSION_COLS, row)) for row in cur.fetchall()]
