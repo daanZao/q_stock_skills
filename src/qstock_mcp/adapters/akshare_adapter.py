@@ -71,6 +71,35 @@ class AkshareAdapter:
             return {"trade_date": None, "rows": []}
         return {"trade_date": None, "rows": map_spot_rows(df.to_dict("records"))}
 
+    # ---------------------------------------------------------------- init 轻量初始化（issue #8）
+
+    def fetch_stock_list(self) -> list[dict]:
+        """股票清单：stock_info_a_code_name（code/name 两列）。"""
+        ak = _ak()
+        try:
+            df = ak.stock_info_a_code_name()
+        except Exception as e:
+            raise FetchError(f"akshare 股票清单抓取失败: {e}") from e
+        if df is None or df.empty:
+            raise FetchError("akshare 股票清单返回为空")
+        return [
+            {"stock_code": str(r["code"]), "stock_name": r.get("name")}
+            for r in df.to_dict("records")
+        ]
+
+    def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
+        """指数日线：index_zh_a_hist 与个股历史同为东财中文列，共用映射；空区间返回 []。"""
+        ak = _ak()
+        try:
+            df = ak.index_zh_a_hist(
+                symbol=index_code, period="daily", start_date=start, end_date=end
+            )
+        except Exception as e:
+            raise FetchError(f"akshare 指数日线抓取失败: {e}") from e
+        if df is None or df.empty:
+            return []
+        return map_eastmoney_rows(df.to_dict("records"))
+
     # ---------------------------------------------------------------- 基本面透传（issue #6）
 
     def fetch_fundamentals(self, stock_code: str) -> dict:

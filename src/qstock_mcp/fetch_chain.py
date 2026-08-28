@@ -10,7 +10,14 @@ fallback 顺序、重试次数、全失败报错。
 
 from typing import Callable, Sequence
 
-from .adapters.base import BoardAdapter, DailyAdapter, FundamentalsAdapter, SnapshotAdapter
+from .adapters.base import (
+    BoardAdapter,
+    DailyAdapter,
+    FundamentalsAdapter,
+    IndexDailyAdapter,
+    ListAdapter,
+    SnapshotAdapter,
+)
 
 DEFAULT_MAX_RETRIES = 2
 
@@ -120,6 +127,39 @@ def fetch_section_with_fallback(
     )
     return {
         "data": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_stock_list_with_fallback(
+    adapters: Sequence[ListAdapter],
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """股票清单抓取（issue #8），成功返回 {rows, source, attempted_sources}。"""
+    r = _with_fallback(adapters, lambda a: a.fetch_stock_list(), max_retries)
+    return {
+        "rows": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_index_daily_with_fallback(
+    adapters: Sequence[IndexDailyAdapter],
+    index_code: str,
+    start: str,
+    end: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """指数日线抓取（issue #8），成功返回 {rows, source, attempted_sources}。"""
+    r = _with_fallback(
+        adapters,
+        lambda a: a.fetch_index_daily(index_code, start, end),
+        max_retries,
+    )
+    return {
+        "rows": r["result"],
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }

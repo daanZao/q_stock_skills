@@ -10,6 +10,7 @@ from qstock_mcp.adapters._eastmoney import map_eastmoney_rows, map_spot_rows, sp
 from qstock_mcp.adapters.baostock_adapter import (
     BaostockAdapter,
     map_baostock_rows,
+    map_stock_basic_rows,
     to_baostock_code,
 )
 from qstock_mcp.adapters.base import FetchError, is_bse_code
@@ -172,6 +173,33 @@ def test_spot_trade_date_absent_returns_none():
 def test_baostock_rejects_market_snapshot():
     with pytest.raises(FetchError, match="不支持全市场快照"):
         BaostockAdapter().fetch_market_snapshot()
+
+
+# --- 股票清单映射（issue #8）：baostock query_stock_basic 过滤 ---
+
+
+def test_stock_basic_mapping_filters_b_share_index_and_delisted():
+    fields = ["code", "code_name", "status"]
+    rows = [
+        ["sh.600519", "贵州茅台", "1"],  # 沪主板 A 股
+        ["sz.000001", "平安银行", "1"],  # 深主板 A 股
+        ["sz.300408", "三环集团", "1"],  # 创业板 A 股
+        ["sz.200002", "万科B", "1"],     # 深圳 B 股 → 剔除
+        ["sh.000001", "上证指数", "1"],  # 指数 → 剔除
+        ["sh.600000", "浦发银行", "0"],  # 退市（status=0）→ 剔除
+    ]
+    assert map_stock_basic_rows(fields, rows) == [
+        {"stock_code": "600519", "stock_name": "贵州茅台"},
+        {"stock_code": "000001", "stock_name": "平安银行"},
+        {"stock_code": "300408", "stock_name": "三环集团"},
+    ]
+
+
+def test_stock_basic_mapping_missing_status_kept():
+    # status 列缺失时保留该行（不臆断）；前缀剥掉 sh./sz.
+    fields = ["code", "code_name"]
+    (row,) = map_stock_basic_rows(fields, [["sh.600519", "贵州茅台"]])
+    assert row == {"stock_code": "600519", "stock_name": "贵州茅台"}
 
 
 # --- 盘面快照映射（issue #5）：列映射以旧项目 appdb 实测写入端为准 ---

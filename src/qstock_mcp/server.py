@@ -21,9 +21,13 @@ mcp = MCPServer("qstock-mcp")
 
 
 @mcp.tool()
-def init_database() -> dict:
-    """初始化数据库：幂等建表（stock_daily / market_snapshot / 盘面表 / conclusions 等）。"""
-    return tools_init.init_database()
+def init_database(backfill_history: bool = False) -> dict:
+    """初始化数据库：幂等建表 + 轻量初始化数据（股票清单、全市场快照、主要指数日线），各部分独立成败报告；重复调用幂等（无重复行）。
+
+    backfill_history=True 追加全市场个股历史日线回溯（重操作：数千只 × 全历史，
+    显式开启，绝非默认；进度与失败在 parts.backfill 中报告，单股失败不中断）。
+    """
+    return tools_init.init_database(backfill_history)
 
 
 @mcp.tool()

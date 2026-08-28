@@ -9,6 +9,10 @@ bar 为 dict，键见 BAR_FIELDS；trade_date 为 yyyymmdd 字符串，数值缺
 全市场快照（issue #4）走另一协议：fetch_market_snapshot() 一次调用返回
 {"trade_date": str | None, "rows": [snapshot]}；trade_date 为 None 表示 API 未报告，
 由工具层回退到传入日期/当天。snapshot 键见 SNAPSHOT_FIELDS。
+
+init 轻量初始化（issue #8）新增两协议：fetch_stock_list() 返回股票清单行
+（键见 STOCK_LIST_FIELDS）；fetch_index_daily(index_code, start, end) 返回
+指数日线 bar（键同 BAR_FIELDS，无复权概念）。
 """
 
 from typing import Protocol
@@ -47,6 +51,9 @@ SNAPSHOT_FIELDS = (
     "market_cap",
     "float_cap",
 )
+
+# 股票清单（issue #8）：fetch_stock_list 行 dict 的键集，与 stock_list 表对应
+STOCK_LIST_FIELDS = ("stock_code", "stock_name")
 
 # 盘面快照（issue #5）：各 section 行 dict 的键集，与落库表列一一对应（日期列除外，
 # 见 repository.BOARD_SECTION_TABLES）。行可自带日期键（trade_date/fetch_date）覆盖
@@ -217,10 +224,40 @@ class FundamentalsAdapter(Protocol):
     def fetch_fundamentals(self, stock_code: str) -> dict: ...
 
 
+class ListAdapter(Protocol):
+    """股票清单（issue #8）协议：单次全市场代码/名称抓取。"""
+
+    name: str
+
+    def fetch_stock_list(self) -> list[dict]:
+        """→ [{stock_code, stock_name}]（键见 STOCK_LIST_FIELDS）；失败抛 FetchError。"""
+        ...
+
+
+class IndexDailyAdapter(Protocol):
+    """指数日线（issue #8）协议：bar 键同 BAR_FIELDS，trade_date 为 yyyymmdd。
+
+    指数无复权概念，接口不带 adj 参数；返回空列表表示该区间无数据，不是错误。
+    """
+
+    name: str
+
+    def fetch_index_daily(
+        self, index_code: str, start: str, end: str
+    ) -> list[dict]: ...
+
+
 class DataAdapter(
-    DailyAdapter, SnapshotAdapter, BoardAdapter, FundamentalsAdapter, Protocol
+    DailyAdapter,
+    SnapshotAdapter,
+    BoardAdapter,
+    FundamentalsAdapter,
+    ListAdapter,
+    IndexDailyAdapter,
+    Protocol,
 ):
-    """同时支持日线、全市场快照、盘面快照与基本面透传的适配器（fallback 链元素类型）。"""
+    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单与指数日线的
+    适配器（fallback 链元素类型）。"""
 
 
 def is_bse_code(stock_code: str) -> bool:

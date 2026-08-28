@@ -59,6 +59,30 @@ class EfinanceAdapter:
             raise FetchError("efinance 沪深系列指数返回为空")
         return map_index_rows(df.to_dict("records"))
 
+    # ---------------------------------------------------------------- init 轻量初始化（issue #8）
+
+    def fetch_stock_list(self) -> list[dict]:
+        """股票清单：efinance 无专用清单接口，退化为全市场快照取代码/名称。"""
+        ef = _ef()
+        try:
+            df = ef.stock.get_realtime_quotes()
+        except Exception as e:
+            raise FetchError(f"efinance 股票清单抓取失败: {e}") from e
+        if df is None or df.empty:
+            raise FetchError("efinance 全市场快照返回为空")
+        rows = [
+            {"stock_code": r["stock_code"], "stock_name": r["stock_name"]}
+            for r in map_spot_rows(df.to_dict("records"))
+            if r["stock_code"]
+        ]
+        if not rows:
+            raise FetchError("efinance 股票清单为空")
+        return rows
+
+    def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
+        """efinance 无干净的指数历史接口，明确拒绝（不伪造）。"""
+        raise FetchError("efinance 不支持指数日线")
+
     # ---------------------------------------------------------------- 基本面透传（issue #6）
 
     def fetch_fundamentals(self, stock_code: str) -> dict:

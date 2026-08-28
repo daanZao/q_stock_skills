@@ -8,7 +8,7 @@ akshare → baostock fallback；全失败时报错并给出 attempted_sources，
 """
 
 import logging
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
 
 from .adapters import DailyAdapter, default_adapters
 from .dates import resolve_range
@@ -20,10 +20,13 @@ from .repository import select_daily, select_dates, upsert_daily
 log = logging.getLogger(__name__)
 
 
-def _ensure_coverage(
-    conn, adapters: list[DailyAdapter], stock_code: str, adj: str, start: str, end: str
+def ensure_coverage(
+    conn, adapters: Sequence[DailyAdapter], stock_code: str, adj: str, start: str, end: str
 ) -> dict:
-    """补齐 [start, end] 的头尾缺口，返回 {"ok", "segments", ...}。"""
+    """补齐 [start, end] 的头尾缺口，返回 {"ok", "segments", ...}。
+
+    公共能力：fetch/query 自愈与 init 全量回溯（issue #8）共用。
+    """
     existing = select_dates(conn, stock_code, adj, start, end)
     segments: list[dict] = []
     for seg_start, seg_end in head_tail_gaps(existing, start, end):
@@ -83,7 +86,7 @@ def _run(stock_code: str, days, start, end, adj, adapters, tool: str):
     if err:
         return None, _error(tool, params, err)
     try:
-        cover = _ensure_coverage(conn, adapters, stock_code, adj, start_d, end_d)
+        cover = ensure_coverage(conn, adapters, stock_code, adj, start_d, end_d)
         if not cover["ok"]:
             return None, _error(
                 tool,

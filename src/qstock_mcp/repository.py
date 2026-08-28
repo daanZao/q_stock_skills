@@ -2,7 +2,8 @@
 
 stock_daily 业务键 (stock_code, trade_date, adj)；market_snapshot 业务键
 (trade_date, stock_code)。每行记录实际来源 source；重复 upsert 幂等
-（不产生重复行，更新为最新值）。
+（不产生重复行，更新为最新值）。init 轻量初始化（issue #8）新增
+stock_list（主键 stock_code）与 index_daily（业务键 index_code + trade_date）。
 """
 
 from typing import Any
@@ -150,6 +151,81 @@ def select_latest_snapshot_date(conn) -> str | None:
     with conn.cursor() as cur:
         cur.execute("SELECT max(trade_date) FROM market_snapshot")
         return cur.fetchone()[0]
+
+
+# ---------------------------------------------------------------- init 轻量初始化（issue #8）
+
+_UPSERT_STOCK_LIST_SQL = """
+INSERT INTO stock_list (stock_code, stock_name, source, updated_at)
+VALUES %s
+ON CONFLICT (stock_code) DO UPDATE SET
+    stock_name = EXCLUDED.stock_name,
+    source = EXCLUDED.source,
+    updated_at = CURRENT_TIMESTAMP
+"""
+
+
+def upsert_stock_list(conn, rows: list[dict], source: str) -> int:
+    """按 stock_code upsert 股票清单（幂等），返回写入行数。
+
+    缺代码/名称的行跳过（stock_name 为 NOT NULL 列，一行脏数据不拖垮整批）。
+    """
+    values = [
+        [row["stock_code"], row["stock_name"], source]
+        for row in rows
+        if row.get("stock_code") and row.get("stock_name")
+    ]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        execute_values(
+            cur, _UPSERT_STOCK_LIST_SQL, values,
+            template="(%s, %s, %s, CURRENT_TIMESTAMP)",
+        )
+    conn.commit()
+    return len(values)
+
+
+def select_stock_codes(conn) -> list[str]:
+    """股票清单全部代码（按代码排序），全量回溯的标的来源。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT stock_code FROM stock_list ORDER BY stock_code")
+        return [row[0] for row in cur.fetchall()]
+
+
+_UPSERT_INDEX_DAILY_SQL = """
+INSERT INTO index_daily (index_code, trade_date, {cols}, source, updated_at)
+VALUES %s
+ON CONFLICT (index_code, trade_date) DO UPDATE SET
+    {updates},
+    source = EXCLUDED.source,
+    updated_at = CURRENT_TIMESTAMP
+""".format(
+    cols=", ".join(BAR_FIELDS[1:]),
+    updates=", ".join(f"{c} = EXCLUDED.{c}" for c in BAR_FIELDS[1:]),
+)
+
+
+def upsert_index_daily(conn, index_code: str, rows: list[dict], source: str) -> int:
+    """按 (index_code, trade_date) 业务键 upsert 指数日线（幂等），返回写入行数。"""
+    values = [
+        [index_code, row["trade_date"]]
+        + [row.get(f) for f in BAR_FIELDS[1:]]
+        + [source]
+        for row in rows
+    ]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            _UPSERT_INDEX_DAILY_SQL,
+            values,
+            # 占位符数 = index_code + trade_date + 数据列 + source
+            template="(" + ", ".join(["%s"] * (len(BAR_FIELDS) + 2)) + ", CURRENT_TIMESTAMP)",
+        )
+    conn.commit()
+    return len(values)
 
 
 # ---------------------------------------------------------------- 盘面快照（issue #5）

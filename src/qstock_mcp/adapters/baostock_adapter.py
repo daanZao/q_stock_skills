@@ -3,6 +3,8 @@
 约束（issue #3）：北交所代码（4/8/9 开头）明确拒绝；baostock 无振幅/换手/涨跌额列，
 对应字段置 null（不伪造）。日期参数为 yyyy-mm-dd，adjustflag: 1 后复权/2 前复权/3 不复权。
 baostock 无全市场快照接口，fetch_market_snapshot 明确拒绝（issue #4）。
+init 轻量初始化（issue #8）：支持股票清单（query_stock_basic 过滤 A 股前缀）
+与指数日线（指数不复权，adjustflag=3）。
 """
 
 from datetime import date
@@ -37,6 +39,31 @@ def to_baostock_code(stock_code: str) -> str:
     if stock_code[:1] in ("0", "2", "3"):
         return f"sz.{stock_code}"
     raise FetchError(f"无法识别的 A 股代码: {stock_code}")
+
+
+# 股票清单（issue #8）A 股个股前缀：sh.6 沪主板 / sz.0 深主板 / sz.3 创业板；
+# sz.2 为深圳 B 股（如 sz.200002），sh.000 等为指数，均排除（项目只做 A 股）
+_STOCK_PREFIXES = ("sh.6", "sz.0", "sz.3")
+
+
+def map_stock_basic_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
+    """query_stock_basic 行 → 股票清单行（stock_code 剥掉 sh./sz. 前缀）。
+
+    只保留 A 股个股前缀且在上市状态的行：status 列 "1" 上市 / "0" 退市，
+    该列缺失时保留（不臆断）。
+    """
+    result = []
+    for row in rows:
+        r = dict(zip(fields, row))
+        code = r.get("code") or ""
+        if not code.startswith(_STOCK_PREFIXES):
+            continue
+        if r.get("status", "1") != "1":
+            continue
+        result.append(
+            {"stock_code": code.split(".", 1)[1], "stock_name": r.get("code_name")}
+        )
+    return result
 
 
 def map_baostock_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
@@ -93,6 +120,44 @@ class BaostockAdapter:
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
         raise FetchError("baostock 不支持全市场快照")
+
+    # ---------------------------------------------------------------- init 轻量初始化（issue #8）
+
+    def fetch_stock_list(self) -> list[dict]:
+        """股票清单：query_stock_basic 过滤 A 股个股前缀与退市股（映射见 map_stock_basic_rows）。"""
+        bs = _login()
+        try:
+            rs = bs.query_stock_basic()
+            if rs.error_code != "0":
+                raise FetchError(f"baostock 查询失败: {rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            return map_stock_basic_rows(list(rs.fields), rows)
+        finally:
+            bs.logout()
+
+    def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
+        """指数日线：399xxx → sz.399xxx，其余 sh.{code}；指数不复权（adjustflag=3）。"""
+        bs_code = f"sz.{index_code}" if index_code.startswith("399") else f"sh.{index_code}"
+        bs = _login()
+        try:
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                _FIELDS,
+                start_date=f"{start[:4]}-{start[4:6]}-{start[6:]}",
+                end_date=f"{end[:4]}-{end[4:6]}-{end[6:]}",
+                frequency="d",
+                adjustflag="3",  # 指数不复权
+            )
+            if rs.error_code != "0":
+                raise FetchError(f"baostock 查询失败: {rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            return map_baostock_rows(list(rs.fields), rows)
+        finally:
+            bs.logout()
 
     # ---------------------------------------------------------------- 基本面透传（issue #6）
 

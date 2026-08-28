@@ -295,3 +295,77 @@ class FakeFundamentalsAdapter:
         if len(self.calls) <= self._fail_times:
             raise FetchError(f"{self.name} boom")
         return self._payload if self._payload is not None else FUNDAMENTALS_PAYLOAD
+
+
+# ---------------------------------------------------------------- init 轻量初始化（issue #8）
+
+LIST_ROWS = [
+    {"stock_code": "600519", "stock_name": "贵州茅台"},
+    {"stock_code": "000001", "stock_name": "平安银行"},
+]
+
+
+class FakeInitAdapter:
+    """init 轻量初始化（issue #8）的 fake 源：清单/快照/指数日线/个股日线四能力。
+
+    fail: 永远失败的能力名集合（list/snapshot/index/daily）；fail_stocks: 指定
+    个股代码的 fetch_daily 永远失败；其余参数覆盖默认返回（None 时用内置默认行）。
+    """
+
+    def __init__(
+        self,
+        name,
+        *,
+        fail=(),
+        list_rows=None,
+        snapshot_rows=None,
+        snapshot_trade_date=None,
+        index_rows=None,
+        daily_rows=None,
+        fail_stocks=(),
+    ):
+        self.name = name
+        self._fail = set(fail)
+        self._list_rows = list_rows
+        self._snapshot_rows = snapshot_rows
+        self._snapshot_trade_date = snapshot_trade_date
+        self._index_rows = index_rows
+        self._daily_rows = daily_rows
+        self._fail_stocks = set(fail_stocks)
+        self.calls = []
+
+    def _check(self, capability):
+        self.calls.append(capability)
+        if capability in self._fail:
+            raise FetchError(f"{self.name} {capability} boom")
+
+    def fetch_stock_list(self):
+        self._check("list")
+        return self._list_rows if self._list_rows is not None else LIST_ROWS
+
+    def fetch_market_snapshot(self):
+        self._check("snapshot")
+        return {
+            "trade_date": self._snapshot_trade_date,
+            "rows": (
+                self._snapshot_rows if self._snapshot_rows is not None else SNAPSHOT_ROWS
+            ),
+        }
+
+    def fetch_index_daily(self, index_code, start, end):
+        self._check("index")
+        return (
+            self._index_rows
+            if self._index_rows is not None
+            else weekday_rows(start, end)
+        )
+
+    def fetch_daily(self, stock_code, start, end, adj="qfq"):
+        self._check("daily")
+        if stock_code in self._fail_stocks:
+            raise FetchError(f"{self.name} {stock_code} boom")
+        return (
+            self._daily_rows
+            if self._daily_rows is not None
+            else weekday_rows(start, end)
+        )
