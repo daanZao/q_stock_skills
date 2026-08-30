@@ -16,6 +16,7 @@ from .adapters import BoardAdapter, default_adapters
 from .dates import normalize_date
 from .db import connect
 from .fetch_chain import AllSourcesFailed, fetch_section_with_fallback
+from .output import error as _error
 from .repository import (
     BOARD_QUERY_TABLES,
     BOARD_SECTION_TABLES,
@@ -29,10 +30,6 @@ log = logging.getLogger(__name__)
 ALL_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
 
 _LHB_EMPTY_NOTE = "当日无龙虎榜数据（龙虎榜盘后发布）"
-
-
-def _error(tool: str, params: dict, msg: str, **extra) -> dict:
-    return {"status": "error", "tool": tool, "params": params, "error": msg, **extra}
 
 
 def _parse_sections(sections) -> list[str]:

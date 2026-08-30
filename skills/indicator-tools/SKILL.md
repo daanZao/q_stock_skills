@@ -5,7 +5,7 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 
 # indicator-tools
 
-工具函数 skill：指标按"名称 + 计算方法 + 使用方法"目录式组织。输入为 `query_daily` 工具输出的 JSON（stdin），输出为标准化指标 JSON（stdout）；纯 Python 标准库，无第三方依赖，任何能跑 Python 3.10+ 的 agent 环境可用。
+工具函数 skill：指标按"名称 + 计算方法 + 使用方法"目录式组织。输入为 `query_daily` 工具输出的 JSON（stdin），输出为标准化指标 JSON（stdout）；纯 Python 标准库，无第三方依赖，任何能跑 Python 3.11+ 的 agent 环境可用（与仓库 pyproject 口径一致）。
 
 ## 调用方式
 

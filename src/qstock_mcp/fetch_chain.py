@@ -119,6 +119,8 @@ def fetch_section_with_fallback(
 
     section 取值与 BoardAdapter 方法同名：indices/boards/zt_pool/strong_stocks/lhb。
     data 为行列表（lhb 为 {表名: 行列表}）；空结果视为成功，不触发 fallback。
+    重试策略与日线共用 DEFAULT_MAX_RETRIES：每源最多重试 2 次（最多 3 次
+    尝试）——issue #5 的"最多 3 次"按尝试次数理解（与 issue #13 措辞口径一致）。
     """
     r = _with_fallback(
         adapters,

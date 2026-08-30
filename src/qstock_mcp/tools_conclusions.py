@@ -12,13 +12,10 @@ from typing import Any
 
 from .db import connect
 from .dates import normalize_date
+from .output import error as _error
 from .repository import select_conclusions, upsert_conclusion
 
 log = logging.getLogger(__name__)
-
-
-def _error(tool: str, params: dict, msg: str, **extra) -> dict:
-    return {"status": "error", "tool": tool, "params": params, "error": msg, **extra}
 
 
 def save_conclusion(

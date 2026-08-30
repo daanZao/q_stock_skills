@@ -231,7 +231,8 @@ def upsert_index_daily(conn, index_code: str, rows: list[dict], source: str) -> 
 # ---------------------------------------------------------------- 盘面快照（issue #5）
 
 # section → [(表名, 日期列, 业务键(除日期列), 数据列)]；表结构见 sql/003-007。
-# 盘面表均无 source 列（忠于 appdb），来源只在工具结果中报告。
+# 盘面表均无 source 列：盘面 section 基本为 akshare 单源，来源在工具结果中
+# 报告即可，不值得占用 schema 列（本项目 DDL 决策，非继承旧库）。
 BOARD_SECTION_TABLES: dict[str, list[tuple[str, str, tuple, tuple]]] = {
     "indices": [("market_indices", "trade_date", ("index_code",), INDEX_FIELDS)],
     "boards": [

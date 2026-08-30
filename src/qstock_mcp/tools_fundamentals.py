@@ -12,12 +12,9 @@ from typing import Sequence
 
 from .adapters import FundamentalsAdapter, default_fundamentals_adapters
 from .fetch_chain import AllSourcesFailed, fetch_fundamentals_with_fallback
+from .output import error as _error
 
 log = logging.getLogger(__name__)
-
-
-def _error(tool: str, params: dict, msg: str, **extra) -> dict:
-    return {"status": "error", "tool": tool, "params": params, "error": msg, **extra}
 
 
 def get_fundamentals(

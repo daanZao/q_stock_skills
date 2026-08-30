@@ -7,6 +7,8 @@ init 轻量初始化（issue #8）：支持股票清单（query_stock_basic 过�
 与指数日线（指数不复权，adjustflag=3）。
 """
 
+import contextlib
+import io
 from datetime import date
 from typing import NoReturn
 
@@ -18,18 +20,28 @@ _ADJUSTFLAG = {"qfq": "2", "hfq": "1", "none": "3"}
 
 
 def _login():
-    """懒加载 baostock 并登录，返回模块句柄；失败抛 FetchError。调用方负责 logout。"""
+    """懒加载 baostock 并登录，返回模块句柄；失败抛 FetchError。调用方负责 _logout。
+
+    baostock 登录会向 stdout print，重定向以保住 stdio JSON 通道纯净（旧契约）。
+    """
     try:
         import baostock as bs
     except ImportError as e:
         raise FetchError("baostock 未安装：pip install qstock-mcp[sources]") from e
     try:
-        lg = bs.login()
+        with contextlib.redirect_stdout(io.StringIO()):
+            lg = bs.login()
     except Exception as e:
         raise FetchError(f"baostock 登录失败: {e}") from e
     if lg.error_code != "0":
         raise FetchError(f"baostock 登录失败: {lg.error_msg}")
     return bs
+
+
+def _logout(bs) -> None:
+    """登出；baostock logout 同样向 stdout print，一并重定向。"""
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.logout()
 
 
 def to_baostock_code(stock_code: str) -> str:
@@ -115,7 +127,7 @@ class BaostockAdapter:
                 rows.append(rs.get_row_data())
             return map_baostock_rows(list(rs.fields), rows)
         finally:
-            bs.logout()
+            _logout(bs)
 
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
@@ -135,7 +147,7 @@ class BaostockAdapter:
                 rows.append(rs.get_row_data())
             return map_stock_basic_rows(list(rs.fields), rows)
         finally:
-            bs.logout()
+            _logout(bs)
 
     def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
         """指数日线：399xxx → sz.399xxx，其余 sh.{code}；指数不复权（adjustflag=3）。"""
@@ -157,7 +169,7 @@ class BaostockAdapter:
                 rows.append(rs.get_row_data())
             return map_baostock_rows(list(rs.fields), rows)
         finally:
-            bs.logout()
+            _logout(bs)
 
     # ---------------------------------------------------------------- 基本面透传（issue #6）
 
@@ -199,7 +211,7 @@ class BaostockAdapter:
                 if quarter == 0:
                     year, quarter = year - 1, 4
         finally:
-            bs.logout()
+            _logout(bs)
         if not payload:
             raise FetchError(
                 f"baostock 基本面无数据（{stock_code}）: {'; '.join(errors) or '空返回'}"

@@ -15,6 +15,7 @@ from .dates import resolve_range
 from .db import connect
 from .fetch_chain import AllSourcesFailed, fetch_with_fallback
 from .gaps import head_tail_gaps
+from .output import error as _error
 from .repository import select_daily, select_dates, upsert_daily
 
 log = logging.getLogger(__name__)
@@ -45,10 +46,6 @@ def ensure_coverage(
             {"start": seg_start, "end": seg_end, "source": result["source"], "rows": n}
         )
     return {"ok": True, "segments": segments}
-
-
-def _error(tool: str, params: dict, msg: str, **extra) -> dict:
-    return {"status": "error", "tool": tool, "params": params, "error": msg, **extra}
 
 
 def _data_range(rows: list[dict]) -> dict | None:

@@ -14,13 +14,10 @@ from .adapters import SnapshotAdapter, default_adapters
 from .dates import normalize_date
 from .db import connect
 from .fetch_chain import AllSourcesFailed, fetch_snapshot_with_fallback
+from .output import error as _error
 from .repository import select_latest_snapshot_date, select_snapshot, upsert_snapshot
 
 log = logging.getLogger(__name__)
-
-
-def _error(tool: str, params: dict, msg: str, **extra) -> dict:
-    return {"status": "error", "tool": tool, "params": params, "error": msg, **extra}
 
 
 def fetch_market_snapshot(
