@@ -10,4 +10,4 @@ Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `read
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
+Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`; project map for fast onboarding at `docs/knowledge-graph.md`. See `docs/agents/domain.md`.
