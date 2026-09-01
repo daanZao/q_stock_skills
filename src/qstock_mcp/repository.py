@@ -6,6 +6,7 @@ stock_daily 业务键 (stock_code, trade_date, adj)；market_snapshot 业务键
 stock_list（主键 stock_code）与 index_daily（业务键 index_code + trade_date）。
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from psycopg2.extras import Json, execute_values
@@ -400,3 +401,116 @@ def select_conclusions(
     with conn.cursor() as cur:
         cur.execute(sql, args)
         return [dict(zip(_CONCLUSION_COLS, row)) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------- 资讯条目（issue #24/T2）
+
+# 业务唯一键 (news_code, subject_type, subject_code) 在 schema 层钉死
+# （sql/011_news_items.sql）。inserted/updated 判定用写入前预查业务键，
+# 不用 xmax 内部列（conclusions 先例）。
+_NEWS_COLS = (
+    "news_code", "subject_type", "subject_code", "information_type",
+    "title", "content", "publish_time", "source", "url", "author",
+    "ins_name", "rating", "raw",
+)
+
+_UPSERT_NEWS_SQL = """
+INSERT INTO news_items ({cols}, fetched_at)
+VALUES %s
+ON CONFLICT (news_code, subject_type, subject_code) DO UPDATE SET
+    information_type = EXCLUDED.information_type,
+    title = EXCLUDED.title,
+    content = EXCLUDED.content,
+    publish_time = EXCLUDED.publish_time,
+    source = EXCLUDED.source,
+    url = EXCLUDED.url,
+    author = EXCLUDED.author,
+    ins_name = EXCLUDED.ins_name,
+    rating = EXCLUDED.rating,
+    raw = EXCLUDED.raw,
+    fetched_at = now()
+""".format(cols=", ".join(_NEWS_COLS))
+
+# 上游 date 字段实测为 "2026-08-28 19:22:00"；容忍常见变体，解析失败跳过该条
+_NEWS_DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d")
+# 上游时间为东八区（A 股资讯语境，无夏令时）；naive 写 timestamptz 会按会话时区解释
+_NEWS_TZ = timezone(timedelta(hours=8))
+
+
+def _parse_publish_time(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    for fmt in _NEWS_DATE_FORMATS:
+        try:
+            return datetime.strptime(raw.strip(), fmt).replace(tzinfo=_NEWS_TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def _fallback_news_code(title: Any, date: Any) -> str | None:
+    """上游缺条目 id 时的业务键兜底：标题 + 发布时间复合（ticket #24）。"""
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if not isinstance(date, str) or not date.strip():
+        return None
+    return f"fb:{title.strip()}|{date.strip()}"
+
+
+def upsert_news_items(
+    conn, subject_type: str, subject_code: str, items: list[dict]
+) -> dict:
+    """按业务键 upsert 一批资讯条目，返回 {"inserted", "updated", "skipped"} 计数。
+
+    items 为上游 news-search 条目 dict（字段名为上游 camelCase）。可选字段
+    缺失映射为 None；业务键取上游条目 id，缺失时用标题+发布时间复合兜底；
+    date 解析失败、业务键兜底也凑不出、批内键重复的条目跳过并计入
+    skipped（一行脏数据不拖垮整批）。
+    """
+    values = []
+    seen: set = set()
+    skipped = 0
+    for item in items:
+        publish_time = _parse_publish_time(item.get("date"))
+        code = item.get("code") or _fallback_news_code(
+            item.get("title"), item.get("date")
+        )
+        if not code or publish_time is None or code in seen:
+            skipped += 1
+            continue
+        seen.add(code)
+        values.append(
+            [
+                code,
+                subject_type,
+                subject_code,
+                item.get("informationType"),
+                item.get("title"),
+                item.get("content"),
+                publish_time,
+                item.get("source"),
+                item.get("jumpUrl"),
+                item.get("author"),
+                item.get("insName"),
+                item.get("rating"),
+                Json(item),
+            ]
+        )
+    if not values:
+        return {"inserted": 0, "updated": 0, "skipped": skipped}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT news_code FROM news_items"
+            " WHERE subject_type = %s AND subject_code = %s AND news_code = ANY(%s)",
+            (subject_type, subject_code, [v[0] for v in values]),
+        )
+        existing = {row[0] for row in cur.fetchall()}
+        execute_values(
+            cur,
+            _UPSERT_NEWS_SQL,
+            values,
+            template="(" + ", ".join(["%s"] * len(_NEWS_COLS)) + ", now())",
+        )
+    conn.commit()
+    inserted = sum(1 for v in values if v[0] not in existing)
+    return {"inserted": inserted, "updated": len(values) - inserted, "skipped": skipped}

@@ -1,4 +1,5 @@
-"""妙想（MX）HTTP 客户端：mx-data 查询接口的薄封装（issue #23/T1）。
+"""妙想（MX）HTTP 客户端：mx-data 查询 / mx-search 资讯搜索接口的薄封装
+（issue #23/T1、issue #24/T2）。
 
 只用标准库（urllib.request），不加新依赖。api_key 缺省读环境变量 MX_APIKEY，
 缺失抛 MXError（懒加载报错先例见 adapters/akshare_adapter.py 的 _ak()）。
@@ -12,6 +13,7 @@ import urllib.error
 import urllib.request
 
 ENDPOINT = "https://mkapi2.dfcfs.com/finskillshub/api/claw/query"
+SEARCH_ENDPOINT = "https://mkapi2.dfcfs.com/finskillshub/api/claw/news-search"
 TIMEOUT_SEC = 30
 
 
@@ -20,7 +22,7 @@ class MXError(RuntimeError):
 
 
 class MxClient:
-    """mx-data 查询客户端：query(tool_query) → 解析后的响应 body dict。"""
+    """妙想客户端：query(tool_query) / search(query) → 解析后的响应 body dict。"""
 
     def __init__(self, api_key: str | None = None) -> None:
         key = api_key if api_key is not None else os.environ.get("MX_APIKEY")
@@ -31,9 +33,17 @@ class MxClient:
         self._api_key = key
 
     def query(self, tool_query: str) -> dict:
-        body = json.dumps({"toolQuery": tool_query}).encode("utf-8")
+        """mx-data 查询：body {"toolQuery": ...}。"""
+        return self._post(ENDPOINT, {"toolQuery": tool_query})
+
+    def search(self, query: str) -> dict:
+        """mx-search 资讯搜索：body {"query": ...}，错误语义同 query。"""
+        return self._post(SEARCH_ENDPOINT, {"query": query})
+
+    def _post(self, url: str, payload: dict) -> dict:
+        body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            ENDPOINT,
+            url,
             data=body,
             headers={
                 "apikey": self._api_key,

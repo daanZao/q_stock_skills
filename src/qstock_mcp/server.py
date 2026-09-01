@@ -124,6 +124,24 @@ def mx_query(tool_query: str) -> dict:
 
 
 @mcp.tool()
+def mx_search(
+    query: str, subject_type: str = "market", subject_code: str = "_market"
+) -> dict:
+    """妙想 mx-search 资讯搜索并落库（proxy 能力面）：搜索新闻/公告/研报等资讯，按 news_code 去重后写入 news_items 表（业务键 (news_code, subject_type, subject_code)，重复调用幂等 upsert，报告 inserted/updated/skipped 计数）。
+
+    需要环境变量 MX_APIKEY 与 PG_DSN，未配置返回 status:"error" 与明确原因。
+    subject 缺省大盘级（market/_market）；个股资讯传 subject_type="stock" +
+    subject_code=6 位代码，同一资讯可挂多个 subject。本地每日配额独立于
+    mx_query：默认上限 20 次/日（MX_DAILY_LIMIT 通用覆盖，
+    MX_DAILY_LIMIT_MX_SEARCH 单 skill 覆盖），触顶不调上游；每次响应回显
+    quota:{skill,used,limit}；上游业务码非 0 走统一 error 契约，绝不伪造数据。
+    """
+    return tools_mx.mx_search(
+        query, subject_type=subject_type, subject_code=subject_code
+    )
+
+
+@mcp.tool()
 def save_conclusion(
     subject_type: str,
     subject_code: str,

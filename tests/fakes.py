@@ -402,20 +402,91 @@ MX_BODY = {
 }
 
 
+# ---------------------------------------------------------------- 妙想 mx-search 资讯搜索（issue #24/T2）
+
+# 形状取自 .scratch/mx-skills/live/resp_weichai.json（外层实测留存包装不在内），
+# 内层条目裁剪为 4 条：一条可选字段全缺的 NEWS、一条带 PDF jumpUrl 的 NOTICE、
+# 一条带可选字段的 WECHAT、一条重复 code（实测单次响应内确有重复，供去重测试）。
+MX_SEARCH_ITEMS = [
+    {
+        "code": "NW202608283858550632_1",
+        "title": "从叙事走向兑现：AIDC浪潮下潍柴动力数据中心发电产品销量已超去年全年",
+        "content": "潍柴动力电力能源业务正大步迈入业绩兑现周期。",
+        "date": "2026-08-28 19:22:00",
+        "informationType": "NEWS",
+        # source/jumpUrl/author/insName/rating 全缺：可选字段缺失路径
+    },
+    {
+        "code": "AN202608311828758731",
+        "title": "潍柴动力:2026年8月28日投资者关系活动记录表",
+        "content": "潍柴动力股份有限公司投资者关系活动记录表",
+        "date": "2026-08-31 09:18:09",
+        "informationType": "NOTICE",
+        "jumpUrl": "https://pdf.dfcfw.com/pdf/H2_AN202608311828758731_1.PDF",
+    },
+    {
+        "code": "WCYQIN2026082817072776999521_2",
+        "title": "潍柴动力2026年上半年实现净利77亿元创同期历史新高",
+        "content": "新能源从储备走向放量，双轮驱动效应持续强化。",
+        "date": "2026-08-28 17:04:00",
+        "informationType": "WECHAT",
+        "source": "每日经济新闻",
+        "jumpUrl": "http://mp.weixin.qq.com/s?__biz=fake",
+        "author": "每经记者",
+    },
+    {
+        # 与第一条同 code（响应内重复条目），内容略异：去重保留首次出现
+        "code": "NW202608283858550632_1",
+        "title": "重复条目应被去重",
+        "content": "重复",
+        "date": "2026-08-28 19:22:00",
+        "informationType": "NEWS",
+    },
+]
+
+MX_SEARCH_BODY = {
+    "success": True,
+    "status": 0,
+    "code": 0,
+    "message": "ok",
+    "data": {
+        "requestId": None,
+        "message": "OK",
+        "status": 0,
+        "code": 0,
+        "data": {
+            "protocolType": "SEARCH_NEWS",
+            "llmSearchResponse": {"data": MX_SEARCH_ITEMS, "code": 0, "status": 0},
+        },
+    },
+    "requestId": "fake-request-id",
+}
+
+
 class FakeMxClient:
     """记录调用、按脚本返回 body 或抛 MXError 的 fake MX 客户端。
 
     body 为 None 时返回 MX_BODY；error 非 None 时调用即抛（模拟 key 缺失/
-    传输错误/非法 JSON 等 MXError 路径）。
+    传输错误/非法 JSON 等 MXError 路径）。search_body/search_error 与
+    search_calls 同理，驱动 mx-search（issue #24/T2）。
     """
 
-    def __init__(self, *, body=None, error=None):
+    def __init__(self, *, body=None, error=None, search_body=None, search_error=None):
         self._body = MX_BODY if body is None else body
         self._error = error
+        self._search_body = MX_SEARCH_BODY if search_body is None else search_body
+        self._search_error = search_error
         self.calls = []
+        self.search_calls = []
 
     def query(self, tool_query):
         self.calls.append(tool_query)
         if self._error is not None:
             raise self._error
         return self._body
+
+    def search(self, query):
+        self.search_calls.append(query)
+        if self._search_error is not None:
+            raise self._search_error
+        return self._search_body
