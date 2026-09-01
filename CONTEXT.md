@@ -1,6 +1,6 @@
 # q_stock_skills
 
-面向通用 AI agent 的证券数据与分析能力项目的领域语言。本文件只是词汇表，不记录实现细节与设计决策。
+面向通用 AI agent 的证券数据与分析能力项目的领域语言。本文件只是词汇表，不记录实现细节与设计决策——结构与入口在 `docs/knowledge-graph.md`，"为什么"在 `docs/adr/`。
 
 ## Language
 
