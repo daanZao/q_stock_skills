@@ -9,6 +9,7 @@ FakeSnapshotAdapter 记录调用次数、按脚本成败。
 from datetime import datetime, timedelta
 
 from qstock_mcp.adapters import FetchError
+from qstock_mcp.mx_client import MXError
 
 
 def weekday_rows(start: str, end: str, close: float = 10.0) -> list[dict]:
@@ -369,3 +370,52 @@ class FakeInitAdapter:
             if self._daily_rows is not None
             else weekday_rows(start, end)
         )
+
+
+# ---------------------------------------------------------------- 妙想 mx-data 透传（issue #23/T1）
+
+# 形状参考 .scratch/mx-skills/live/mxdata_profit_2024q1_v1.json 的内层 response
+#（外层 tag/query/http_status/elapsed_sec 为实测留存包装，不在 fake 内）
+MX_BODY = {
+    "success": True,
+    "status": 0,
+    "code": 0,
+    "message": "ok",
+    "data": {
+        "requestId": None,
+        "message": "OK",
+        "code": 0,
+        "data": {
+            "protocolType": "SEARCH_DATA",
+            "searchDataResultDTO": {
+                "dataTableDTOList": [
+                    {
+                        "code": "000338.SZ",
+                        "entityName": "2024一季报",
+                        "table": {"headName": ["潍柴动力(000338.SZ)"]},
+                    }
+                ]
+            },
+        },
+    },
+    "requestId": "fake-request-id",
+}
+
+
+class FakeMxClient:
+    """记录调用、按脚本返回 body 或抛 MXError 的 fake MX 客户端。
+
+    body 为 None 时返回 MX_BODY；error 非 None 时调用即抛（模拟 key 缺失/
+    传输错误/非法 JSON 等 MXError 路径）。
+    """
+
+    def __init__(self, *, body=None, error=None):
+        self._body = MX_BODY if body is None else body
+        self._error = error
+        self.calls = []
+
+    def query(self, tool_query):
+        self.calls.append(tool_query)
+        if self._error is not None:
+            raise self._error
+        return self._body

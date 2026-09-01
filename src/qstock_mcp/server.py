@@ -14,6 +14,7 @@ from . import (
     tools_daily,
     tools_fundamentals,
     tools_init,
+    tools_mx,
     tools_snapshot,
 )
 
@@ -106,6 +107,20 @@ def get_fundamentals(stock_code: str) -> dict:
     与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
     """
     return tools_fundamentals.get_fundamentals(stock_code)
+
+
+@mcp.tool()
+def mx_query(tool_query: str) -> dict:
+    """妙想 mx-data 透传（proxy 能力面）：把自然语言问句原样发给 mx-data，返回上游原始 JSON（data 为完整响应 body），不规格化、不落库、不进 fallback 链。
+
+    需要环境变量 MX_APIKEY（妙想开放平台 apikey），未配置返回 status:"error" 与
+    明确原因。本地每日配额：默认上限 20 次/日（MX_DAILY_LIMIT 通用覆盖，
+    MX_DAILY_LIMIT_MX_DATA 单 skill 覆盖），按日自动重置，持久化于
+    ~/.qstock-mcp/quota.json（MX_QUOTA_FILE 覆盖）；触顶时不调上游直接报错。
+    每次响应回显 quota:{skill,used,limit}；上游业务码非 0（100 参数错误 /
+    113 配额上限 / 114 密钥无效）走统一 error 契约，绝不伪造数据。
+    """
+    return tools_mx.mx_query(tool_query)
 
 
 @mcp.tool()
