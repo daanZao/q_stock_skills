@@ -1,5 +1,6 @@
 """proxy 能力面核心：mx_query 妙想 mx-data 透传（issue #23/T1）、
-mx_search 妙想 mx-search 资讯搜索落库（issue #24/T2）。
+mx_search 妙想 mx-search 资讯搜索落库（issue #24/T2）、
+query_news 库内资讯查询（issue #25/T3）。
 
 工具函数层（server.py）只做薄包装；本层是测试接缝：注入 fake client 与
 临时配额 ledger（见 tests/）。透传契约：原样回传上游响应 body（data 为
@@ -7,17 +8,18 @@ mx_search 妙想 mx-search 资讯搜索落库（issue #24/T2）。
 mx_search 例外：搜索成功即按业务键幂等落库 news_items（默认挂 market/_market
 主体）。输出自描述 JSON（quota 回显当日用量）。配额触顶不调上游；上游
 业务码 code!=0 与 MXError 均走统一 error 契约，绝不伪造数据；任何路径
-不抛异常。
+不抛异常。query_news 为纯读：不调上游、不计配额，只读 news_items。
 """
 
 import logging
 from typing import Any, Callable, Protocol
 
 from .db import connect
+from .dates import normalize_date
 from .mx_client import MXError, MxClient
 from .mx_quota import MxQuota
 from .output import error as _error
-from .repository import upsert_news_items
+from .repository import select_news_items, upsert_news_items
 
 log = logging.getLogger(__name__)
 
@@ -175,4 +177,54 @@ def mx_search(
         "skipped": report["skipped"],
         "items": items,
         "quota": snap,
+    }
+
+
+def query_news(
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """库内资讯查询（issue #25/T3）：按 subject + 发布时间范围过滤，
+    发布时间倒序、可限量；纯读不调上游、不计配额；空结果 rows:0 非错误。"""
+    tool = "query_news"
+    params = {
+        "subject_type": subject_type,
+        "subject_code": subject_code,
+        "start": start,
+        "end": end,
+        "limit": limit,
+    }
+    if start is not None:
+        try:
+            start = normalize_date(start)
+        except ValueError as e:
+            return _error(tool, params, str(e))
+    if end is not None:
+        try:
+            end = normalize_date(end)
+        except ValueError as e:
+            return _error(tool, params, str(e))
+    if start is not None and end is not None and start > end:
+        return _error(tool, params, f"start({start}) 晚于 end({end})")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return _error(tool, params, f"limit 必须为正整数: {limit!r}")
+    conn, conn_err = connect()
+    if conn_err:
+        return _error(tool, params, conn_err)
+    try:
+        items = select_news_items(conn, subject_type, subject_code, start, end, limit)
+    except Exception as e:  # noqa: BLE001 - 工具层任何路径不抛异常
+        log.exception("query_news 查询失败")
+        return _error(tool, params, f"查询失败：{e}")
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "tool": tool,
+        "params": params,
+        "rows": len(items),
+        "items": items,
     }

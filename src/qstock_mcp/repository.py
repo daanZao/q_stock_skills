@@ -23,6 +23,7 @@ from .adapters.base import (
     STRONG_FIELDS,
     ZT_POOL_FIELDS,
 )
+from .dates import add_days
 
 _UPSERT_SQL = """
 INSERT INTO stock_daily (stock_code, trade_date, {cols}, adj, source, updated_at)
@@ -514,3 +515,55 @@ def upsert_news_items(
     conn.commit()
     inserted = sum(1 for v in values if v[0] not in existing)
     return {"inserted": inserted, "updated": len(values) - inserted, "skipped": skipped}
+
+
+# 查询不返回内部列（id/fetched_at）与 raw 原文（select_conclusions 不返回
+# 内部列的同先例）；publish_time 序列化为 ISO 字符串，保证输出 JSON 安全
+_NEWS_QUERY_COLS = tuple(c for c in _NEWS_COLS if c != "raw")
+
+
+def _day_start_plus8(yyyymmdd: str) -> str:
+    """yyyymmdd → 东八区当日 00:00 的 timestamptz 字面量（与落库时区一致）。"""
+    return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]} 00:00:00+08"
+
+
+def select_news_items(
+    conn,
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按 subject + 发布时间范围查资讯：发布时间倒序（news_code 决胜），可限量。
+
+    start/end 为 yyyymmdd 闭区间（按东八区整日计：start 含当日 00:00 起，
+    end 含当日 23:59 止）；subject 与时间范围全缺省返回全表（建议带 limit）。
+    """
+    where: list[str] = []
+    args: list = []
+    if subject_type is not None:
+        where.append("subject_type = %s")
+        args.append(subject_type)
+    if subject_code is not None:
+        where.append("subject_code = %s")
+        args.append(subject_code)
+    if start is not None:
+        where.append("publish_time >= %s::timestamptz")
+        args.append(_day_start_plus8(start))
+    if end is not None:
+        where.append("publish_time < %s::timestamptz")
+        args.append(_day_start_plus8(add_days(end, 1)))
+    sql = f"SELECT {', '.join(_NEWS_QUERY_COLS)} FROM news_items"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY publish_time DESC, news_code"
+    if limit is not None:
+        sql += " LIMIT %s"
+        args.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        rows = [dict(zip(_NEWS_QUERY_COLS, row)) for row in cur.fetchall()]
+    for row in rows:
+        row["publish_time"] = row["publish_time"].isoformat()
+    return rows

@@ -142,6 +142,30 @@ def mx_search(
 
 
 @mcp.tool()
+def query_news(
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """库内资讯查询（统一查询能力面）：按 subject + 发布时间范围读 news_items 已沉淀资讯，按资讯发布时间倒序返回，limit 限量（默认 20）。
+
+    纯读：不调上游、不计配额。subject_type/subject_code 缺省不过滤（全 subject）；
+    个股传 subject_type="stock" + subject_code=6 位代码，大盘级为 market/_market。
+    start/end 为闭区间（yyyymmdd 或 yyyy-mm-dd，按东八区整日计），缺省不限。
+    空结果返回 rows:0（非错误）。
+    """
+    return tools_mx.query_news(
+        subject_type=subject_type,
+        subject_code=subject_code,
+        start=start,
+        end=end,
+        limit=limit,
+    )
+
+
+@mcp.tool()
 def save_conclusion(
     subject_type: str,
     subject_code: str,
