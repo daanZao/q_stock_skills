@@ -5,7 +5,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 # 每日复盘
 
-收盘后（午市或全天）基于当日盘面数据做的市场级总结（术语见 `CONTEXT.md`）。本 skill 为每日复盘编排的 agent skill，**轻脚本、重编排**：编排逻辑在本文件，agent 自身即 LLM，复盘结论与 markdown 报告由 agent 手写生成，不调外部 LLM API。数据一律来自 MCP 工具（`query_board_data`、`query_snapshot`、`fetch_board_snapshot`、`fetch_market_snapshot`），不直接访问数据库。结论经 `save_conclusion` 落库（通用结论表，见 ADR 0003 `docs/adr/0003-generic-conclusions-table.md`）；markdown 报告不走 MCP，由本 skill 落盘，路径记入结论 payload。
+收盘后（午市或全天）基于当日盘面数据做的市场级总结（术语见 `CONTEXT.md`）。本 skill 为每日复盘编排的 agent skill，**轻脚本、重编排**：编排逻辑在本文件，agent 自身即 LLM，复盘结论与 markdown 报告由 agent 手写生成，不调外部 LLM API。数据一律来自 MCP 工具（盘面/快照经 `query_board_data`、`query_snapshot`、`fetch_board_snapshot`、`fetch_market_snapshot`，资讯经 `mx_search`、`query_news`），不直接访问数据库。结论经 `save_conclusion` 落库（通用结论表，见 ADR 0003 `docs/adr/0003-generic-conclusions-table.md`）；markdown 报告不走 MCP，由本 skill 落盘，路径记入结论 payload。
 
 ## 触发与模式
 
@@ -22,8 +22,9 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
    - 可选：`lhb_basic` 经 `query_board_data("lhb_basic", trade_date)`。
    - 核心缺失先补抓后重查：`fetch_board_snapshot(trade_date, sections=<缺失 section 逗号分隔>)`（sections 取值 `indices,boards,zt_pool,strong_stocks,lhb`）、`fetch_market_snapshot(trade_date)`；重查仍缺则列入 `data_gaps`，结论降级。
    - `lhb_basic` 为 0 不阻断：close 模式仅记 warning（龙虎榜盘后发布，可能尚未更新），midday 模式属预期内。
+   - 资讯搜索落库（可选）：就绪检查后 `mx_search(query=<资讯问句>)` 搜近期资讯并落库 `news_items`——大盘级用缺省 subject（`market`/`_market`，如"今日A股市场要闻"），焦点个股传 `subject_type="stock"` + `subject_code=<6 位代码>`。mx-search 配额与 mx-data **独立计数**（默认各 20 次/日，响应回显 `quota:{skill,used,limit}`），单次返回上限约 15 条（响应内重复条目落库前已按 news_code 去重）；本地配额触顶（`status:"error"`，不调上游）、上游自身日限（code=113）或 `MX_APIKEY`/`PG_DSN` 未配置时跳过本步，资讯缺失记入 `data_gaps`，不阻塞复盘。
    - **核心 section 全部缺失且补抓失败时中止复盘**，向用户明确报告缺失范围与失败原因，不得基于残缺数据生成完整复盘结论。
-3. **读数**：`query_board_data` 取各核心表当日全部行；`query_snapshot` 取当日全市场行（广度与成交聚合用）；lhb 各表有数据则一并取（`lhb_basic` / `lhb_stock_statistic` / `lhb_yyb_capital` / `lhb_yyb_most`）。
+3. **读数**：`query_board_data` 取各核心表当日全部行；`query_snapshot` 取当日全市场行（广度与成交聚合用）；lhb 各表有数据则一并取（`lhb_basic` / `lhb_stock_statistic` / `lhb_yyb_capital` / `lhb_yyb_most`）。近期资讯经 `query_news` 读库（按资讯发布时间倒序）：大盘级 `query_news(subject_type="market", subject_code="_market", start=<近 7 日起>, limit=10)`，焦点个股按 `subject_type="stock"` + `subject_code` 同法读取；`rows:0`（库内无资讯）属正常，非错误。
 4. **生成两份产物**：agent 手写结构化结论 JSON 与 markdown 复盘报告（内容框架与报告格式见下）。所有数字必须来自步骤 3 的查询结果，绝不编造。
 5. **报告落盘**：写入 `skills/daily-review/reports/daily_review_<yyyymmdd>_<mode>.md`（目录不存在则创建）。
 6. **结论落库**：`save_conclusion(subject_type="market", subject_code="_market", trade_date=<yyyymmdd>, conclusion_type="daily_review.<mode>", payload=<结论 JSON>)`；payload 必须含 `report_path`（报告相对仓库根的路径）。**返回 `status != "ok"` 即中止复盘**，向用户报告失败原因与已生成产物的位置——不产生"分析了但没存下"的假象，落库成功才算复盘完成。
@@ -49,9 +50,17 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），建议�
 - `risk_alerts`（风险提示）
 - `data_gaps`（缺失维度列表，无缺失为空数组）
 
+## 资讯引用约定
+
+报告引用资讯为观点佐证（如板块轮动引用相关政策新闻、风险提示引用减持公告），散布在各维度章节，不单独设资讯章节：
+
+- 每条引用注明**标题 + 发布时间 + 来源**；`source` 可空，缺失时标"来源未标注"。
+- `url` 可空（研报等条目无原文链接）：有链接附链接，无链接以"标题 + 来源 + 时间"为标识，不虚构链接。
+- 资讯只作佐证，不构成数字来源。
+
 ## 报告格式
 
-固定章节：标题 `## <yyyymmdd> 每日复盘（收盘）` / `## <yyyymmdd> 每日复盘（午市）`（含日期与时点）→ 总体立场一行 → 一、指数表现 → 二、市场广度与成交 → 三、板块轮动 → 四、涨停/强势股结构 → 五、龙虎榜资金动向 → 六、风险提示 → 数据缺口（逐条列出缺失维度及其对结论的影响）→ 末尾注明数据来源表与快照时点。
+固定章节：标题 `## <yyyymmdd> 每日复盘（收盘）` / `## <yyyymmdd> 每日复盘（午市）`（含日期与时点）→ 总体立场一行 → 一、指数表现 → 二、市场广度与成交 → 三、板块轮动 → 四、涨停/强势股结构 → 五、龙虎榜资金动向 → 六、风险提示 → 数据缺口（逐条列出缺失维度及其对结论的影响）→ 末尾注明数据来源表与快照时点。引用资讯按上节约定随文标注。
 
 ## 数据缺失红线
 
