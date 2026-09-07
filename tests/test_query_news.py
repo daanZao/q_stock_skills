@@ -2,7 +2,7 @@
 
 契约：按 subject_type/subject_code + 发布时间范围（yyyymmdd 闭区间，东八区
 整日）过滤 news_items，按发布时间倒序（news_code 决胜）、limit 限量；纯读
-不调上游、不计配额；空结果 rows:0 非错误；参数错误与 PG 不可达走统一
+不调上游、不计配额；空结果 count:0 非错误；参数错误与 PG 不可达走统一
 error 契约，任何路径不抛异常。PG 不可达自动 skip（见 conftest.pg_test）。
 """
 
@@ -107,8 +107,8 @@ def test_query_roundtrip_ok(pg_test):
         "end": None,
         "limit": 20,
     }
-    assert result["rows"] == 3
-    assert [i["news_code"] for i in result["items"]] == [
+    assert result["count"] == 3
+    assert [i["news_code"] for i in result["rows"]] == [
         "AN202608311828758731",
         "NW202608283858550632_1",
         "WCYQIN2026082817072776999521_2",
@@ -120,16 +120,16 @@ def test_query_with_time_range_and_limit(pg_test):
     _seed(pg_test)
     result = query_news(start="2026-08-28", end="2026-08-28", limit=1)
     assert result["status"] == "ok"
-    assert result["rows"] == 1
-    assert result["items"][0]["news_code"] == "NW202608283858550632_1"
+    assert result["count"] == 1
+    assert result["rows"][0]["news_code"] == "NW202608283858550632_1"
 
 
-def test_query_empty_result_is_zero_rows_not_error(pg_test):
+def test_query_empty_result_is_zero_count_not_error(pg_test):
     _seed(pg_test)
     result = query_news(subject_type="stock", subject_code="600519")
     assert result["status"] == "ok"
-    assert result["rows"] == 0
-    assert result["items"] == []
+    assert result["count"] == 0
+    assert result["rows"] == []
 
 
 def test_query_rejects_bad_date(pg_test):

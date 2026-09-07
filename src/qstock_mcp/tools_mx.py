@@ -171,11 +171,11 @@ def mx_search(
         "status": "ok",
         "tool": tool,
         "params": params,
-        "rows": len(items),
+        "count": len(items),
         "inserted": report["inserted"],
         "updated": report["updated"],
         "skipped": report["skipped"],
-        "items": items,
+        "rows": items,
         "quota": snap,
     }
 
@@ -188,7 +188,7 @@ def query_news(
     limit: int = 20,
 ) -> dict:
     """库内资讯查询（issue #25/T3）：按 subject + 发布时间范围过滤，
-    发布时间倒序、可限量；纯读不调上游、不计配额；空结果 rows:0 非错误。"""
+    发布时间倒序、可限量；纯读不调上游、不计配额；空结果 count:0 非错误。"""
     tool = "query_news"
     params = {
         "subject_type": subject_type,
@@ -225,6 +225,6 @@ def query_news(
         "status": "ok",
         "tool": tool,
         "params": params,
-        "rows": len(items),
-        "items": items,
+        "count": len(items),
+        "rows": items,
     }

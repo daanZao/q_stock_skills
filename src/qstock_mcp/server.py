@@ -154,7 +154,7 @@ def query_news(
     纯读：不调上游、不计配额。subject_type/subject_code 缺省不过滤（全 subject）；
     个股传 subject_type="stock" + subject_code=6 位代码，大盘级为 market/_market。
     start/end 为闭区间（yyyymmdd 或 yyyy-mm-dd，按东八区整日计），缺省不限。
-    空结果返回 rows:0（非错误）。
+    空结果返回 count:0（非错误）。
     """
     return tools_mx.query_news(
         subject_type=subject_type,

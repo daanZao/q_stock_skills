@@ -179,11 +179,11 @@ def test_search_success_persists_deduped_items(pg_test, quota):
         "subject_type": "market",
         "subject_code": "_market",
     }
-    assert result["rows"] == 3  # 4 条响应条目去重后 3 条
+    assert result["count"] == 3  # 4 条响应条目去重后 3 条
     assert result["inserted"] == 3
     assert result["updated"] == 0
     assert result["skipped"] == 0
-    assert [i["code"] for i in result["items"]] == [
+    assert [i["code"] for i in result["rows"]] == [
         "NW202608283858550632_1",
         "AN202608311828758731",
         "WCYQIN2026082817072776999521_2",
@@ -231,7 +231,7 @@ def test_search_upstream_business_error_code(quota):
     assert result["status"] == "error"
     assert "113" in result["error"]
     assert result["upstream_code"] == 113
-    assert "items" not in result  # 不伪造数据
+    assert "rows" not in result  # 不伪造数据
     assert result["quota"] == {"skill": "mx-search", "used": 1, "limit": 20}
     assert client.search_calls == ["问句"]
 
@@ -250,7 +250,7 @@ def test_search_missing_api_key_returns_clear_error(tmp_path, monkeypatch):
     result = mx_search("问句", quota=MxQuota(tmp_path / "quota.json"))
     assert result["status"] == "error"
     assert "MX_APIKEY" in result["error"]
-    assert "items" not in result
+    assert "rows" not in result
 
 
 def test_search_exhausted_quota_skips_upstream(tmp_path):
@@ -295,5 +295,5 @@ def test_search_persist_failure_returns_error_without_raising(quota, monkeypatch
     )
     assert result["status"] == "error"
     assert "落库失败" in result["error"]
-    assert "items" not in result  # 不伪造数据
+    assert "rows" not in result  # 不伪造数据
     assert result["quota"] == {"skill": "mx-search", "used": 1, "limit": 20}
