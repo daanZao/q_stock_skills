@@ -24,6 +24,21 @@ def _reachable(dsn: str) -> bool:
         return False
 
 
+def reset_test_db(dsn: str) -> None:
+    """清空测试库：先 terminate 本库残留会话（上个用例断言失败泄漏的连接
+    持锁时 DROP SCHEMA 会被永久阻塞，issue #30），再重建 public schema。"""
+    conn = psycopg2.connect(dsn)
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+            " WHERE datname = %s AND pid <> pg_backend_pid()",
+            (conn.info.dbname,),
+        )
+        cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    conn.close()
+
+
 @pytest.fixture
 def pg_test(monkeypatch):
     """提供一个干净的测试库 DSN 并注入 PG_DSN；库内所有表在测试前清空。"""
@@ -37,11 +52,7 @@ def pg_test(monkeypatch):
             cur.execute(f'CREATE DATABASE "{TEST_DB}"')
     conn.close()
 
-    conn = psycopg2.connect(TEST_DSN)
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    with conn.cursor() as cur:
-        cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-    conn.close()
+    reset_test_db(TEST_DSN)
 
     monkeypatch.setenv("PG_DSN", TEST_DSN)
     return TEST_DSN
