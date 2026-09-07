@@ -13,6 +13,8 @@ from fakes import FakeAdapter
 
 ROWS = [{"trade_date": "20240102", "close": 10.0}]
 
+NO_BACKOFF = lambda _: None  # noqa: E731 - 契约测试不等真实退避时间
+
 
 def _fake(name, **kwargs):
     kwargs.setdefault("rows", ROWS)
@@ -31,7 +33,9 @@ def test_first_source_succeeds_later_sources_untouched():
 def test_fallback_order_efinance_then_akshare():
     ef = _fake("efinance", fail_times=99)
     ak, bs = _fake("akshare"), _fake("baostock")
-    result = fetch_with_fallback([ef, ak, bs], "600519", "20240101", "20240131")
+    result = fetch_with_fallback(
+        [ef, ak, bs], "600519", "20240101", "20240131", backoff=NO_BACKOFF
+    )
     assert result["source"] == "akshare"
     assert [a["source"] for a in result["attempted_sources"]] == ["efinance"]
     assert bs.calls == []
@@ -39,7 +43,9 @@ def test_fallback_order_efinance_then_akshare():
 
 def test_each_source_retried_at_most_twice():
     ef = _fake("efinance", fail_times=2)  # 第 3 次尝试成功
-    result = fetch_with_fallback([ef], "600519", "20240101", "20240131")
+    result = fetch_with_fallback(
+        [ef], "600519", "20240101", "20240131", backoff=NO_BACKOFF
+    )
     assert result["source"] == "efinance"
     assert len(ef.calls) == 3
 
@@ -47,7 +53,9 @@ def test_each_source_retried_at_most_twice():
 def test_source_exhausted_after_two_retries():
     ef = _fake("efinance", fail_times=3)  # 3 次尝试全败 → 放弃该源
     ak = _fake("akshare")
-    result = fetch_with_fallback([ef, ak], "600519", "20240101", "20240131")
+    result = fetch_with_fallback(
+        [ef, ak], "600519", "20240101", "20240131", backoff=NO_BACKOFF
+    )
     assert len(ef.calls) == 3
     assert result["source"] == "akshare"
 
@@ -55,7 +63,9 @@ def test_source_exhausted_after_two_retries():
 def test_all_sources_failed_reports_attempted_sources():
     adapters = [_fake(n, fail_times=99) for n in ("efinance", "akshare", "baostock")]
     with pytest.raises(AllSourcesFailed) as exc_info:
-        fetch_with_fallback(adapters, "600519", "20240101", "20240131")
+        fetch_with_fallback(
+            adapters, "600519", "20240101", "20240131", backoff=NO_BACKOFF
+        )
     attempted = exc_info.value.attempted
     assert [a["source"] for a in attempted] == ["efinance", "akshare", "baostock"]
     assert all(a["attempts"] == 3 and a["error"] for a in attempted)
@@ -68,3 +78,42 @@ def test_empty_rows_is_success_not_fallback():
     assert result["source"] == "efinance"
     assert result["rows"] == []
     assert ak.calls == []
+
+
+# --- 退避（issue #13）：同一源连续重试之间有可注入的退避间隔 ---
+
+
+def test_backoff_called_between_retries_with_retry_index():
+    ef = _fake("efinance", fail_times=2)  # 第 3 次尝试成功 → 重试 2 次
+    calls: list[int] = []
+    result = fetch_with_fallback(
+        [ef], "600519", "20240101", "20240131", backoff=calls.append
+    )
+    assert result["source"] == "efinance"
+    assert calls == [0, 1]  # 第 1 次重试前退避档位 0，第 2 次前档位 1
+
+
+def test_backoff_not_called_when_first_attempt_succeeds():
+    ef = _fake("efinance")
+    calls: list[int] = []
+    fetch_with_fallback([ef], "600519", "20240101", "20240131", backoff=calls.append)
+    assert calls == []
+
+
+def test_backoff_called_per_source_independently():
+    ef = _fake("efinance", fail_times=99)  # 3 次全败
+    ak = _fake("akshare")
+    calls: list[int] = []
+    result = fetch_with_fallback(
+        [ef, ak], "600519", "20240101", "20240131", backoff=calls.append
+    )
+    assert result["source"] == "akshare"
+    assert calls == [0, 1]  # 只有 efinance 的重试触发退避
+
+
+def test_default_backoff_is_exponential_real_sleep(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr("qstock_mcp.fetch_chain.time.sleep", slept.append)
+    ef = _fake("efinance", fail_times=2)
+    fetch_with_fallback([ef], "600519", "20240101", "20240131")
+    assert slept == [1.0, 2.0]

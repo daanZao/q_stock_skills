@@ -6,8 +6,12 @@ fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数与最后错误）。
+
+同一源连续重试之间有退避间隔（issue #13）：默认指数退避 1s/2s，可注入
+backoff 可调用对象（接收重试档位 0, 1, ...）以便测试不等真实时间。
 """
 
+import time
 from typing import Callable, Sequence
 
 from .adapters.base import (
@@ -20,6 +24,12 @@ from .adapters.base import (
 )
 
 DEFAULT_MAX_RETRIES = 2
+DEFAULT_BACKOFF_BASE = 1.0
+
+
+def _exponential_backoff(retry: int) -> None:
+    """默认退避：第 retry 档睡 DEFAULT_BACKOFF_BASE * 2**retry 秒（1s, 2s）。"""
+    time.sleep(DEFAULT_BACKOFF_BASE * 2**retry)
 
 
 class AllSourcesFailed(RuntimeError):
@@ -31,12 +41,14 @@ class AllSourcesFailed(RuntimeError):
         super().__init__(f"全部数据源失败（{summary}）")
 
 
-def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
+def _with_fallback(adapters, call: Callable, max_retries: int, backoff: Callable) -> dict:
     """按顺序尝试各数据源，成功返回 {result, source, attempted_sources}。"""
     attempted: list[dict] = []
     for adapter in adapters:
         error = None
-        for _ in range(max_retries + 1):
+        for retry in range(max_retries + 1):
+            if retry > 0:
+                backoff(retry - 1)
             try:
                 result = call(adapter)
                 return {
@@ -59,12 +71,14 @@ def fetch_with_fallback(
     end: str,
     adj: str = "qfq",
     max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff: Callable[[int], None] = _exponential_backoff,
 ) -> dict:
     """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。"""
     r = _with_fallback(
         adapters,
         lambda a: a.fetch_daily(stock_code, start, end, adj),
         max_retries,
+        backoff,
     )
     return {
         "rows": r["result"],
@@ -76,9 +90,10 @@ def fetch_with_fallback(
 def fetch_snapshot_with_fallback(
     adapters: Sequence[SnapshotAdapter],
     max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff: Callable[[int], None] = _exponential_backoff,
 ) -> dict:
     """单次全市场快照，成功返回 {trade_date, rows, source, attempted_sources}。"""
-    r = _with_fallback(adapters, lambda a: a.fetch_market_snapshot(), max_retries)
+    r = _with_fallback(adapters, lambda a: a.fetch_market_snapshot(), max_retries, backoff)
     return {
         "trade_date": r["result"]["trade_date"],
         "rows": r["result"]["rows"],
@@ -91,6 +106,7 @@ def fetch_fundamentals_with_fallback(
     adapters: Sequence[FundamentalsAdapter],
     stock_code: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff: Callable[[int], None] = _exponential_backoff,
 ) -> dict:
     """基本面透传（issue #6），成功返回 {data, source, attempted_sources}。
 
@@ -101,6 +117,7 @@ def fetch_fundamentals_with_fallback(
         adapters,
         lambda a: a.fetch_fundamentals(stock_code),
         max_retries,
+        backoff,
     )
     return {
         "data": r["result"],
@@ -114,6 +131,7 @@ def fetch_section_with_fallback(
     section: str,
     trade_date: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff: Callable[[int], None] = _exponential_backoff,
 ) -> dict:
     """单 section 盘面抓取（issue #5），成功返回 {data, source, attempted_sources}。
 
@@ -126,6 +144,7 @@ def fetch_section_with_fallback(
         adapters,
         lambda a: getattr(a, f"fetch_{section}")(trade_date),
         max_retries,
+        backoff,
     )
     return {
         "data": r["result"],
@@ -137,9 +156,10 @@ def fetch_section_with_fallback(
 def fetch_stock_list_with_fallback(
     adapters: Sequence[ListAdapter],
     max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff: Callable[[int], None] = _exponential_backoff,
 ) -> dict:
     """股票清单抓取（issue #8），成功返回 {rows, source, attempted_sources}。"""
-    r = _with_fallback(adapters, lambda a: a.fetch_stock_list(), max_retries)
+    r = _with_fallback(adapters, lambda a: a.fetch_stock_list(), max_retries, backoff)
     return {
         "rows": r["result"],
         "source": r["source"],
@@ -153,12 +173,14 @@ def fetch_index_daily_with_fallback(
     start: str,
     end: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff: Callable[[int], None] = _exponential_backoff,
 ) -> dict:
     """指数日线抓取（issue #8），成功返回 {rows, source, attempted_sources}。"""
     r = _with_fallback(
         adapters,
         lambda a: a.fetch_index_daily(index_code, start, end),
         max_retries,
+        backoff,
     )
     return {
         "rows": r["result"],

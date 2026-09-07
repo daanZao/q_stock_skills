@@ -86,7 +86,7 @@ flowchart LR
 
 ### 编排与落库
 
-- **`fetch_chain.py`**：fallback 编排核心。每源最多重试 2 次（3 次尝试）；空结果视为成功（停牌/无交易日）不触发 fallback；全失败抛 `AllSourcesFailed` 携带 `attempted_sources`（每源尝试次数与错误）（`fetch_chain.py:22-52`）。只依赖适配器协议，不感知具体第三方库（`fetch_chain.py:1-9`）。
+- **`fetch_chain.py`**：fallback 编排核心。每源最多重试 2 次（3 次尝试），连续重试之间有退避间隔（默认指数退避 1s/2s，`backoff` 参数可注入以便测试不等真实时间）；空结果视为成功（停牌/无交易日）不触发 fallback；全失败抛 `AllSourcesFailed` 携带 `attempted_sources`（每源尝试次数与错误）（`fetch_chain.py:26-64`）。只依赖适配器协议，不感知具体第三方库（`fetch_chain.py:1-16`）。
 - **`gaps.py`**：头尾缺口规则——库内已有日期集合的最早/最晚之外才补抓，最多两段（`gaps.py:10-21`）。
 - **`repository.py`**：全部 upsert 按业务键幂等。`stock_daily` 键 `(stock_code, trade_date, adj)`、`market_snapshot` 键 `(trade_date, stock_code)`（`repository.py:26-36`、`repository.py:87-98`）；盘面表注册表 `BOARD_SECTION_TABLES`（section→表/日期列/业务键/列集）与 `BOARD_QUERY_TABLES`（可查询表白名单，表名列名只来自内部常量，不接外部输入）（`repository.py:236-251`、`repository.py:292-304`）；结论 upsert 用 CTE 预查业务键判定 inserted/updated（`repository.py:344-376`）。盘面表无 `source` 列（本项目 DDL 决策，`repository.py:233-235`）。资讯表 `news_items` 业务键 `(news_code, subject_type, subject_code)`（同一资讯可挂多主体），上游缺条目 id 时标题+发布时间复合兜底；`publish_time` 按东八区落 timestamptz；`select_news_items` 发布时间倒序 + 范围过滤 + limit，不返回内部列与 `raw`（`repository.py:411-431`、`repository.py:451-470`、`repository.py:522-569`）。
 
@@ -119,7 +119,7 @@ flowchart LR
 ## 关键流程
 
 - **查询自愈（头尾缺口）**：`query_daily`/`fetch_daily` → `resolve_range` 解析区间 → `select_dates` 取库内已有日期 → `head_tail_gaps` 算头尾分段（最多两段，中段缺口=停牌）→ 逐段 `fetch_with_fallback` → `upsert_daily` → `select_daily` 返回完整区间，自愈分段在输出 `healed`/`segments` 中报告（`tools_daily.py:67-99`、`gaps.py:10-21`）。
-- **fallback 与重试**：每种抓取（日线/快照/五 section/基本面/清单/指数日线）各有一个 `fetch_*_with_fallback`，共享同一 `_with_fallback` 内核：按链顺序尝试、每源 3 次尝试、空结果即成功、全失败抛 `AllSourcesFailed`（`fetch_chain.py:34-167`）。
+- **fallback 与重试**：每种抓取（日线/快照/五 section/基本面/清单/指数日线）各有一个 `fetch_*_with_fallback`，共享同一 `_with_fallback` 内核：按链顺序尝试、每源 3 次尝试（重试间有退避，默认 1s/2s 指数退避、可注入）、空结果即成功、全失败抛 `AllSourcesFailed`（`fetch_chain.py:44-185`）。
 - **section 级独立成败**：`fetch_board_snapshot` 与 `init_database` 同构——逐项独立 fallback、逐项成败进 `sections`/`parts`，仅全部失败才整体 `error`（`tools_board.py:108-122`、`tools_init.py:185-212`）。重试方式就是再调一次（幂等，ADR 0004）。
 - **结论 upsert**：业务键在 schema 层钉死；CTE 预查判定 `inserted/updated`；payload 不校验，结论类型（`daily_review.close`、`sepa.full` 等）的字段约定由各 skill 文档承载（ADR 0003）。
 - **mx 调用与资讯沉淀**：`mx_query`/`mx_search` 走 `_mx_exchange` 骨架——配额先检（触顶不调上游直接 error）→ 调上游 → 触达即记账 → 业务码判定（code!=0 走 error 契约）；`mx_search` 成功即按 news_code 去重并业务键 upsert `news_items`；`query_news` 纯读库（倒序 + limit），不经骨架、不计配额（`tools_mx.py:60-116`、`tools_mx.py:142-230`）。
@@ -135,4 +135,4 @@ flowchart LR
 - **加结论类型**：零 schema 变更（ADR 0003），只在对应 skill 文档约定 payload 字段并调用 `save_conclusion`。
 - **加 MCP 工具**：核心逻辑进 `tools_<面>.py`（可注入适配器、返回自描述 dict），`server.py` 只加薄包装；测试打核心层。
 - **改妙想接入/资讯**：边界在 ADR 0005——`tools_mx.py`（三工具与 `_mx_exchange` 骨架）→ `mx_client.py`/`mx_quota.py`（客户端与配额 ledger）→ `sql/011_news_items.sql` 与 `repository.py` 资讯段；测试 `tests/test_mx_tools.py`/`test_mx_search.py`/`test_query_news.py`/`test_mx_quota.py`（fake 注入 + 真实 PG 测试库，不触网）；消费方守则在 `skills/sepa/SKILL.md`、`skills/daily-review/SKILL.md`。
-- **改 fallback/重试策略**：`fetch_chain.py`（注意"最多 3 次"按尝试次数口径，`fetch_chain.py:122-124`）+ `tests/test_fetch_chain.py`。
+- **改 fallback/重试策略**：`fetch_chain.py`（注意"最多 3 次"按尝试次数口径，`fetch_chain.py:139-141`；退避经 `backoff` 参数注入，测试不睡真实时间）+ `tests/test_fetch_chain.py`。

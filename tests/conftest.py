@@ -24,6 +24,18 @@ def _reachable(dsn: str) -> bool:
         return False
 
 
+@pytest.fixture(autouse=True)
+def _no_real_backoff(monkeypatch):
+    """测试不等真实退避时间（issue #13）：fetch_chain 默认退避的 sleep 换成 no-op。
+
+    fetch_chain 是 `import time`，该 patch 落在共享的 time 模块上，测试期间
+    进程内所有 time.sleep 均为 no-op（src/ 无其他 sleep 用户）。不能改为 patch
+    `_exponential_backoff` 模块属性——公开函数的默认参数在 def 时已绑定原函数，
+    patch 属性不会生效。验证默认退避本身的测试在用例内重新 patch 同名属性。
+    """
+    monkeypatch.setattr("qstock_mcp.fetch_chain.time.sleep", lambda _: None)
+
+
 @pytest.fixture
 def pg_test(monkeypatch):
     """提供一个干净的测试库 DSN 并注入 PG_DSN；库内所有表在测试前清空。"""
