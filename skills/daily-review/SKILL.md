@@ -9,7 +9,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 ## 触发与模式
 
-- 由用户手动触发，无常驻调度。
+- 由用户手动触发；技能不内置调度，收盘后定时执行的现成配置见末节"调度配置"。
 - `mode` 仅两个取值：`close`（默认，收盘后全天复盘）、`midday`（午市盘中复盘，产物须标注午市时点）。
 - 结论类型与模式一一对应：`daily_review.close` / `daily_review.midday`；subject 固定为 `subject_type="market"`、`subject_code="_market"`。
 - 同日两个模式各自独立成行（业务键含 conclusion_type），同日同模式重复跑为 upsert，不产生重复结论；close 不覆盖 midday。
@@ -99,3 +99,47 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），建议�
 - **归因只定性**：`market_boards` 无板块权重，指数涨跌归因只做"领涨/领跌板块 + 板块内涨停家数"的定性表述，不得编造板块对指数点数的贡献值。
 - **核心数据全缺即中止**：就绪检查核心 section 全部缺失且补抓失败时，中止复盘并向用户报告缺失范围与失败原因；部分缺失（含指数历史、前 75 个股序列）时标注缺失维度后继续。
 - **落库失败即中止**：`save_conclusion` 失败时向用户报告失败，不算复盘完成。
+
+## 调度配置
+
+本技能**不内置调度**；本节是给用户自行安装定时任务的现成配置，按需选用其一。定时触发等价于手动触发 close 模式——交易日判断与数据就绪检查由技能自身流程兜底（核心缺失先补抓后重查、全缺即中止，见"编排流程"与"数据缺失红线"），调度侧无需判断交易日、无需等数据就绪。
+
+### macOS launchd
+
+写入 `~/Library/LaunchAgents/com.qstock.daily-review.plist` 后 `launchctl load ~/Library/LaunchAgents/com.qstock.daily-review.plist` 生效。`StartCalendarInterval` 按工作日（周一至周五）15:45（收盘后）唤起；`ProgramArguments` 为占位符——`kimi -p <提示词>` 或等效 CLI，按实际 agent 唤起方式替换。注意 launchd 不读 shell 配置：`PG_DSN`（及可选 `MX_APIKEY`）需经 plist 的 `EnvironmentVariables` 或包装脚本显式给出。
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.qstock.daily-review</string>
+    <!-- 占位符：按实际 agent 唤起方式替换，如 kimi -p "执行每日复盘（close 模式）" -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/kimi</string>
+        <string>-p</string>
+        <string>执行每日复盘（close 模式）</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/q_stock_skills</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+    </array>
+</dict>
+</plist>
+```
+
+### crontab 备选
+
+一行（`crontab -e`），命令同为占位符，按实际唤起方式替换：
+
+```cron
+45 15 * * 1-5 cd /path/to/q_stock_skills && /path/to/kimi -p "执行每日复盘（close 模式）"
+```

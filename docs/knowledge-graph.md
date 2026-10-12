@@ -11,6 +11,7 @@ flowchart LR
         IT["indicator-tools<br/>工具函数 skill<br/>stdin/stdout 管道"]
         SEPA["sepa<br/>方法论 skill"]
         DR["daily-review<br/>每日复盘编排 skill"]
+        LUA["limit-up-analysis<br/>涨停/连板分析编排 skill"]
     end
 
     subgraph mcp["MCP 数据服务（src/qstock_mcp，stdio）"]
@@ -58,10 +59,12 @@ flowchart LR
     MXC --> MXQ
     DAILY -->|"query_daily JSON 输出<br/>（跨仓库稳定契约，ADR 0001）"| IT
     SEPA -->|"管道消费指标 + get_fundamentals"| IT
+    DR & LUA -->|"corr / vol_price / promote 指标管道"| IT
     DR -->|"数据就绪检查/读数"| BOARD & SNAP
     SEPA -->|"mx_query 妙想验证"| MX
     DR -->|"mx_search / query_news 取资讯"| MX
-    SEPA & DR -->|"save_conclusion 结论 upsert"| CONC
+    DR -->|"涨停/连板子模块（close 模式）"| LUA
+    SEPA & DR & LUA -->|"save_conclusion 结论 upsert"| CONC
     CONC --> T4
 ```
 
@@ -107,9 +110,10 @@ flowchart LR
 
 ### agent skill（`skills/`，第二测试接缝：脚本 stdin/stdout）
 
-- **indicator-tools（工具函数 skill）**：`scripts/indicators.py` 纯标准库，stdin 吃 `query_daily` 输出 JSON、stdout 吐指标 JSON，不访问数据库、现算现用不物化（ADR 0001）。指标目录：MA/MACD/BOLL/RSI/diff1/diff2/rolling_max/rolling_min/maxdd/chg，边界规则（null 头部）随输出 `boundary_rule` 回显。退出码 0=ok/insufficient_data（数据不足非错误）、1=输入错误、2=参数错误（`skills/indicator-tools/SKILL.md:20-49`）。测试在 `skills/indicator-tools/tests/`。
+- **indicator-tools（工具函数 skill）**：`scripts/indicators.py` 纯标准库，stdin 吃 `query_daily` 输出 JSON（`corr`/`promote` 例外，为专用输入）、stdout 吐指标 JSON，不访问数据库、现算现用不物化（ADR 0001）。指标目录：MA/MACD/BOLL/RSI/diff1/diff2/rolling_max/rolling_min/maxdd/chg/corr（多标的相关性矩阵）/vol_price（量价判定）/promote（晋级率与连板梯队），边界规则（null 头部）随输出 `boundary_rule` 回显。退出码 0=ok/insufficient_data（数据不足非错误）、1=输入错误、2=参数错误（`skills/indicator-tools/SKILL.md:20-49`）。测试在 `skills/indicator-tools/tests/`。
 - **sepa（方法论 skill）**：判断逻辑为主体，无脚本。取数链路：`query_daily(days=400)` → 管道给 indicator-tools；`get_fundamentals` 取基本面；指数基线不可经 MCP 获得时用 `query_board_data("market_indices")` 快照降级并标注。`count<250` 或数据缺失即报告缺口、不硬算、不编造。结论可经 `save_conclusion(..., conclusion_type="sepa.full")` 落库。妙想验证小节：三源选股后 `mx_query` 抽样复核财务指标（宽问句省配额、单季/累计口径换算、未披露期静默回退须先校验披露状态、按 `secuCode` 过滤港股），验证结论落 `sepa.mx_verified`（`skills/sepa/SKILL.md:12-26`、`skills/sepa/SKILL.md:84-110`）。
-- **daily-review（每日复盘编排 skill）**：轻脚本重编排，agent 手写结论 JSON 与 markdown 报告。流程：就绪检查（核心表缺则先补抓；可选 `mx_search` 搜资讯落库，配额触顶跳过入 `data_gaps`）→ 读数（含 `query_news` 读近期资讯）→ 报告落盘 `skills/daily-review/reports/`（资讯引用约定：标题+发布时间+来源，链接可空兜底）→ `save_conclusion(subject_type="market", subject_code="_market", conclusion_type="daily_review.<mode>")`（payload 必含 `report_path`）→ 落库失败即中止，不算复盘完成（`skills/daily-review/SKILL.md:17-31`、`skills/daily-review/SKILL.md:53-59`）。
+- **daily-review（每日复盘编排 skill）**：轻脚本重编排，agent 手写结论 JSON 与 markdown 报告。流程：就绪检查（核心表缺则先补抓；指数历史经 `query_index_daily` 逐指数查 60 根；可选 `mx_search` 搜资讯落库，配额触顶跳过入 `data_gaps`）→ 读数（含 `query_news` 读近期资讯）→ 涨停/连板子模块（close 模式调 limit-up-analysis）→ corr/vol_price 指标管道 → 报告落盘 `skills/daily-review/reports/`（资讯引用约定：标题+发布时间+来源，链接可空兜底）→ `save_conclusion(subject_type="market", subject_code="_market", conclusion_type="daily_review.<mode>")`（payload 必含 `report_path`）→ 落库失败即中止，不算复盘完成。技能不内置调度，收盘后定时执行的现成 launchd/cron 配置见 SKILL.md 末节（`skills/daily-review/SKILL.md:17-31`、`skills/daily-review/SKILL.md:53-59`）。
+- **limit-up-analysis（涨停/连板分析编排 skill）**：轻脚本重编排，可单独调用、也被 daily-review（close 模式）编排调用。晋级率与连板梯队只认 indicator-tools `promote` 管道输出（不手算）；归因三维（板块聚类/大小票/业绩题材粗分）与龙头点评由 agent 基于盘面/快照/资讯生成。不写独立报告文件：结论落库 `limit_up.close`（`summary` 供 daily-review 原样引用），分析文本在对话内呈现；落库失败即中止（`skills/limit-up-analysis/SKILL.md:18-44`、`skills/limit-up-analysis/SKILL.md:58-77`）。
 
 ### 测试与协作
 
@@ -123,7 +127,7 @@ flowchart LR
 - **section 级独立成败**：`fetch_board_snapshot` 与 `init_database` 同构——逐项独立 fallback、逐项成败进 `sections`/`parts`，仅全部失败才整体 `error`（`tools_board.py:108-122`、`tools_init.py:192-219`）。重试方式就是再调一次（幂等，ADR 0004）。
 - **结论 upsert**：业务键在 schema 层钉死；CTE 预查判定 `inserted/updated`；payload 不校验，结论类型（`daily_review.close`、`sepa.full` 等）的字段约定由各 skill 文档承载（ADR 0003）。
 - **mx 调用与资讯沉淀**：`mx_query`/`mx_search` 走 `_mx_exchange` 骨架——配额先检（触顶不调上游直接 error）→ 调上游 → 触达即记账 → 业务码判定（code!=0 走 error 契约）；`mx_search` 成功即按 news_code 去重并业务键 upsert `news_items`；`query_news` 纯读库（倒序 + limit），不经骨架、不计配额（`tools_mx.py:60-116`、`tools_mx.py:142-230`）。
-- **skill 间数据流**：`query_daily` JSON（跨仓库稳定契约，ADR 0001）→ indicator-tools stdin → 指标 JSON → 方法论 skill（sepa）判断 → `save_conclusion`；daily-review 不经 indicator-tools，直接读盘面/快照表后编排落库。
+- **skill 间数据流**：`query_daily` JSON（跨仓库稳定契约，ADR 0001）→ indicator-tools stdin → 指标 JSON → 方法论 skill（sepa）判断 → `save_conclusion`；编排 skill 同样经管道消费指标（daily-review 用 corr/vol_price，limit-up-analysis 用 promote，专用输入按各自契约组装）；daily-review 的涨停/连板章节取自 limit-up-analysis 落库的 `limit_up.close` 结论。
 
 ## 入口指引（想改 X 先看哪里）
 
@@ -133,6 +137,7 @@ flowchart LR
 - **加盘面 section/表**：`sql/` 新 DDL → `repository.BOARD_SECTION_TABLES`/`BOARD_QUERY_TABLES` → `BoardAdapter` 协议与 `_board_em.py` 映射 → `tools_board.ALL_SECTIONS`。
 - **加指标**：只动 `skills/indicator-tools/scripts/indicators.py` 与其测试，不改 MCP server（ADR 0001）；新增指标不得改变既有契约（`skills/indicator-tools/SKILL.md:95`）。
 - **加结论类型**：零 schema 变更（ADR 0003），只在对应 skill 文档约定 payload 字段并调用 `save_conclusion`。
+- **改涨停/连板分析**：编排逻辑与归因口径在 `skills/limit-up-analysis/SKILL.md`；晋级率/梯队数字只认 indicator-tools 的 `promote` 输出，改口径走"加指标"路径。每日复盘收盘后定时执行：技能不内置调度，现成 launchd/cron 配置见 `skills/daily-review/SKILL.md` 末节。
 - **加 MCP 工具**：核心逻辑进 `tools_<面>.py`（可注入适配器、返回自描述 dict），`server.py` 只加薄包装；测试打核心层。
 - **改妙想接入/资讯**：边界在 ADR 0005——`tools_mx.py`（三工具与 `_mx_exchange` 骨架）→ `mx_client.py`/`mx_quota.py`（客户端与配额 ledger）→ `sql/011_news_items.sql` 与 `repository.py` 资讯段；测试 `tests/test_mx_tools.py`/`test_mx_search.py`/`test_query_news.py`/`test_mx_quota.py`（fake 注入 + 真实 PG 测试库，不触网）；消费方守则在 `skills/sepa/SKILL.md`、`skills/daily-review/SKILL.md`。
 - **改 fallback/重试策略**：`fetch_chain.py`（注意"最多 3 次"按尝试次数口径，`fetch_chain.py:122-124`）+ `tests/test_fetch_chain.py`。
