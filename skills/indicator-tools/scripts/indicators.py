@@ -8,11 +8,14 @@ min_periods=窗口、MACD EMA(12/26,9) adjust=False、RSI Wilder 平滑、BOLL(2
     <query_daily JSON> | python indicators.py --indicator macd [--tail 60]
     <query_daily JSON> | python indicators.py --indicator ma --periods 5,10,20,60
     <query_daily JSON> | python indicators.py --indicator diff1 --on close
-    <corr JSON>      | python indicators.py --indicator corr [--on close]
+    <corr JSON>      | python indicators.py --indicator corr [--on change_percent]
     <promote JSON>   | python indicators.py --indicator promote
 
 corr 输入为多标的：{"status":"ok","series":{代码: query_daily 输出}}；
-promote 输入为昨日/今日连板数据：{"status":"ok","yesterday":{...},"today":{...}}。
+--on 可用 change_percent（涨跌幅序列，仅 corr 支持，null 点从对齐交集中剔除）。
+promote 输入为昨日/今日连板数据：{"status":"ok","yesterday":{...},"today":{...}}，
+其中 yesterday.boards 应只含昨日连板股（limit_count >= 2），today.boards 为
+今日全部涨停股。
 
 退出码：0 = ok / insufficient_data（数据不足非错误）；1 = 输入/运行时错误；
 2 = 参数错误（argparse 或 --on 等取值非法）。
@@ -177,6 +180,15 @@ def _wilder(xs: list, period: int) -> Series:
 
 # ---------------------------------------------------------------- 量价判定 / 相关性
 
+def _volume_label(amount_chg: float, threshold_pct: float) -> str:
+    """成交额环比（%）分量档：>= θ 放量；<= -θ 缩量；其间平量。"""
+    if amount_chg >= threshold_pct:
+        return "放量"
+    if amount_chg <= -threshold_pct:
+        return "缩量"
+    return "平量"
+
+
 def calc_vol_price(close: Series, amount: Series, threshold: float) -> dict:
     """量价形态判定：逐日价格/成交额环比（%），按 threshold（小数，如 0.2=20%）分档。
 
@@ -200,15 +212,11 @@ def calc_vol_price(close: Series, amount: Series, threshold: float) -> dict:
         price_chg[i] = pc
         amount_chg[i] = ac
         if pc > 0:
-            leg = "上涨"
-            vol = "放量" if ac >= t else ("缩量" if ac <= -t else "平量")
+            pattern[i] = f"{_volume_label(ac, t)}上涨"
         elif pc < 0:
-            leg = "下跌"
-            vol = "放量" if ac >= t else ("缩量" if ac <= -t else "平量")
+            pattern[i] = f"{_volume_label(ac, t)}下跌"
         else:
-            leg = None
-            vol = None
-        pattern[i] = "平盘" if leg is None else f"{vol}{leg}"
+            pattern[i] = "平盘"
         divergence[i] = pattern[i] == "缩量上涨"
     return {"price_chg": price_chg, "amount_chg": amount_chg,
             "vol_price": pattern, "divergence": divergence}
@@ -231,9 +239,14 @@ def pearson(xs: list, ys: list) -> Optional[float]:
 
 BASE_COLUMNS = ("open", "high", "low", "close", "volume", "amount")
 
+# corr 专用 --on 列：涨跌幅序列（query_daily/query_index_daily 的 rows 均含此列，
+# 可为 null）；其余指标的 --on 不支持（None 无法参与窗口/差分计算）
+CORR_EXTRA_COLUMNS = ("change_percent",)
+
 
 def resolve_base_series(cols: dict, on: str) -> Series:
-    """--on 基础序列解析：日线列（open/high/low/close/volume/amount），或 maN。"""
+    """--on 基础序列解析：日线列（open/high/low/close/volume/amount）、maN，
+    或 corr 专用的 change_percent（涨跌幅序列）。"""
     if on in cols:
         return cols[on]
     if on.startswith("ma") and on[2:].isdigit():
@@ -331,9 +344,10 @@ def load_stdin() -> dict:
 
 
 def parse_cols(rows: list) -> tuple[list, dict]:
-    """rows → (trade_dates, {列: [float]})；数值缺失/非法抛 ValueError。"""
+    """rows → (trade_dates, {列: [float]})；OHLCV/amount 缺失/非法抛 ValueError，
+    change_percent 允许 null（如区间首日无前收），其余非数值抛 ValueError。"""
     dates = []
-    cols: dict[str, list] = {c: [] for c in BASE_COLUMNS}
+    cols: dict[str, list] = {c: [] for c in BASE_COLUMNS + CORR_EXTRA_COLUMNS}
     for i, row in enumerate(rows):
         dates.append(row.get("trade_date"))
         for c in BASE_COLUMNS:
@@ -341,6 +355,13 @@ def parse_cols(rows: list) -> tuple[list, dict]:
             if v is None or isinstance(v, bool):
                 raise ValueError(f"第 {i} 行 {c} 缺失或非数值: {v!r}")
             cols[c].append(float(v))
+        cp = row.get("change_percent")
+        if cp is None:
+            cols["change_percent"].append(None)
+        elif isinstance(cp, bool) or not isinstance(cp, (int, float)):
+            raise ValueError(f"第 {i} 行 change_percent 非数值: {cp!r}")
+        else:
+            cols["change_percent"].append(float(cp))
     return dates, cols
 
 
@@ -369,7 +390,10 @@ def run_corr(args, params) -> int:
     for dates, _ in per.values():
         common = set(dates) if common is None else common & set(dates)
     first_dates = next(iter(per.values()))[0]
-    aligned = [d for d in first_dates if d in (common or set())]
+    by_date = {code: dict(zip(dates, series)) for code, (dates, series) in per.items()}
+    # 交集对齐后再剔除任一侧取值为 null 的交易日（如 change_percent 区间首日）
+    aligned = [d for d in first_dates if d in (common or set())
+               and all(by_date[c][d] is not None for c in by_date)]
     if len(aligned) < 2:
         emit({"status": "insufficient_data", "indicator": "corr",
               "params": {"on": args.on},
@@ -378,10 +402,7 @@ def run_corr(args, params) -> int:
         return 0
 
     symbols = sorted(per)
-    aligned_series = {}
-    for code, (dates, series) in per.items():
-        by_date = dict(zip(dates, series))
-        aligned_series[code] = [by_date[d] for d in aligned]
+    aligned_series = {code: [by_date[code][d] for d in aligned] for code in per}
     matrix = {}
     for a in symbols:
         row = {}
@@ -395,20 +416,24 @@ def run_corr(args, params) -> int:
           "aligned_length": len(aligned),
           "required_length": 2,
           "data_range": {"start": aligned[0], "end": aligned[-1]},
-          "boundary_rule": "按 trade_date 交集对齐；方差为 0 的标的对应矩阵位置为 null",
+          "boundary_rule": "按 trade_date 交集对齐（任一侧取值为 null 的交易日剔除）；方差为 0 的标的对应矩阵位置为 null",
           "matrix": matrix})
     return 0
 
 
 def run_promote(args, params) -> int:
     """promote：晋级率与连板梯队。输入昨日/今日连板数据
-    {"yesterday": {"trade_date", "boards": [{stock_code, limit_count}]}, "today": {...}}。"""
+    {"yesterday": {"trade_date", "boards": [{stock_code, limit_count}]}, "today": {...}}。
+
+    口径：yesterday.boards 应只含昨日连板股（limit_count >= 2，由调用方筛选），
+    today.boards 为今日全部涨停股（首板不影响晋级判定）；昨日无连板股时报
+    insufficient_data（晋级率无意义，非错误）。"""
     try:
         payload = _read_payload()
-        legs = {}
+        days = {}
         for key in ("yesterday", "today"):
-            leg = payload.get(key)
-            boards_raw = leg.get("boards") if isinstance(leg, dict) else None
+            day = payload.get(key)
+            boards_raw = day.get("boards") if isinstance(day, dict) else None
             if not isinstance(boards_raw, list):
                 raise ValueError(f"输入缺少 {key}.boards 数组")
             boards = []
@@ -422,32 +447,34 @@ def run_promote(args, params) -> int:
                     raise ValueError(
                         f"{key}.boards[{i}] limit_count 须为正整数: {lc!r}")
                 boards.append((code, lc))
-            legs[key] = {"trade_date": leg.get("trade_date"), "boards": boards}
+            days[key] = {"trade_date": day.get("trade_date"), "boards": boards}
     except (ValueError, TypeError, AttributeError) as e:
         emit({"status": "error", "error": str(e)})
         return 1
 
-    y, t = legs["yesterday"], legs["today"]
-    if not y["boards"]:
+    yesterday, today = days["yesterday"], days["today"]
+    if not yesterday["boards"]:
         emit({"status": "insufficient_data", "indicator": "promote",
               "required_length": 1, "available_length": 0,
               "message": "昨日无连板股，晋级率无意义"})
         return 0
 
-    today_codes = {c for c, _ in t["boards"]}
-    promoted = [c for c, _ in y["boards"] if c in today_codes]
-    failed = [c for c, _ in y["boards"] if c not in today_codes]
+    today_codes = {c for c, _ in today["boards"]}
+    promoted = [c for c, _ in yesterday["boards"] if c in today_codes]
+    failed = [c for c, _ in yesterday["boards"] if c not in today_codes]
     ladder: dict[str, int] = {}
     ladder_detail: dict[str, list] = {}
-    for c, lc in sorted(t["boards"], key=lambda x: x[1]):
+    for c, lc in sorted(today["boards"], key=lambda x: x[1]):
         k = str(lc)
         ladder[k] = ladder.get(k, 0) + 1
         ladder_detail.setdefault(k, []).append(c)
 
     emit({"status": "ok", "indicator": "promote", "params": {},
-          "yesterday": {"trade_date": y["trade_date"], "count": len(y["boards"])},
-          "today": {"trade_date": t["trade_date"], "count": len(t["boards"])},
-          "promote_rate": round(len(promoted) / len(y["boards"]) * 100, 4),
+          "yesterday": {"trade_date": yesterday["trade_date"],
+                        "count": len(yesterday["boards"])},
+          "today": {"trade_date": today["trade_date"],
+                    "count": len(today["boards"])},
+          "promote_rate": round(len(promoted) / len(yesterday["boards"]) * 100, 4),
           "promoted": promoted, "failed": failed,
           "ladder": ladder, "ladder_detail": ladder_detail})
     return 0
@@ -470,7 +497,8 @@ def main() -> int:
                     help="rolling_max/rolling_min/maxdd/chg 窗口（默认 250≈52 周）")
     ap.add_argument("--on", default="close",
                     help="基础序列：open/high/low/close/volume/amount/maN"
-                         "（ma/diff*/rolling_*/maxdd/chg/corr 可用）")
+                         "（ma/diff*/rolling_*/maxdd/chg/corr 可用）；"
+                         "corr 另支持 change_percent（涨跌幅序列）")
     ap.add_argument("--threshold", type=float, default=0.2,
                     help="vol_price 放量/缩量阈值（小数，默认 0.2=20%）")
     ap.add_argument("--tail", type=int, default=60, help="输出末尾 N 个点；0=全部")
@@ -491,11 +519,13 @@ def main() -> int:
         return 2
 
     # 参数校验先于数据检查：参数错误不被 insufficient_data 遮蔽
-    if args.on not in BASE_COLUMNS and not (
+    on_columns = BASE_COLUMNS + (
+        CORR_EXTRA_COLUMNS if args.indicator == "corr" else ())
+    if args.on not in on_columns and not (
             args.on.startswith("ma") and args.on[2:].isdigit()):
         emit({"status": "error",
               "error": f"不支持的 --on 序列: {args.on}"
-                       f"（可用 {'/'.join(BASE_COLUMNS)}/maN）"})
+                       f"（可用 {'/'.join(on_columns)}/maN）"})
         return 2
     if args.indicator == "vol_price" and not 0 <= args.threshold < 10:
         emit({"status": "error",

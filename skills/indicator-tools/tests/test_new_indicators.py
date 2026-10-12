@@ -173,6 +173,38 @@ class TestCorr:
         assert rc == 2
         assert out["status"] == "error"
 
+    def test_on_change_percent(self, monkeypatch, capsys):
+        """--on change_percent：用涨跌幅序列计算，口径见 spec（指数/个股相关性）。"""
+        payload = _corr_payload({"AAA": [10.0, 11.0, 12.0, 13.0],
+                                 "BBB": [20.0, 22.0, 24.0, 26.0]})
+        for code, cps in {"AAA": [None, 10.0, 9.09, 8.33],
+                          "BBB": [None, 10.0, 9.09, 8.33]}.items():
+            for row, cp in zip(payload["series"][code]["rows"], cps):
+                row["change_percent"] = cp
+        rc, out = _run(monkeypatch, capsys, payload,
+                       "--indicator", "corr", "--on", "change_percent")
+        assert rc == 0
+        assert out["status"] == "ok"
+        assert out["params"] == {"on": "change_percent"}
+        # 首日 change_percent 为 null，从对齐交集剔除
+        assert out["aligned_length"] == 3
+        assert out["data_range"] == {"start": _date(1), "end": _date(3)}
+        assert out["matrix"]["AAA"]["BBB"] == 1.0
+
+    def test_on_change_percent_all_null_insufficient(self, monkeypatch, capsys):
+        payload = _corr_payload({"AAA": [1.0, 2.0], "BBB": [1.0, 2.0]})
+        rc, out = _run(monkeypatch, capsys, payload,
+                       "--indicator", "corr", "--on", "change_percent")
+        assert rc == 0
+        assert out["status"] == "insufficient_data"
+        assert out["available_length"] == 0
+
+    def test_on_change_percent_rejected_for_other_indicators(self, monkeypatch, capsys):
+        rc, out = _run(monkeypatch, capsys, _daily_payload([10.0, 11.0]),
+                       "--indicator", "diff1", "--on", "change_percent")
+        assert rc == 2
+        assert out["status"] == "error"
+
 
 # ---------------------------------------------------------------- vol_price：量价背离/配合判定
 

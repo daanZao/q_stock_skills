@@ -227,6 +227,14 @@ _INDEX_NAMES = dict(MAJOR_INDICES)
 DEFAULT_INDEX_DAILY_LIMIT = 120
 
 
+def _normalize_or_error(tool: str, params: dict, value: str) -> tuple[str | None, dict | None]:
+    """可选日期参数归一化；非法时返回 (None, error_dict)。"""
+    try:
+        return normalize_date(value), None
+    except ValueError as e:
+        return None, _error(tool, params, str(e))
+
+
 def query_index_daily(
     index_code: str,
     start: str | None = None,
@@ -246,15 +254,13 @@ def query_index_daily(
         options = ", ".join(f"{c}({n})" for c, n in MAJOR_INDICES)
         return _error(tool, params, f"未知指数代码: {index_code}（可选: {options}）")
     if start is not None:
-        try:
-            start = normalize_date(start)
-        except ValueError as e:
-            return _error(tool, params, str(e))
+        start, date_err = _normalize_or_error(tool, params, start)
+        if date_err:
+            return date_err
     if end is not None:
-        try:
-            end = normalize_date(end)
-        except ValueError as e:
-            return _error(tool, params, str(e))
+        end, date_err = _normalize_or_error(tool, params, end)
+        if date_err:
+            return date_err
     if start is not None and end is not None and start > end:
         return _error(tool, params, f"start({start}) 晚于 end({end})")
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:

@@ -25,13 +25,13 @@ description: 涨停/连板分析编排（收盘后），可单独调用、也是
    - **核心数据 `zt_pool` 全缺且补抓失败时中止分析**，向用户明确报告缺失范围与失败原因，不得基于残缺数据生成涨停结论。
 3. **昨日 zt_pool 同查**（晋级率输入）：取前一交易日的 `zt_pool`。前一交易日以自然日回溯逐个探测（周末/节假日自然跳过，最多回溯 5 个自然日，命中 `count>0` 即停）。昨日数据缺失（含补抓失败）时：今日梯队照常分析，晋级率维度降级并在 `data_gaps` 标注"无昨日涨停池，晋级率不可算"。
 4. **组装 promote 输入，经管道算晋级率与梯队**：
-   - 从当日/昨日 `zt_pool` 行中筛 `pool_type="zt"`（涨停），组装：
+   - 口径：**晋级率分母只含昨日连板股**——昨日 `zt_pool` 行筛 `pool_type="zt"` 且 `consecutive_boards >= 2`（首板稀释分母，不进昨日输入）；**今日 boards 取当日全部涨停股**（`pool_type="zt"`，含首板——是否晋级只看今日仍涨停，与今日几板无关）。组装：
      ```json
      {"status":"ok",
       "yesterday":{"trade_date":"<昨日>","boards":[{"stock_code":"600001","limit_count":2}]},
       "today":{"trade_date":"<当日>","boards":[{"stock_code":"600001","limit_count":3}]}}
      ```
-     `limit_count` 取 `consecutive_boards` 字段；该字段为 null/缺失时按 1（首板）处理，不得猜测连板数。
+     `limit_count` 取 `consecutive_boards` 字段；该字段为 null/缺失时按 1（首板）处理，不得猜测连板数。promote 输出的 `promoted`/`failed` 即昨日连板股中今日仍涨停（晋级）/未涨停（断板）的代码列表。
    - 调用形态（与 sepa 调 indicator-tools 同法，输入经临时文件或 heredoc 传 stdin）：
      ```bash
      <promote 输入 JSON> | python skills/indicator-tools/scripts/indicators.py --indicator promote

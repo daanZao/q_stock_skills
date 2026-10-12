@@ -96,8 +96,8 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 
 ### corr — 多标的相关性矩阵
 
-- **计算方法**：多标的按 `trade_date` 交集对齐后，两两计算 Pearson 相关系数。方差为 0 的标的（如一字横盘）对应矩阵位置为 null。**窗口由调用方传入的序列长度控制**（20 日窗口就传 20 根），`--tail` 不适用。
-- **使用方法**：`--indicator corr [--on close]`。输入为多标的对象，每个标的值就是一份 `query_daily` 输出（至少含 `rows`）：
+- **计算方法**：多标的按 `trade_date` 交集对齐后（任一侧取值为 null 的交易日剔除），两两计算 Pearson 相关系数。方差为 0 的标的（如一字横盘）对应矩阵位置为 null。**窗口由调用方传入的序列长度控制**（20 日窗口就传 20 根），`--tail` 不适用。
+- **使用方法**：`--indicator corr [--on change_percent]`。输入为多标的对象，每个标的值就是一份 `query_daily` 输出（至少含 `rows`）：
 
 ```json
 {"status": "ok",
@@ -105,7 +105,7 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
             "399001": {"status": "ok", "rows": [...]}}}
 ```
 
-至少 2 个标的、交集至少 2 个交易日，否则分别 exit 1 / `insufficient_data`（exit 0）。输出含 `symbols`（排序后代码表）、`aligned_length`、`data_range` 与 `matrix`（`{行代码: {列代码: 相关系数}}`，4 位小数，对称、对角线为 1）。`--on` 同样支持 `volume`/`amount` 等列。典型用途：个股与指数/板块的相关性、组合内标的共振检查。
+至少 2 个标的、交集至少 2 个交易日，否则分别 exit 1 / `insufficient_data`（exit 0）。输出含 `symbols`（排序后代码表）、`aligned_length`、`data_range` 与 `matrix`（`{行代码: {列代码: 相关系数}}`，4 位小数，对称、对角线为 1）。`--on` 支持 `open`/`high`/`low`/`close`/`volume`/`amount`/`maN`，另支持 corr 专用的 `change_percent`（涨跌幅序列——**指数/个股相关性的标准口径**，`query_daily` 与 `query_index_daily` 的 rows 均含此列；区间内 null 点从对齐交集剔除）。典型用途：个股与指数/板块的相关性、组合内标的共振检查。
 
 ### vol_price — 量价背离/配合判定
 
@@ -115,7 +115,7 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 ### promote — 晋级率与连板梯队
 
 - **计算方法**：`promote_rate = 昨日连板股中今日仍涨停（出现在 today.boards）的家数 / 昨日连板家数 * 100`；`ladder` 为今日各连板高度（`limit_count`）的家数分布，`ladder_detail` 给出各高度的具体代码。昨日连板为空时晋级率无意义，报 `insufficient_data`（exit 0）；今日为空则 `promote_rate=0`、`ladder={}`。
-- **使用方法**：`--indicator promote`。输入为昨日/今日两个交易日的连板数据：
+- **使用方法**：`--indicator promote`。输入为昨日/今日两个交易日的连板数据：**`yesterday.boards` 只含昨日连板股（`limit_count >= 2`，由调用方从涨停池中筛出，首板不进分母）；`today.boards` 为今日全部涨停股**（是否晋级只看今日仍涨停，与今日几板无关）：
 
 ```json
 {"status": "ok",

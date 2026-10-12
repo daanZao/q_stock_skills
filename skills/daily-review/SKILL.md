@@ -32,11 +32,11 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
    - **两市成交额环比基准**：`query_snapshot(<前一交易日>)` 取昨日全市场行，聚合昨日两市成交额供环比（前一交易日探测法与 limit-up-analysis 同：自然日回溯，最多 5 个自然日，命中 `count>0` 即停）。
 4. **涨停/连板子模块（close 模式）**：编排调用 limit-up-analysis 技能（其自行做数据就绪检查、promote 管道计算并落库 `limit_up.close`）；随后 `query_conclusions(conclusion_type="limit_up.close", trade_date=<当日>)` 读其 payload，取 `summary`/`ladder`/`promote_rate`/`attribution`/`leaders` 编入复盘。**midday 模式不调用**（该技能仅 close 模式）：涨停章节降级为 `zt_pool` 结构统计（涨停/跌停/炸板家数、连板高度、炸板率 = 炸板 ÷（涨停 + 炸板））加 `strong_stocks` 入选理由聚类。
 5. **指标管道计算**（输入经临时文件或 heredoc 传 stdin，与 limit-up-analysis 调 promote 同法；退出码语义：0 = ok / insufficient_data，1 = 输入错误，2 = 参数错误）：
-   - **指数两两相关性**：7 份 `query_index_daily` 输出组装 corr 输入 `{"status":"ok","series":{<index_code>:{"status":"ok","rows":[...]}}}`；corr 窗口由传入序列长度控制（`--tail` 不适用），按序列尾部切 20 根 / 60 根各喂一次，得 20 日与 60 日两张矩阵：
+   - **指数两两相关性**：7 份 `query_index_daily` 输出组装 corr 输入 `{"status":"ok","series":{<index_code>:{"status":"ok","rows":[...]}}}`；corr 窗口由传入序列长度控制（`--tail` 不适用），按序列尾部切 20 根 / 60 根各喂一次，得 20 日与 60 日两张矩阵（相关性标准口径为涨跌幅序列，两处都用 `--on change_percent`）：
      ```bash
-     <corr 输入 JSON> | python skills/indicator-tools/scripts/indicators.py --indicator corr --on close
+     <corr 输入 JSON> | python skills/indicator-tools/scripts/indicators.py --indicator corr --on change_percent
      ```
-   - **个股-所属指数相关性**：前 75 逐股与其所属指数做一次 corr（个股 `query_daily` 输出 + 该指数 `query_index_daily` 输出两个 series，尾部 20 根），识别跟涨指数还是独立行情。所属指数按上市板归属：沪市主板（60 开头）→ 000001、科创板（688 开头）→ 000688、深市主板（00 开头）→ 399001、创业板（30 开头）→ 399006；北交所个股（4/8/9 开头）无对应主要指数，跳过并标注。
+   - **个股-所属指数相关性**：前 75 逐股与其所属指数做一次 corr（个股 `query_daily` 输出 + 该指数 `query_index_daily` 输出两个 series，尾部 20 根，同样 `--on change_percent`），识别跟涨指数还是独立行情。所属指数按上市板归属：沪市主板（60 开头）→ 000001、科创板（688 开头）→ 000688、深市主板（00 开头）→ 399001、创业板（30 开头）→ 399006；北交所个股（4/8/9 开头）无对应主要指数，跳过并标注。**板块相关性受数据限制不做**（`market_boards` 无板块历史序列，无法构造涨跌幅序列）；个股相关性只对所属指数计算。
    - **大盘量价判定**：上证指数（000001）的 `query_index_daily` 输出直接喂 vol_price（其 rows 含 close/amount，与 `query_daily` 输出契约同形）：
      ```bash
      <query_index_daily 输出 JSON> | python skills/indicator-tools/scripts/indicators.py --indicator vol_price
