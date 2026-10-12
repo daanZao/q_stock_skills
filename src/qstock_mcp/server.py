@@ -60,6 +60,23 @@ def query_daily(
 
 
 @mcp.tool()
+def query_index_daily(
+    index_code: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 120,
+) -> dict:
+    """库内主要指数历史日线查询（纯读，不触发补抓）：按日期范围过滤，按 trade_date 升序返回最近 limit 行（缺省 120）。
+
+    index_code 限 7 个主要指数：000001(上证指数)/399001(深证成指)/399006(创业板指)/
+    000300(沪深300)/000016(上证50)/000905(中证500)/000688(科创50)，数据由
+    init_database 轻量初始化写入全历史。start/end 为闭区间（yyyymmdd 或
+    yyyy-mm-dd），缺省不限；空结果返回 count:0（非错误）。
+    """
+    return tools_init.query_index_daily(index_code, start=start, end=end, limit=limit)
+
+
+@mcp.tool()
 def fetch_market_snapshot(trade_date: str | None = None) -> dict:
     """抓取全市场快照（约 5000+ 只 A 股）并落库：单次调用，efinance → akshare → baostock fallback，按 (trade_date, stock_code) 幂等 upsert。
 

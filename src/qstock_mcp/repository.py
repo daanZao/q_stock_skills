@@ -230,6 +230,42 @@ def upsert_index_daily(conn, index_code: str, rows: list[dict], source: str) -> 
     return len(values)
 
 
+_INDEX_DAILY_QUERY_COLS = ("index_code",) + BAR_FIELDS + ("source",)
+
+
+def select_index_daily(
+    conn,
+    index_code: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按指数代码 + 日期范围（yyyymmdd 闭区间）查询 index_daily，升序返回。
+
+    limit 取区间内最近 N 行（先倒序限量再翻转回升序），None 不限；
+    start/end 缺省不对该端限界。内部列（id/created_at/updated_at）不返回。
+    """
+    where, args = ["index_code = %s"], [index_code]
+    if start is not None:
+        where.append("trade_date >= %s")
+        args.append(start)
+    if end is not None:
+        where.append("trade_date <= %s")
+        args.append(end)
+    sql = (
+        f"SELECT {', '.join(_INDEX_DAILY_QUERY_COLS)} FROM index_daily"
+        f" WHERE {' AND '.join(where)} ORDER BY trade_date DESC"
+    )
+    if limit is not None:
+        sql += " LIMIT %s"
+        args.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        rows = [dict(zip(_INDEX_DAILY_QUERY_COLS, row)) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
+
+
 # ---------------------------------------------------------------- 盘面快照（issue #5）
 
 # section → [(表名, 日期列, 业务键(除日期列), 数据列)]；表结构见 sql/003-007。
