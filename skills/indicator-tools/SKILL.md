@@ -1,6 +1,6 @@
 ---
 name: indicator-tools
-description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口极值/最大回撤/N 日涨跌幅/一阶二阶导数）。管道版：stdin 吃 MCP query_daily 工具的 JSON 输出，stdout 吐指标 JSON；纯标准库，不访问数据库，现算现用不物化。
+description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口极值/最大回撤/N 日涨跌幅/一阶二阶导数/相关性矩阵/量价判定/晋级率）。管道版：stdin 吃 MCP query_daily 工具的 JSON 输出（corr/promote 为各自专用输入），stdout 吐指标 JSON；纯标准库，不访问数据库，现算现用不物化。
 ---
 
 # indicator-tools
@@ -44,13 +44,15 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 
 `rows` 按 `trade_date` 升序；`open/high/low/close/volume/amount` 须为数值（缺失视为输入错误，exit 1）。`stock_code` 从 `params` 回显到输出。
 
+**例外输入**：`corr` 与 `promote` 不吃单标的 `rows`，输入形状见各自条目；公共校验不变（须为 JSON 对象且 `status="ok"`，否则 exit 1）。
+
 **输出契约**：`status=ok` 时含 `stock_code`、`indicator`、`params`（参数回显）、`data_range`、`required_length`/`available_length`、`boundary_rule`、`series`（每点含 `trade_date`，数值保留 4 位小数，头部按边界规则为 null）。`status=insufficient_data` 时明确给出 `required_length` 与 `available_length`，exit 0。
 
 **前置**：调用 `query_daily` 时取够长度（MACD 至少 35 根，EMA 收敛建议 ≥200 根；rolling/maxdd/chg 默认窗口 250）。数据不足时本脚本只报 `insufficient_data`，需要 agent 用更大的 `days`/`start` 重新查询。
 
 ## 指标目录
 
-口径基线：旧系统 `data_provider/base.py` 的 `calculate_indicators`。边界规则（null 头部）：diff1 首点 null、diff2 前两点 null；MA/BOLL/rolling/maxdd 前 `窗口-1` 点 null；RSI 前 `周期-1` 点 null；MACD 的 DIF 前 `slow-1` 点、DEA/BAR 前 `slow+signal-2` 点 null；chg 前 `窗口` 点 null。每次输出的 `boundary_rule` 字段会回显本指标的具体规则。
+口径基线：旧系统 `data_provider/base.py` 的 `calculate_indicators`。边界规则（null 头部）：diff1 首点 null、diff2 前两点 null；MA/BOLL/rolling/maxdd 前 `窗口-1` 点 null；RSI 前 `周期-1` 点 null；MACD 的 DIF 前 `slow-1` 点、DEA/BAR 前 `slow+signal-2` 点 null；chg 前 `窗口` 点 null；vol_price 首点 null（环比需前一交易日）。每次输出的 `boundary_rule` 字段会回显本指标的具体规则。
 
 ### MA — 简单移动平均线
 
@@ -91,6 +93,37 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 
 - **计算方法**：`(x / x[N 日前] - 1) * 100`，仅在序列末尾有判断意义。
 - **使用方法**：`--indicator chg --window 250`。个股/指数区间收益对比（RS 相对强度近似：个股 250 日 chg vs 沪深300 同期 chg）。
+
+### corr — 多标的相关性矩阵
+
+- **计算方法**：多标的按 `trade_date` 交集对齐后，两两计算 Pearson 相关系数。方差为 0 的标的（如一字横盘）对应矩阵位置为 null。**窗口由调用方传入的序列长度控制**（20 日窗口就传 20 根），`--tail` 不适用。
+- **使用方法**：`--indicator corr [--on close]`。输入为多标的对象，每个标的值就是一份 `query_daily` 输出（至少含 `rows`）：
+
+```json
+{"status": "ok",
+ "series": {"600519": {"status": "ok", "rows": [...]},
+            "399001": {"status": "ok", "rows": [...]}}}
+```
+
+至少 2 个标的、交集至少 2 个交易日，否则分别 exit 1 / `insufficient_data`（exit 0）。输出含 `symbols`（排序后代码表）、`aligned_length`、`data_range` 与 `matrix`（`{行代码: {列代码: 相关系数}}`，4 位小数，对称、对角线为 1）。`--on` 同样支持 `volume`/`amount` 等列。典型用途：个股与指数/板块的相关性、组合内标的共振检查。
+
+### vol_price — 量价背离/配合判定
+
+- **计算方法**：逐日算价格环比 `price_chg = (close/前收-1)*100` 与成交额环比 `amount_chg = (amount/前额-1)*100`；按阈值 θ（`--threshold`，小数，默认 0.2=20%）分量档：`amount_chg >= θ*100` 放量，`<= -θ*100` 缩量，其间平量。形态 = 量档 + 价向：**放量上涨/缩量上涨/平量上涨/放量下跌/缩量下跌/平量下跌/平盘**。`divergence=true` 仅当**缩量上涨**（价升量减，经典量价背离）；放量上涨/缩量下跌为量价配合。首点无环比为 null。
+- **使用方法**：`--indicator vol_price [--threshold 0.2]`（输入即标准 `query_daily` 输出，`close`/`amount` 列）。输出列 `price_chg`/`amount_chg`（%，4 位小数）、`vol_price`（形态标签）、`divergence`（布尔）。至少需要 2 根日线。
+
+### promote — 晋级率与连板梯队
+
+- **计算方法**：`promote_rate = 昨日连板股中今日仍涨停（出现在 today.boards）的家数 / 昨日连板家数 * 100`；`ladder` 为今日各连板高度（`limit_count`）的家数分布，`ladder_detail` 给出各高度的具体代码。昨日连板为空时晋级率无意义，报 `insufficient_data`（exit 0）；今日为空则 `promote_rate=0`、`ladder={}`。
+- **使用方法**：`--indicator promote`。输入为昨日/今日两个交易日的连板数据：
+
+```json
+{"status": "ok",
+ "yesterday": {"trade_date": "...", "boards": [{"stock_code": "600001", "limit_count": 2}]},
+ "today":     {"trade_date": "...", "boards": [{"stock_code": "600001", "limit_count": 3}]}}
+```
+
+`stock_code` 须为非空字符串、`limit_count` 须为正整数，否则 exit 1。输出含 `promote_rate`（%，4 位小数）、`promoted`/`failed`（晋级/断板代码列表，保持昨日输入顺序）、`ladder`/`ladder_detail`。
 
 > 新增指标不得改变既有指标的契约（输出结构、边界规则、退出码）。
 
