@@ -6,6 +6,7 @@ stock_daily 业务键 (stock_code, trade_date, adj)；market_snapshot 业务键
 stock_list（主键 stock_code）与 index_daily（业务键 index_code + trade_date）。
 """
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -24,6 +25,8 @@ from .adapters.base import (
     ZT_POOL_FIELDS,
 )
 from .dates import add_days
+
+log = logging.getLogger(__name__)
 
 _UPSERT_SQL = """
 INSERT INTO stock_daily (stock_code, trade_date, {cols}, adj, source, updated_at)
@@ -281,7 +284,7 @@ BOARD_SECTION_TABLES: dict[str, list[tuple[str, str, tuple, tuple]]] = {
         ("strong_stocks", "trade_date", ("stock_code",), STRONG_FIELDS)
     ],
     "lhb": [
-        ("lhb_basic", "trade_date", ("stock_code",), LHB_BASIC_FIELDS),
+        ("lhb_basic", "trade_date", ("stock_code", "lhb_reason"), LHB_BASIC_FIELDS),
         ("lhb_stock_statistic", "trade_date", ("stock_code",), LHB_STATISTIC_FIELDS),
         ("lhb_yyb_capital", "fetch_date", ("seat_name",), LHB_YYB_CAPITAL_FIELDS),
         ("lhb_yyb_most", "fetch_date", ("seat_name",), LHB_YYB_MOST_FIELDS),
@@ -302,14 +305,22 @@ def upsert_board_rows(
 
     行 dict 自带 date_col 键时覆盖 default_date（如 lhb_basic 的"上榜日"）。
     表名/列名仅来自 BOARD_SECTION_TABLES 内部常量，不接受外部输入。
+    同业务键重复行 last-wins 去重（上游脏数据防御），丢弃数记 log。
     """
-    values = [
-        [row.get(date_col) or default_date] + [row.get(f) for f in fields]
-        for row in rows
-    ]
+    cols = (date_col,) + tuple(fields)
+    key_idx = [cols.index(k) for k in key_cols]
+    deduped: dict[tuple, list] = {}
+    for row in rows:
+        value = [row.get(date_col) or default_date] + [row.get(f) for f in fields]
+        deduped[(value[0], *(value[i] for i in key_idx))] = value
+    dropped = len(rows) - len(deduped)
+    if dropped:
+        log.warning(
+            "upsert_board_rows: %s 丢弃 %d 行业务键重复行（last-wins）", table, dropped
+        )
+    values = list(deduped.values())
     if not values:
         return 0
-    cols = (date_col,) + tuple(fields)
     updates = [f for f in fields if f not in key_cols]
     sql = (
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES %s "

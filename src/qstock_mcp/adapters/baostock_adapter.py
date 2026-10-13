@@ -12,7 +12,7 @@ import io
 from datetime import date
 from typing import NoReturn
 
-from ._eastmoney import _int, _num
+from ._eastmoney import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
 _FIELDS = "date,open,high,low,close,volume,amount,pctChg"
@@ -91,7 +91,7 @@ def map_baostock_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
                 "low": _num(r.get("low")),
                 "close": _num(r.get("close")),
                 "volume": _int(r.get("volume")),
-                "amount": _num(r.get("amount")),
+                "amount": _wan(r.get("amount")),
                 "amplitude": None,
                 "change_percent": _num(r.get("pctChg")),
                 "change_amount": None,

@@ -1,7 +1,7 @@
 # 项目知识图谱
 
 面向人类与 AI agent 的 5 分钟全图认知。术语遵循 `CONTEXT.md`（抓取/落库/透传/自愈/回溯/五个能力面）。
-每条论断尽量标注来源（`path:line`）。设计决策的"为什么"在 `docs/adr/0001-0005`，本图只讲"是什么、在哪、和谁相连"。
+每条论断尽量标注来源（`path:line`）。设计决策的"为什么"在 `docs/adr/0001-0006`，本图只讲"是什么、在哪、和谁相连"。
 
 ## 总览图
 
@@ -91,20 +91,21 @@ flowchart LR
 
 - **`fetch_chain.py`**：fallback 编排核心。每源最多重试 2 次（3 次尝试）；空结果视为成功（停牌/无交易日）不触发 fallback；全失败抛 `AllSourcesFailed` 携带 `attempted_sources`（每源尝试次数与错误）（`fetch_chain.py:22-52`）。只依赖适配器协议，不感知具体第三方库（`fetch_chain.py:1-9`）。
 - **`gaps.py`**：头尾缺口规则——库内已有日期集合的最早/最晚之外才补抓，最多两段（`gaps.py:10-21`）。
-- **`repository.py`**：全部 upsert 按业务键幂等。`stock_daily` 键 `(stock_code, trade_date, adj)`、`market_snapshot` 键 `(trade_date, stock_code)`（`repository.py:26-36`、`repository.py:87-98`）；盘面表注册表 `BOARD_SECTION_TABLES`（section→表/日期列/业务键/列集）与 `BOARD_QUERY_TABLES`（可查询表白名单，表名列名只来自内部常量，不接外部输入）（`repository.py:274-290`、`repository.py:330-343`）；结论 upsert 用 CTE 预查业务键判定 inserted/updated（`repository.py:377-414`）。盘面表无 `source` 列（本项目 DDL 决策，`repository.py:271-273`）。资讯表 `news_items` 业务键 `(news_code, subject_type, subject_code)`（同一资讯可挂多主体），上游缺条目 id 时标题+发布时间复合兜底；`publish_time` 按东八区落 timestamptz；`select_news_items` 发布时间倒序 + 范围过滤 + limit，不返回内部列与 `raw`（`repository.py:445-477`、`repository.py:497-516`、`repository.py:556-605`）。
+- **`repository.py`**：全部 upsert 按业务键幂等。`stock_daily` 键 `(stock_code, trade_date, adj)`、`market_snapshot` 键 `(trade_date, stock_code)`（`repository.py:26-36`、`repository.py:87-98`）；盘面表注册表 `BOARD_SECTION_TABLES`（section→表/日期列/业务键/列集）与 `BOARD_QUERY_TABLES`（可查询表白名单，表名列名只来自内部常量，不接外部输入）（`repository.py:274-290`、`repository.py:330-343`）；`upsert_board_rows` 写入前按业务键去重（last-wins，上游脏数据防御——东财板块同代码重名、yyb 同席位多排名行实测存在），丢弃数记 log.warning。结论 upsert 用 CTE 预查业务键判定 inserted/updated（`repository.py:377-414`）。盘面表无 `source` 列（本项目 DDL 决策，`repository.py:271-273`）。资讯表 `news_items` 业务键 `(news_code, subject_type, subject_code)`（同一资讯可挂多主体），上游缺条目 id 时标题+发布时间复合兜底；`publish_time` 按东八区落 timestamptz；`select_news_items` 发布时间倒序 + 范围过滤 + limit，不返回内部列与 `raw`（`repository.py:445-477`、`repository.py:497-516`、`repository.py:556-605`）。
 
 ### 数据源适配层
 
 - **`adapters/base.py`**：协议接缝。六个 Protocol（Daily/Snapshot/Board/Fundamentals/List/IndexDaily）合成 `DataAdapter`；失败一律抛 `FetchError`，返回空列表不是错误（`base.py:174-260`）。`BAR_FIELDS` 等列集是行 dict 与落库列的共同词汇（`base.py:20-171`）。北交所代码（4/8/9 开头）`is_bse_code` 明确拒绝（`base.py:263-265`）；`json_safe` 做透传序列化（NaN/numpy/日期→JSON 安全值，不改键名）（`base.py:268-294`）。
 - **三个真实适配器**：懒加载第三方库，未安装报明确 `FetchError`（`pyproject.toml:13-14`）。日线/快照/清单链顺序 efinance→akshare→baostock（`adapters/__init__.py:38-44`）；基本面链按数据丰富度排序 akshare→efinance→baostock（`adapters/__init__.py:47-57`）。能力差异：efinance 盘面仅支持 indices 且无干净指数历史接口；akshare 五 section 全支持（东财接口）；baostock 无全市场快照、无振幅/换手列（置 null 不伪造）（`efinance_adapter.py:1-2`、`akshare_adapter.py:1-5`、`baostock_adapter.py:1-7`）。
-- **`_eastmoney.py` / `_board_em.py`**：东财中文列→落库行 dict 的纯函数映射，不 import 第三方库，测试无需触网；`-`/空/nan 统一映射为 None（`_eastmoney.py:1-6`、`_board_em.py:1-8`）。
+- **`_eastmoney.py` / `_board_em.py`**：东财中文列→落库行 dict 的纯函数映射，不 import 第三方库，测试无需触网；`-`/空/nan 统一映射为 None（`_eastmoney.py:1-6`、`_board_em.py:1-8`）。金额统一规约为万元：元值经 `_wan`、中文金额串（"X亿"/"X万"/无单位按万元）经 `_money_cn`（ADR 0006）。
 - **妙想不经适配层**：`mx_client.py` 是独立 HTTP 客户端（懒加载、`MX_APIKEY` 缺失报明确 `MXError`、query/search 两方法各对一个 endpoint，`mx_client.py:20-56`）；`mx_quota.py` 是本地 JSON 配额 ledger（skill×日期计数、默认 20 次/日、环境变量 `MX_DAILY_LIMIT*`/`MX_QUOTA_FILE` 覆盖、时钟与路径可注入，`mx_quota.py:15-54`）。两者只服务 `tools_mx`，不进 fallback 链（ADR 0005）。
 
 ### PostgreSQL 表（`sql/001-011`，独立新库，ADR 0002）
 
 - 日线类：`stock_daily`（带 `adj` 与 `source` 列）、`index_daily`（指数与个股分表——`000001` 代码冲突，指数无复权）、`stock_list`（主键 `stock_code`，全量回溯标的来源）（`sql/001`、`sql/010`、`sql/009`、ADR 0004）。
 - 快照类：`market_snapshot`（`sql/002`）。
-- 盘面类：`market_indices`/`market_boards`/`zt_pool`/`strong_stocks` + lhb 五表（`lhb_basic`/`lhb_stock_detail`/`lhb_stock_statistic`/`lhb_yyb_capital`/`lhb_yyb_most`；`lhb_stock_detail` 无业务唯一键，仅随父表存在）（`sql/003-007`、`repository.py:330-331`）。
+- 盘面类：`market_indices`/`market_boards`/`zt_pool`/`strong_stocks` + lhb 五表（`lhb_basic`/`lhb_stock_detail`/`lhb_stock_statistic`/`lhb_yyb_capital`/`lhb_yyb_most`；`lhb_basic` 业务键 `(trade_date, stock_code, lhb_reason)`——同股当日多榜单按原因各一行；`lhb_stock_detail` 无业务唯一键，仅随父表存在；yyb 两表上游无卖出/净额等列、恒 null 不伪造，`lhb_yyb_most.buy_amount` 口径为"合计动用资金"非纯买入）（`sql/003-007`、`repository.py:330-331`）。
+- 金额口径：全库金额列统一万元（成交额/市值/龙虎榜金额等），换算在适配器映射层（`_wan`/`_money_cn`）；基本面透传除外（ADR 0006）。
 - `conclusions`：业务唯一键 `(subject_type, subject_code, trade_date, conclusion_type)` 在 schema 层钉死，`payload` 为 jsonb、结构由写入方 skill 自报、server 不校验（`sql/008_conclusions.sql:3-17`、ADR 0003）。
 - `news_items`：资讯表（mx-search 落库，ADR 0005）。业务唯一键 `(news_code, subject_type, subject_code)`；列含资讯类型/标题/正文截断/`publish_time`（timestamptz）/来源/链接（可空，研报无原文链接）/研报机构评级（可空）/`raw` jsonb 原文（`sql/011_news_items.sql:1-24`）。
 
