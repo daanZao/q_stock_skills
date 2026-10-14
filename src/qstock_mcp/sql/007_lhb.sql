@@ -1,6 +1,8 @@
 -- 龙虎榜四表，结构继承旧 appdb 实测；detail 经 FK 挂 basic
 -- 命名约定：lhb=龙虎榜，yyb=营业部；yyb 两表的 fetch_date 是"抓取日"语义（appdb 实测如此），区别于 trade_date
 -- lhb_stock_detail 无业务唯一键（忠于 appdb）：detail 行随父行 upsert 整体替换，不做行级 ON CONFLICT
+-- lhb_basic 业务键含 lhb_reason：上游按 (股票, 上榜原因) 一行一条，同股当日可多榜单；
+-- 键若仅 (trade_date, stock_code)，单批多行 INSERT ... ON CONFLICT 撞键整批回滚
 CREATE TABLE IF NOT EXISTS lhb_basic (
     id              bigserial PRIMARY KEY,
     trade_date      text NOT NULL,  -- yyyymmdd
@@ -9,14 +11,22 @@ CREATE TABLE IF NOT EXISTS lhb_basic (
     close_price     real,
     change_percent  real,
     turnover_rate   real,
-    lhb_reason      text,
+    lhb_reason      text NOT NULL DEFAULT '',
     net_buy_amount  real,
     buy_amount      real,
     sell_amount     real,
     total_amount    real,
     created_at      timestamp DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT lhb_basic_date_code_key UNIQUE (trade_date, stock_code)
+    CONSTRAINT lhb_basic_date_code_reason_key UNIQUE (trade_date, stock_code, lhb_reason)
 );
+-- 既有库迁移（幂等，ensure_schema 每次执行）：旧键 (trade_date, stock_code) → 新键含 lhb_reason
+ALTER TABLE lhb_basic ALTER COLUMN lhb_reason SET DEFAULT '';
+UPDATE lhb_basic SET lhb_reason = '' WHERE lhb_reason IS NULL;
+ALTER TABLE lhb_basic ALTER COLUMN lhb_reason SET NOT NULL;
+ALTER TABLE lhb_basic DROP CONSTRAINT IF EXISTS lhb_basic_date_code_key;
+ALTER TABLE lhb_basic DROP CONSTRAINT IF EXISTS lhb_basic_date_code_reason_key;
+ALTER TABLE lhb_basic ADD CONSTRAINT lhb_basic_date_code_reason_key
+    UNIQUE (trade_date, stock_code, lhb_reason);
 CREATE INDEX IF NOT EXISTS idx_lhb_basic_code ON lhb_basic (stock_code);
 CREATE INDEX IF NOT EXISTS idx_lhb_basic_date ON lhb_basic (trade_date);
 
@@ -56,6 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_lhb_statistic_code ON lhb_stock_statistic (stock_
 CREATE INDEX IF NOT EXISTS idx_lhb_statistic_date ON lhb_stock_statistic (trade_date);
 
 CREATE TABLE IF NOT EXISTS lhb_yyb_capital (
+    -- 上游（东财营业部资金榜）无卖出/净额/均额列：sell_amount/net_buy_amount/avg_amount_per_trade 恒 null（不伪造）；
+    -- 金额列为中文串（"X亿"/"X万"/无单位按万元），经 _money_cn 解析为万元（ADR 0006）
     id                  bigserial PRIMARY KEY,
     fetch_date          text NOT NULL,  -- yyyymmdd
     rank                integer,
@@ -72,6 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_lhb_yyb_capital_date ON lhb_yyb_capital (fetch_da
 CREATE INDEX IF NOT EXISTS idx_lhb_yyb_capital_seat ON lhb_yyb_capital (seat_name);
 
 CREATE TABLE IF NOT EXISTS lhb_yyb_most (
+    -- 上游（东财营业部排行）无买卖分列：sell_amount/sell_count/net_buy_amount 恒 null（不伪造）；
+    -- buy_amount 上游口径为"合计动用资金"（买+卖合计），非纯买入；金额为万元（ADR 0006）
     id              bigserial PRIMARY KEY,
     fetch_date      text NOT NULL,  -- yyyymmdd
     rank            integer,

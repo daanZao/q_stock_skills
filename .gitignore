@@ -11,6 +11,8 @@ __pycache__/
 .claude/
 .kimi-code/
 
+# tempfiles
+files/
 
 
 # Distribution / packaging
@@ -142,6 +144,9 @@ celerybeat.pid
 *.rdb
 *.aof
 *.pid
+
+# tempfile
+*.DS_Store
 
 # RabbitMQ
 mnesia/

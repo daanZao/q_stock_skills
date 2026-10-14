@@ -6,6 +6,8 @@ stock_daily 业务键 (stock_code, trade_date, adj)；market_snapshot 业务键
 stock_list（主键 stock_code）与 index_daily（业务键 index_code + trade_date）。
 """
 
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from psycopg2.extras import Json, execute_values
@@ -22,6 +24,9 @@ from .adapters.base import (
     STRONG_FIELDS,
     ZT_POOL_FIELDS,
 )
+from .dates import add_days
+
+log = logging.getLogger(__name__)
 
 _UPSERT_SQL = """
 INSERT INTO stock_daily (stock_code, trade_date, {cols}, adj, source, updated_at)
@@ -228,6 +233,42 @@ def upsert_index_daily(conn, index_code: str, rows: list[dict], source: str) -> 
     return len(values)
 
 
+_INDEX_DAILY_QUERY_COLS = ("index_code",) + BAR_FIELDS + ("source",)
+
+
+def select_index_daily(
+    conn,
+    index_code: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按指数代码 + 日期范围（yyyymmdd 闭区间）查询 index_daily，升序返回。
+
+    limit 取区间内最近 N 行（先倒序限量再翻转回升序），None 不限；
+    start/end 缺省不对该端限界。内部列（id/created_at/updated_at）不返回。
+    """
+    where, args = ["index_code = %s"], [index_code]
+    if start is not None:
+        where.append("trade_date >= %s")
+        args.append(start)
+    if end is not None:
+        where.append("trade_date <= %s")
+        args.append(end)
+    sql = (
+        f"SELECT {', '.join(_INDEX_DAILY_QUERY_COLS)} FROM index_daily"
+        f" WHERE {' AND '.join(where)} ORDER BY trade_date DESC"
+    )
+    if limit is not None:
+        sql += " LIMIT %s"
+        args.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        rows = [dict(zip(_INDEX_DAILY_QUERY_COLS, row)) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
+
+
 # ---------------------------------------------------------------- 盘面快照（issue #5）
 
 # section → [(表名, 日期列, 业务键(除日期列), 数据列)]；表结构见 sql/003-007。
@@ -243,7 +284,7 @@ BOARD_SECTION_TABLES: dict[str, list[tuple[str, str, tuple, tuple]]] = {
         ("strong_stocks", "trade_date", ("stock_code",), STRONG_FIELDS)
     ],
     "lhb": [
-        ("lhb_basic", "trade_date", ("stock_code",), LHB_BASIC_FIELDS),
+        ("lhb_basic", "trade_date", ("stock_code", "lhb_reason"), LHB_BASIC_FIELDS),
         ("lhb_stock_statistic", "trade_date", ("stock_code",), LHB_STATISTIC_FIELDS),
         ("lhb_yyb_capital", "fetch_date", ("seat_name",), LHB_YYB_CAPITAL_FIELDS),
         ("lhb_yyb_most", "fetch_date", ("seat_name",), LHB_YYB_MOST_FIELDS),
@@ -264,14 +305,22 @@ def upsert_board_rows(
 
     行 dict 自带 date_col 键时覆盖 default_date（如 lhb_basic 的"上榜日"）。
     表名/列名仅来自 BOARD_SECTION_TABLES 内部常量，不接受外部输入。
+    同业务键重复行 last-wins 去重（上游脏数据防御），丢弃数记 log。
     """
-    values = [
-        [row.get(date_col) or default_date] + [row.get(f) for f in fields]
-        for row in rows
-    ]
+    cols = (date_col,) + tuple(fields)
+    key_idx = [cols.index(k) for k in key_cols]
+    deduped: dict[tuple, list] = {}
+    for row in rows:
+        value = [row.get(date_col) or default_date] + [row.get(f) for f in fields]
+        deduped[(value[0], *(value[i] for i in key_idx))] = value
+    dropped = len(rows) - len(deduped)
+    if dropped:
+        log.warning(
+            "upsert_board_rows: %s 丢弃 %d 行业务键重复行（last-wins）", table, dropped
+        )
+    values = list(deduped.values())
     if not values:
         return 0
-    cols = (date_col,) + tuple(fields)
     updates = [f for f in fields if f not in key_cols]
     sql = (
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES %s "
@@ -400,3 +449,168 @@ def select_conclusions(
     with conn.cursor() as cur:
         cur.execute(sql, args)
         return [dict(zip(_CONCLUSION_COLS, row)) for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------- 资讯条目（issue #24/T2）
+
+# 业务唯一键 (news_code, subject_type, subject_code) 在 schema 层钉死
+# （sql/011_news_items.sql）。inserted/updated 判定用写入前预查业务键，
+# 不用 xmax 内部列（conclusions 先例）。
+_NEWS_COLS = (
+    "news_code", "subject_type", "subject_code", "information_type",
+    "title", "content", "publish_time", "source", "url", "author",
+    "ins_name", "rating", "raw",
+)
+
+_UPSERT_NEWS_SQL = """
+INSERT INTO news_items ({cols}, fetched_at)
+VALUES %s
+ON CONFLICT (news_code, subject_type, subject_code) DO UPDATE SET
+    information_type = EXCLUDED.information_type,
+    title = EXCLUDED.title,
+    content = EXCLUDED.content,
+    publish_time = EXCLUDED.publish_time,
+    source = EXCLUDED.source,
+    url = EXCLUDED.url,
+    author = EXCLUDED.author,
+    ins_name = EXCLUDED.ins_name,
+    rating = EXCLUDED.rating,
+    raw = EXCLUDED.raw,
+    fetched_at = now()
+""".format(cols=", ".join(_NEWS_COLS))
+
+# 上游 date 字段实测为 "2026-08-28 19:22:00"；容忍常见变体，解析失败跳过该条
+_NEWS_DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d")
+# 上游时间为东八区（A 股资讯语境，无夏令时）；naive 写 timestamptz 会按会话时区解释
+_NEWS_TZ = timezone(timedelta(hours=8))
+
+
+def _parse_publish_time(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    for fmt in _NEWS_DATE_FORMATS:
+        try:
+            return datetime.strptime(raw.strip(), fmt).replace(tzinfo=_NEWS_TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def _fallback_news_code(title: Any, date: Any) -> str | None:
+    """上游缺条目 id 时的业务键兜底：标题 + 发布时间复合（ticket #24）。"""
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if not isinstance(date, str) or not date.strip():
+        return None
+    return f"fb:{title.strip()}|{date.strip()}"
+
+
+def upsert_news_items(
+    conn, subject_type: str, subject_code: str, items: list[dict]
+) -> dict:
+    """按业务键 upsert 一批资讯条目，返回 {"inserted", "updated", "skipped"} 计数。
+
+    items 为上游 news-search 条目 dict（字段名为上游 camelCase）。可选字段
+    缺失映射为 None；业务键取上游条目 id，缺失时用标题+发布时间复合兜底；
+    date 解析失败、业务键兜底也凑不出、批内键重复的条目跳过并计入
+    skipped（一行脏数据不拖垮整批）。
+    """
+    values = []
+    seen: set = set()
+    skipped = 0
+    for item in items:
+        publish_time = _parse_publish_time(item.get("date"))
+        code = item.get("code") or _fallback_news_code(
+            item.get("title"), item.get("date")
+        )
+        if not code or publish_time is None or code in seen:
+            skipped += 1
+            continue
+        seen.add(code)
+        values.append(
+            [
+                code,
+                subject_type,
+                subject_code,
+                item.get("informationType"),
+                item.get("title"),
+                item.get("content"),
+                publish_time,
+                item.get("source"),
+                item.get("jumpUrl"),
+                item.get("author"),
+                item.get("insName"),
+                item.get("rating"),
+                Json(item),
+            ]
+        )
+    if not values:
+        return {"inserted": 0, "updated": 0, "skipped": skipped}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT news_code FROM news_items"
+            " WHERE subject_type = %s AND subject_code = %s AND news_code = ANY(%s)",
+            (subject_type, subject_code, [v[0] for v in values]),
+        )
+        existing = {row[0] for row in cur.fetchall()}
+        execute_values(
+            cur,
+            _UPSERT_NEWS_SQL,
+            values,
+            template="(" + ", ".join(["%s"] * len(_NEWS_COLS)) + ", now())",
+        )
+    conn.commit()
+    inserted = sum(1 for v in values if v[0] not in existing)
+    return {"inserted": inserted, "updated": len(values) - inserted, "skipped": skipped}
+
+
+# 查询不返回内部列（id/fetched_at）与 raw 原文（select_conclusions 不返回
+# 内部列的同先例）；publish_time 序列化为 ISO 字符串，保证输出 JSON 安全
+_NEWS_QUERY_COLS = tuple(c for c in _NEWS_COLS if c != "raw")
+
+
+def _day_start_plus8(yyyymmdd: str) -> str:
+    """yyyymmdd → 东八区当日 00:00 的 timestamptz 字面量（与落库时区一致）。"""
+    return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]} 00:00:00+08"
+
+
+def select_news_items(
+    conn,
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按 subject + 发布时间范围查资讯：发布时间倒序（news_code 决胜），可限量。
+
+    start/end 为 yyyymmdd 闭区间（按东八区整日计：start 含当日 00:00 起，
+    end 含当日 23:59 止）；subject 与时间范围全缺省返回全表（建议带 limit）。
+    """
+    where: list[str] = []
+    args: list = []
+    if subject_type is not None:
+        where.append("subject_type = %s")
+        args.append(subject_type)
+    if subject_code is not None:
+        where.append("subject_code = %s")
+        args.append(subject_code)
+    if start is not None:
+        where.append("publish_time >= %s::timestamptz")
+        args.append(_day_start_plus8(start))
+    if end is not None:
+        where.append("publish_time < %s::timestamptz")
+        args.append(_day_start_plus8(add_days(end, 1)))
+    sql = f"SELECT {', '.join(_NEWS_QUERY_COLS)} FROM news_items"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY publish_time DESC, news_code"
+    if limit is not None:
+        sql += " LIMIT %s"
+        args.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        rows = [dict(zip(_NEWS_QUERY_COLS, row)) for row in cur.fetchall()]
+    for row in rows:
+        row["publish_time"] = row["publish_time"].isoformat()
+    return rows

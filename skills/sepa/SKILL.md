@@ -1,6 +1,6 @@
 ---
 name: sepa
-description: SEPA（Specific Entry Point Analysis，Minervini 超级绩效）分析方法论。当用户请求对个股做 SEPA 分析/趋势模板检查/VCP 入场点评估时使用；经 MCP query_daily + indicator-tools 管道获取指标、get_fundamentals 获取基本面，产出覆盖趋势、基本面、入场点、风险排查的结构化结论。
+description: SEPA（Specific Entry Point Analysis，Minervini 超级绩效）分析方法论。当用户请求对个股做 SEPA 分析/趋势模板检查/VCP 入场点评估，或对三源选股结论做妙想 mx-data 抽样验证时使用；经 MCP query_daily + indicator-tools 管道获取指标、get_fundamentals 获取基本面，产出覆盖趋势、基本面、入场点、风险排查的结构化结论，验证结论落 sepa.mx_verified。
 ---
 
 # SEPA 方法论
@@ -79,4 +79,31 @@ Stage 1/3/4 或 200 日线走平向下：**一票否决，输出"放弃"并终�
 
 **数据缺失红线**：关键数据（日线、基本面）无法获得时，结论中明确标注缺失项及其对结论可信度的影响，不得编造数据补齐分析。
 
-**结论持久化（可选）**：最终结论可经 MCP `save_conclusion(subject_type="stock", subject_code=<代码>, trade_date=<交易日>, conclusion_type="sepa.full", payload=<结论 JSON>)` 落库；payload 结构由本 skill 自行约定，同键重复写入为 upsert。
+**结论持久化（可选）**：最终结论可经 MCP `save_conclusion(subject_type="stock", subject_code=<代码>, trade_date=<交易日>, conclusion_type="sepa.full", payload=<结论 JSON>)` 落库；payload 结构由本 skill 自行约定，同键重复写入为 upsert。妙想验证结论落 `sepa.mx_verified`，见下节。
+
+## 妙想验证（三源选股后的抽样复核，可选）
+
+SEPA 选股结论可经妙想 mx-data（东财官方口径）抽样复核后落库，形成"三源选股 → 验证 → 结论持久化"闭环。mx-data 每日配额有限（默认 20 次/日，每次响应回显 `quota:{skill,used,limit}`）——**只抽查不批量**；本地配额触顶（`status:"error"`，不调上游）或上游自身日限（code=113）时改日再验，选股结论照常产出并在数据缺口声明中标注"未经妙想验证"。
+
+### 工作流
+
+1. **抽样**：从入选个股挑 1-3 只验证，每只 1-2 次调用。
+2. **提问**：`mx_query(tool_query=<问句>)`。问句按库内口径组装——写清证券（名称或 6 位代码）+ 报告期范围 + 指标名；mx 默认按**单季**返回，无需指定，需要累计口径时在问句中写明（如"2025年累计净利润"）；用宽问句一次覆盖多期（如"潍柴动力2024年至2026年各季度净利润"），比逐期问省配额。
+3. **比对**：mx 返回值与 E 维度已有的 `get_fundamentals` 数据逐项对照（口径换算见守则）。
+4. **落库**：`save_conclusion(subject_type="stock", subject_code=<代码>, trade_date=<交易日>, conclusion_type="sepa.mx_verified", payload=<字段约定见下>)`；同键重复写入为 upsert（见上节），复核结论更新即覆盖。
+
+### payload 字段约定（sepa.mx_verified）
+
+- `queries`：问句原文列表，每条附口径说明（报告期、单季/累计、指标口径码如 NETPROFIT_S）
+- `metrics`：摘录的关键指标比对，每项含 `name`（指标名）、`period`（报告期）、`mx_value`（mx 值）、`source_value`（三源值）、`match`（是否一致）
+- `verdict`：`consistent` / `mismatch` / `partial`（部分期间不可验）
+- `notes`：披露状态校验结果、港股过滤说明、解析变体等自由文本
+
+### 消费方守则（mx-data 实测陷阱；server 只透传不解析，解析责任全在消费方）
+
+- **口径先换算**：mx 默认返回**单季**，三源财务接口默认**累计**——比对前把三源累计换算为单季（本期累计 − 上期累计）。
+- **指标名不等于口径**：mx"净利润"是含少数股东损益的总净利润（`field.returnSourceCode=NETPROFIT_S`），efinance"净利润"实为归母净利润——跨源对齐时显式区分归母 vs 总额；取值走 `rawTable` 原始精度，并用 `field` 元信息（`returnSourceCode`/`dateGranularity`/`unitName`）核对口径。
+- **未披露期间静默回退**：问未披露期间不报错，返回最近已披露期的旧值，且单期响应的 `headName` 只显示证券名、不带报告期标签。先以三源或披露日历确认该期已披露，再采信 mx 数值；宽问句下未披露期直接从结果表缺席，可据此辨识。
+- **过滤港股行**：实体识别会顺带返回港股行（如潍柴动力带 02338.HK），按 `entityTagDTO.secuCode` 锁定 A 股代码，不信任行序。
+- **响应两种变体分派解析**：指标类查询 `table` 键为数字指标码（需 `nameMap` 解码，附 `field` 元信息）；分红类查询直接用中文列名、无 `field`。按键型与 `headName` 语义分派，不写死单一结构。
+- **错误如实转述**：`status:"error"`（`MX_APIKEY` 未配置 / 上游 code 100 参数错误 / 113 配额上限 / 114 密钥无效）时终止验证并如实标注，不拿旧结论充数。

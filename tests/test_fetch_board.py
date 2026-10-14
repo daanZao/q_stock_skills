@@ -215,3 +215,68 @@ def test_fetch_repeated_is_idempotent_and_updates_values(pg_test):
         )
         assert cur.fetchone()[0] == 3001.0
     conn.close()
+
+
+def test_lhb_basic_multi_reason_same_stock_lands(pg_test):
+    """同股当日多榜单：上游按 (股票, 上榜原因) 返回多行，业务键含 lhb_reason，
+    两行都落库且重跑幂等（回归：键仅 (trade_date, stock_code) 时单条多行
+    INSERT ... ON CONFLICT 撞键，CardinalityViolation 整批回滚）。"""
+    _init(pg_test)
+    base = LHB_ROWS["lhb_basic"][0]
+    lhb = {
+        **LHB_ROWS,
+        "lhb_basic": [
+            base,
+            dict(base, lhb_reason="换手率达20%的证券", net_buy_amount=5.0e7),
+        ],
+    }
+    ak = FakeBoardAdapter("akshare", rows={"lhb": lhb})
+    result = fetch_board_snapshot(
+        trade_date="20240105", sections="lhb", adapters=[ak]
+    )
+    assert result["status"] == "ok"
+    assert result["sections"]["lhb"]["status"] == "ok"
+    assert _count(pg_test, "lhb_basic") == 2
+    # 重跑幂等：同业务键 upsert，不产生重复行
+    again = fetch_board_snapshot(
+        trade_date="20240105", sections="lhb",
+        adapters=[FakeBoardAdapter("akshare", rows={"lhb": lhb})],
+    )
+    assert again["sections"]["lhb"]["status"] == "ok"
+    assert _count(pg_test, "lhb_basic") == 2
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT net_buy_amount FROM lhb_basic "
+            "WHERE trade_date = '20240105' AND stock_code = '600519' "
+            "AND lhb_reason = '换手率达20%的证券'"
+        )
+        assert cur.fetchone()[0] == 5.0e7
+    conn.close()
+
+
+def test_boards_upstream_dup_key_last_wins(pg_test, caplog):
+    """上游板块同代码重名（两行价格微差，东财行业接口实测）：upsert 按业务键
+    last-wins 去重落一行并记 warning，不再 CardinalityViolation 整批回滚。"""
+    _init(pg_test)
+    dup = BOARD_ROWS + [
+        dict(BOARD_ROWS[0], latest_price=BOARD_ROWS[0]["latest_price"] + 0.01)
+    ]
+    ak = FakeBoardAdapter("akshare", rows={"boards": dup})
+    with caplog.at_level("WARNING"):
+        result = fetch_board_snapshot(
+            trade_date="20240105", sections="boards", adapters=[ak]
+        )
+    assert result["sections"]["boards"]["status"] == "ok"
+    assert result["sections"]["boards"]["rows"] == len(BOARD_ROWS)
+    assert _count(pg_test, "market_boards") == len(BOARD_ROWS)
+    assert "业务键重复行" in caplog.text
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT latest_price FROM market_boards "
+            "WHERE trade_date = '20240105' AND board_type = 'industry' "
+            "AND board_name = '酿酒行业'"
+        )
+        assert cur.fetchone()[0] == 2000.01  # last-wins
+    conn.close()

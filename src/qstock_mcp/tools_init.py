@@ -6,6 +6,10 @@
 （重操作，显式开启，复用日线头尾自愈，单股失败不中断，进度/失败在
 parts.backfill 中报告）。输出自描述 JSON（dict）：status / tool / params /
 schema_files / tables / parts / failed_parts。
+
+query_index_daily（issue #33/T1）：index_daily 已沉淀数据的纯读查询，不触发
+补抓；未知指数代码、坏日期、非法 limit 走统一 error 契约，空结果 count:0
+非错误。
 """
 
 import logging
@@ -13,6 +17,7 @@ from datetime import date
 from typing import Sequence
 
 from .adapters import DataAdapter, default_adapters
+from .dates import normalize_date
 from .db import connect, ensure_schema, list_tables
 from .fetch_chain import (
     AllSourcesFailed,
@@ -20,7 +25,9 @@ from .fetch_chain import (
     fetch_snapshot_with_fallback,
     fetch_stock_list_with_fallback,
 )
+from .output import error as _error
 from .repository import (
+    select_index_daily,
     select_stock_codes,
     upsert_index_daily,
     upsert_snapshot,
@@ -210,3 +217,68 @@ def init_database(
         }
     status = "partial_error" if failed_parts else "ok"
     return {"status": status, **payload}
+
+
+# ------------------------------------------------- query_index_daily（issue #33/T1）
+
+_INDEX_NAMES = dict(MAJOR_INDICES)
+
+# 缺省返回最近 120 根日线（约半年交易日）；start/end 给定时 limit 仍生效
+DEFAULT_INDEX_DAILY_LIMIT = 120
+
+
+def _normalize_or_error(tool: str, params: dict, value: str) -> tuple[str | None, dict | None]:
+    """可选日期参数归一化；非法时返回 (None, error_dict)。"""
+    try:
+        return normalize_date(value), None
+    except ValueError as e:
+        return None, _error(tool, params, str(e))
+
+
+def query_index_daily(
+    index_code: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = DEFAULT_INDEX_DAILY_LIMIT,
+) -> dict:
+    """库内主要指数日线查询（纯读，不补抓）：按日期范围过滤，升序返回最近
+    limit 行；空结果 count:0 非错误。"""
+    tool = "query_index_daily"
+    params = {
+        "index_code": index_code,
+        "start": start,
+        "end": end,
+        "limit": limit,
+    }
+    if index_code not in _INDEX_NAMES:
+        options = ", ".join(f"{c}({n})" for c, n in MAJOR_INDICES)
+        return _error(tool, params, f"未知指数代码: {index_code}（可选: {options}）")
+    if start is not None:
+        start, date_err = _normalize_or_error(tool, params, start)
+        if date_err:
+            return date_err
+    if end is not None:
+        end, date_err = _normalize_or_error(tool, params, end)
+        if date_err:
+            return date_err
+    if start is not None and end is not None and start > end:
+        return _error(tool, params, f"start({start}) 晚于 end({end})")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return _error(tool, params, f"limit 必须为正整数: {limit!r}")
+    conn, err = connect()
+    if err:
+        return _error(tool, params, err)
+    try:
+        rows = select_index_daily(conn, index_code, start, end, limit)
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "tool": tool,
+        "params": params,
+        "index_code": index_code,
+        "index_name": _INDEX_NAMES[index_code],
+        "range": {"start": start, "end": end},
+        "count": len(rows),
+        "rows": rows,
+    }

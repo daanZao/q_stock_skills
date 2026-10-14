@@ -4,9 +4,12 @@
 （SKILLProject/stock-data/fetch_board_snapshot.py）为准："-" / "" / nan / None
 统一映射为 None（不伪造数值）；行级日期列（efinance"最新交易日"、lhb"上榜日"/
 "最近上榜日"）写入 trade_date 键，缺失时为 None 由工具层回退到传入日期。
+
+金额单位统一为万元（ADR 0006）：东财元值经 _wan 换算；yyb 两表的中文金额
+字符串（"X亿"/"X万"/无单位纯数字按万元）经 _money_cn 解析。
 """
 
-from ._eastmoney import _first, _int, _num
+from ._eastmoney import _first, _int, _money_cn, _num, _wan
 
 
 def _text(v):
@@ -36,7 +39,7 @@ def map_index_rows(records: list[dict]) -> list[dict]:
                 "change_percent": _num(r.get("涨跌幅")),
                 "change_amount": _num(r.get("涨跌额")),
                 "volume": _int(r.get("成交量")),
-                "amount": _num(r.get("成交额")),
+                "amount": _wan(r.get("成交额")),
                 "amplitude": _num(r.get("振幅")),  # efinance 无此列 → None
                 "high": _num(r.get("最高")),
                 "low": _num(r.get("最低")),
@@ -96,7 +99,7 @@ def map_zt_pool_rows(records: list[dict], pool_type: str) -> list[dict]:
             "change_percent": _num(r.get("涨跌幅")),
             "zt_price": None,
             "volume": None,
-            "amount": _num(r.get("成交额")),
+            "amount": _wan(r.get("成交额")),
             "limit_up_time": None,
             "limit_up_type": None,
             "consecutive_boards": None,
@@ -126,9 +129,9 @@ def map_strong_rows(records: list[dict]) -> list[dict]:
                 "latest_price": _num(r.get("最新价")),
                 "change_percent": _num(r.get("涨跌幅")),
                 "volume": None,
-                "amount": _num(r.get("成交额")),
+                "amount": _wan(r.get("成交额")),
                 "turnover_rate": _num(r.get("换手率")),
-                "market_cap": _num(r.get("总市值")),
+                "market_cap": _wan(r.get("总市值")),
                 "consecutive_boards": None,
                 "industry": _text(r.get("所属行业")),
                 "reason": _text(r.get("入选理由")),
@@ -149,11 +152,11 @@ def map_lhb_basic_rows(records: list[dict]) -> list[dict]:
                 "close_price": _num(r.get("收盘价")),
                 "change_percent": _num(r.get("涨跌幅")),
                 "turnover_rate": _num(r.get("换手率")),
-                "lhb_reason": _text(r.get("上榜原因")),
-                "net_buy_amount": _num(r.get("龙虎榜净买额")),
-                "buy_amount": _num(r.get("龙虎榜买入额")),
-                "sell_amount": _num(r.get("龙虎榜卖出额")),
-                "total_amount": _num(r.get("龙虎榜成交额")),
+                "lhb_reason": _text(r.get("上榜原因")) or "",  # 业务键成员，禁 None
+                "net_buy_amount": _wan(r.get("龙虎榜净买额")),
+                "buy_amount": _wan(r.get("龙虎榜买入额")),
+                "sell_amount": _wan(r.get("龙虎榜卖出额")),
+                "total_amount": _wan(r.get("龙虎榜成交额")),
             }
         )
     return rows
@@ -169,9 +172,9 @@ def map_lhb_statistic_rows(records: list[dict]) -> list[dict]:
                 "stock_code": str(r["代码"]),
                 "stock_name": str(r["名称"]),
                 "appear_count_3m": _int(r.get("上榜次数")),
-                "buy_amount_3m": _num(r.get("龙虎榜买入额")),
-                "sell_amount_3m": _num(r.get("龙虎榜卖出额")),
-                "net_buy_3m": _num(r.get("龙虎榜净买额")),
+                "buy_amount_3m": _wan(r.get("龙虎榜买入额")),
+                "sell_amount_3m": _wan(r.get("龙虎榜卖出额")),
+                "net_buy_3m": _wan(r.get("龙虎榜净买额")),
                 "buy_seat_count": _int(r.get("买方机构次数")),
                 "sell_seat_count": _int(r.get("卖方机构次数")),
             }
@@ -187,8 +190,8 @@ def map_lhb_yyb_capital_rows(records: list[dict]) -> list[dict]:
             {
                 "rank": _int(r.get("序号")),
                 "seat_name": str(r["营业部名称"]),
-                "total_amount": _num(r.get("累计参与金额")),
-                "buy_amount": _num(r.get("累计买入金额")),
+                "total_amount": _money_cn(r.get("累计参与金额")),
+                "buy_amount": _money_cn(r.get("累计买入金额")),
                 "sell_amount": None,
                 "net_buy_amount": None,
                 "avg_amount_per_trade": None,
@@ -206,7 +209,7 @@ def map_lhb_yyb_most_rows(records: list[dict]) -> list[dict]:
                 "rank": _int(r.get("序号")),
                 "seat_name": str(r["营业部名称"]),
                 "appear_count": _int(r.get("上榜次数")),
-                "buy_amount": _num(r.get("合计动用资金")),
+                "buy_amount": _money_cn(r.get("合计动用资金")),  # 上游口径为"合计动用资金"（买+卖合计），非纯买入
                 "buy_count": _int(r.get("年内买入股票只数")),
                 "sell_amount": None,
                 "sell_count": None,

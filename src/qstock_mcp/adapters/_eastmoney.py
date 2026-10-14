@@ -2,6 +2,9 @@
 
 纯函数，不 import 第三方库，测试无需触网。"-" / "" / None 统一映射为 None（不伪造数值）。
 
+金额单位：全库金额统一规约为万元（ADR 0006）——东财原始列为元，经 _wan 换算；
+中文金额字符串（"X亿"/"X万"/无单位）经 _money_cn 解析为万元。
+
 全市场快照（issue #4）：efinance(get_realtime_quotes) 与 akshare(stock_zh_a_spot_em)
 列名略有差异（昨收/昨日收盘、市盈率-动态/动态市盈率），map_spot_rows 兼容两种；
 efinance 无振幅/市净率列，对应字段为 None（不伪造）。
@@ -23,6 +26,26 @@ def _int(v):
     return None if n is None else int(n)
 
 
+def _wan(v):
+    """金额元 → 万元（全库金额统一规约到万元，ADR 0006）。"""
+    n = _num(v)
+    return None if n is None else n / 1e4
+
+
+def _money_cn(v):
+    """东财中文金额字符串 → 万元："X亿"→×1e4，"X万"→原值，无单位纯数字按万元计
+    （上游实测推断：无单位值与同行"万"档量级自洽，ADR 0006）。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.endswith("亿"):
+        n = _num(s[:-1])
+        return None if n is None else n * 1e4
+    if s.endswith("万"):
+        return _num(s[:-1])
+    return _num(s)
+
+
 def _first(r: dict, *keys: str):
     for k in keys:
         if k in r:
@@ -42,7 +65,7 @@ def map_eastmoney_rows(records: list[dict]) -> list[dict]:
                 "low": _num(r.get("最低")),
                 "close": _num(r.get("收盘")),
                 "volume": _int(r.get("成交量")),
-                "amount": _num(r.get("成交额")),
+                "amount": _wan(r.get("成交额")),
                 "amplitude": _num(r.get("振幅")),
                 "change_percent": _num(r.get("涨跌幅")),
                 "change_amount": _num(r.get("涨跌额")),
@@ -74,9 +97,9 @@ def map_spot_rows(records: list[dict]) -> list[dict]:
                 "pe_ratio": _num(_first(r, "市盈率-动态", "动态市盈率", "市盈率(动态)")),
                 "pb_ratio": _num(r.get("市净率")),
                 "volume": _int(r.get("成交量")),
-                "amount": _num(r.get("成交额")),
-                "market_cap": _num(r.get("总市值")),
-                "float_cap": _num(r.get("流通市值")),
+                "amount": _wan(r.get("成交额")),
+                "market_cap": _wan(r.get("总市值")),
+                "float_cap": _wan(r.get("流通市值")),
             }
         )
     return rows

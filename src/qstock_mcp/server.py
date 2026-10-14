@@ -14,6 +14,7 @@ from . import (
     tools_daily,
     tools_fundamentals,
     tools_init,
+    tools_mx,
     tools_snapshot,
 )
 
@@ -56,6 +57,23 @@ def query_daily(
 ) -> dict:
     """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间，参数同 fetch_daily。"""
     return tools_daily.query_daily(stock_code, days=days, start=start, end=end, adj=adj)
+
+
+@mcp.tool()
+def query_index_daily(
+    index_code: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 120,
+) -> dict:
+    """库内主要指数历史日线查询（纯读，不触发补抓）：按日期范围过滤，按 trade_date 升序返回最近 limit 行（缺省 120）。
+
+    index_code 限 7 个主要指数：000001(上证指数)/399001(深证成指)/399006(创业板指)/
+    000300(沪深300)/000016(上证50)/000905(中证500)/000688(科创50)，数据由
+    init_database 轻量初始化写入全历史。start/end 为闭区间（yyyymmdd 或
+    yyyy-mm-dd），缺省不限；空结果返回 count:0（非错误）。
+    """
+    return tools_init.query_index_daily(index_code, start=start, end=end, limit=limit)
 
 
 @mcp.tool()
@@ -106,6 +124,62 @@ def get_fundamentals(stock_code: str) -> dict:
     与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
     """
     return tools_fundamentals.get_fundamentals(stock_code)
+
+
+@mcp.tool()
+def mx_query(tool_query: str) -> dict:
+    """妙想 mx-data 透传（proxy 能力面）：把自然语言问句原样发给 mx-data，返回上游原始 JSON（data 为完整响应 body），不规格化、不落库、不进 fallback 链。
+
+    需要环境变量 MX_APIKEY（妙想开放平台 apikey），未配置返回 status:"error" 与
+    明确原因。本地每日配额：默认上限 20 次/日（MX_DAILY_LIMIT 通用覆盖，
+    MX_DAILY_LIMIT_MX_DATA 单 skill 覆盖），按日自动重置，持久化于
+    ~/.qstock-mcp/quota.json（MX_QUOTA_FILE 覆盖）；触顶时不调上游直接报错。
+    每次响应回显 quota:{skill,used,limit}；上游业务码非 0（100 参数错误 /
+    113 配额上限 / 114 密钥无效）走统一 error 契约，绝不伪造数据。
+    """
+    return tools_mx.mx_query(tool_query)
+
+
+@mcp.tool()
+def mx_search(
+    query: str, subject_type: str = "market", subject_code: str = "_market"
+) -> dict:
+    """妙想 mx-search 资讯搜索并落库（proxy 能力面）：搜索新闻/公告/研报等资讯，按 news_code 去重后写入 news_items 表（业务键 (news_code, subject_type, subject_code)，重复调用幂等 upsert，报告 inserted/updated/skipped 计数）。
+
+    需要环境变量 MX_APIKEY 与 PG_DSN，未配置返回 status:"error" 与明确原因。
+    subject 缺省大盘级（market/_market）；个股资讯传 subject_type="stock" +
+    subject_code=6 位代码，同一资讯可挂多个 subject。本地每日配额独立于
+    mx_query：默认上限 20 次/日（MX_DAILY_LIMIT 通用覆盖，
+    MX_DAILY_LIMIT_MX_SEARCH 单 skill 覆盖），触顶不调上游；每次响应回显
+    quota:{skill,used,limit}；上游业务码非 0 走统一 error 契约，绝不伪造数据。
+    """
+    return tools_mx.mx_search(
+        query, subject_type=subject_type, subject_code=subject_code
+    )
+
+
+@mcp.tool()
+def query_news(
+    subject_type: str | None = None,
+    subject_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """库内资讯查询（统一查询能力面）：按 subject + 发布时间范围读 news_items 已沉淀资讯，按资讯发布时间倒序返回，limit 限量（默认 20）。
+
+    纯读：不调上游、不计配额。subject_type/subject_code 缺省不过滤（全 subject）；
+    个股传 subject_type="stock" + subject_code=6 位代码，大盘级为 market/_market。
+    start/end 为闭区间（yyyymmdd 或 yyyy-mm-dd，按东八区整日计），缺省不限。
+    空结果返回 count:0（非错误）。
+    """
+    return tools_mx.query_news(
+        subject_type=subject_type,
+        subject_code=subject_code,
+        start=start,
+        end=end,
+        limit=limit,
+    )
 
 
 @mcp.tool()

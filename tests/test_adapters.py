@@ -6,7 +6,7 @@
 
 import pytest
 
-from qstock_mcp.adapters._eastmoney import map_eastmoney_rows, map_spot_rows, spot_trade_date
+from qstock_mcp.adapters._eastmoney import _money_cn, map_eastmoney_rows, map_spot_rows, spot_trade_date
 from qstock_mcp.adapters.baostock_adapter import (
     BaostockAdapter,
     map_baostock_rows,
@@ -39,7 +39,7 @@ def test_eastmoney_mapping_full_row():
         "low": 9.8,
         "close": 10.2,
         "volume": 12345,
-        "amount": 125000.5,
+        "amount": 12.50005,  # 元 → 万元（ADR 0006）
         "amplitude": 7.0,
         "change_percent": 2.0,
         "change_amount": 0.2,
@@ -129,9 +129,9 @@ def test_spot_mapping_akshare_columns():
         "pe_ratio": 25.0,
         "pb_ratio": 8.0,
         "volume": 12345,
-        "amount": 125000.5,
-        "market_cap": 2.1e12,
-        "float_cap": 2.1e12,
+        "amount": 12.50005,  # 万元
+        "market_cap": 2.1e8,  # 万元
+        "float_cap": 2.1e8,  # 万元
     }
 
 
@@ -305,7 +305,7 @@ def test_strong_mapping():
     (row,) = map_strong_rows([record])
     assert row["stock_code"] == "000001"
     assert row["turnover_rate"] == 3.0
-    assert row["market_cap"] == 2.0e11
+    assert row["market_cap"] == 2.0e7  # 万元
     assert row["reason"] == "放量上涨"
 
 
@@ -319,7 +319,18 @@ def test_lhb_basic_mapping_listing_date():
     assert row["trade_date"] == "20240105"  # 行级"上榜日"
     assert row["close_price"] == 1700.0
     assert row["lhb_reason"] == "涨幅偏离值达7%"
-    assert row["net_buy_amount"] == 1.0e8
+    assert row["net_buy_amount"] == 1.0e4  # 万元
+
+
+def test_lhb_basic_mapping_missing_reason_empty():
+    """上榜原因缺失归一化为 ""（lhb_reason 是业务键成员，NOT NULL）。"""
+    record = {"上榜日": "2024-01-05", "代码": "600519", "名称": "贵州茅台",
+              "收盘价": "1700.0", "涨跌幅": "10.0", "换手率": "1.0",
+              "上榜原因": "-", "龙虎榜净买额": "1.0e8",
+              "龙虎榜买入额": "2.0e8", "龙虎榜卖出额": "1.0e8",
+              "龙虎榜成交额": "3.0e8"}
+    (row,) = map_lhb_basic_rows([record])
+    assert row["lhb_reason"] == ""
 
 
 def test_lhb_statistic_mapping():
@@ -336,17 +347,29 @@ def test_lhb_statistic_mapping():
 def test_lhb_yyb_mapping():
     (cap,) = map_lhb_yyb_capital_rows(
         [{"序号": "1", "营业部名称": "机构专用",
-          "累计参与金额": "1.0e9", "累计买入金额": "6.0e8"}])
+          "累计参与金额": "6.59亿", "累计买入金额": "9785.87万"}])
     assert cap["rank"] == 1
     assert cap["seat_name"] == "机构专用"
-    assert cap["total_amount"] == 1.0e9
-    assert cap["buy_amount"] == 6.0e8
+    assert cap["total_amount"] == 65900.0  # 万元
+    assert cap["buy_amount"] == 9785.87  # 万元
     (most,) = map_lhb_yyb_most_rows(
         [{"序号": "1", "营业部名称": "机构专用", "上榜次数": "10",
-          "合计动用资金": "1.0e9", "年内买入股票只数": "5"}])
+          "合计动用资金": "5.26亿", "年内买入股票只数": "5"}])
     assert most["appear_count"] == 10
-    assert most["buy_amount"] == 1.0e9
+    assert most["buy_amount"] == 52600.0  # 万元；上游口径为"合计动用资金"非纯买入
     assert most["buy_count"] == 5
+
+
+def test_money_cn_formats():
+    """中文金额 → 万元："亿"换算、"万"原值、无单位纯数字按万元计（上游实测推断）、
+    缺失值 None（ADR 0006）。"""
+    assert _money_cn("3.55亿") == 35500.0
+    assert _money_cn("9785.87万") == 9785.87
+    assert _money_cn("9950.85") == 9950.85  # 无单位按万元
+    assert _money_cn(9950.85) == 9950.85
+    assert _money_cn(None) is None
+    assert _money_cn("-") is None
+    assert _money_cn("") is None
 
 
 def test_efinance_rejects_board_sections_other_than_indices():
