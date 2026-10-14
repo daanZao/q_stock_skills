@@ -471,8 +471,7 @@ def run_deviation(args, windows: list) -> int:
         return 0
 
     devs = [stock_by_date[d] - bench_by_date[d] for d in aligned]
-    series = {f"dev{w}": _rolling(devs, w, lambda chunk: sum(chunk), w)
-              for w in windows}
+    series = {f"dev{w}": _rolling(devs, w, sum, w) for w in windows}
 
     tail = args.tail if args.tail > 0 else len(aligned)
     points = []
