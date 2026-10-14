@@ -16,10 +16,10 @@
   - `mx_query` / `mx_search` / `query_news`：妙想自然语言查数与资讯搜索（独立日配额，搜索落库 `news_items`）+ 库内资讯纯读
   - `save_conclusion` / `query_conclusions`：分析结论读写，通用结论表 + JSON payload，同键 upsert
 - **四个 agent skill**（`skills/`，自包含，任何通用 AI agent 可加载）：
-  - `indicator-tools`：指标计算管道脚本（MA/MACD/BOLL/RSI/导数、corr 多标的相关性矩阵、vol_price 量价背离、promote 连板晋级率等），stdin 吃 `query_daily`/`query_index_daily` 输出、stdout 吐指标 JSON，纯标准库不触库
+  - `indicator-tools`：指标计算管道脚本（MA/MACD/BOLL/RSI/导数、corr 多标的相关性矩阵、vol_price 量价背离、promote 连板晋级率、deviation 个股对基准偏离值累计等），stdin 吃 `query_daily`/`query_index_daily` 输出、stdout 吐指标 JSON，纯标准库不触库
   - `sepa`：SEPA 方法论判断，经 MCP 取数 + indicator-tools 管道算指标
   - `limit-up-analysis`：涨停/连板分析——涨停归因（板块/大小票/业绩题材粗分）+ 连板梯队与晋级率 + 龙头点评，结论落库 `limit_up.close`，可单独调用
-  - `daily-review`：每日复盘编排（七块内容框架：指数/广度/板块/涨停连板/成交额前 75 结构/归因与量价/龙虎榜），结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
+  - `daily-review`：每日复盘编排（总体立场 ≤5 行递进摘要 + 六节：指数表现/板块轮动（含 5/10 日趋势）/涨停连板与龙虎榜（含严重异动偏离值监控）/成交额前 75 结构/归因与量价复盘/风险提示），执行入口先确认复盘日、交易时段禁跑当日；结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
 - **数据源**：efinance → akshare → baostock 多源 fallback（基本面链为 akshare → efinance → baostock）；失败明确报错，绝不伪造数据
 - **数据库**：PostgreSQL 独立新库（14 张表，DDL 在 `src/qstock_mcp/sql/`），连接只读 `PG_DSN` 环境变量
 
