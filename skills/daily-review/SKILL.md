@@ -16,7 +16,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 ## 编排流程（按顺序执行）
 
-1. **确定交易日与模式**：`trade_date` 格式 `yyyymmdd`，缺省取当日，用户可指定。
+1. **确定交易日与模式**：先取当前日期时间，判断今日是否处于交易日交易时段——工作日 9:30–15:00（含午间休市）一律视为交易时段；周末与节假日为非交易日。**必须询问用户复盘哪一天，不得静默默认当日**。**若当前处于交易时段（或当日收盘数据尚未就绪），当日复盘不可执行**：明确提示用户只能选前一交易日或更早——盘中执行会拉取未完结的盘中 bar，污染指标与数据库。15:00 后的当日复盘仍须经步骤 2 数据就绪检查兜底。`trade_date` 格式 `yyyymmdd`。
 2. **数据就绪检查**：对当日逐表查行数——
    - 核心 section（任一 `count=0` 即数据不全）：`market_indices` / `market_boards` / `zt_pool` / `strong_stocks` 经 `query_board_data(table, trade_date)`，`market_snapshot` 经 `query_snapshot(trade_date)`。
    - 可选：`lhb_basic` 经 `query_board_data("lhb_basic", trade_date)`。
@@ -25,7 +25,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
    - 指数历史（相关性/量价复盘的前置）：7 个主要指数逐个 `query_index_daily(index_code, limit=60)`（000001/399001/399006/000300/000016/000905/000688），`count<60` 的指数标注出来。指数日线属 `init_database` 轻量初始化部分，缺失时可经 `init_database` 补齐后重查；仍缺则归因与量价复盘的相关性维度降级，列入 `data_gaps`，不阻断其余复盘。
    - 资讯搜索落库（可选）：就绪检查后 `mx_search(query=<资讯问句>)` 搜近期资讯并落库 `news_items`——大盘级用缺省 subject（`market`/`_market`，如"今日A股市场要闻"），焦点个股传 `subject_type="stock"` + `subject_code=<6 位代码>`。mx-search 配额与 mx-data **独立计数**（默认各 20 次/日，响应回显 `quota:{skill,used,limit}`），单次返回上限约 15 条（响应内重复条目落库前已按 news_code 去重）；本地配额触顶（`status:"error"`，不调上游）、上游自身日限（code=113）或 `MX_APIKEY`/`PG_DSN` 未配置时跳过本步，资讯缺失记入 `data_gaps`，不阻塞复盘。
    - **核心 section 全部缺失且补抓失败时中止复盘**，向用户明确报告缺失范围与失败原因，不得基于残缺数据生成完整复盘结论。
-3. **读数**：`query_board_data` 取各核心表当日全部行；`query_snapshot` 取当日全市场行（广度与成交聚合用，同时供成交额前 75 选股）；lhb 各表有数据则一并取（`lhb_basic` / `lhb_stock_statistic` / `lhb_yyb_capital` / `lhb_yyb_most`）。近期资讯经 `query_news` 读库（按资讯发布时间倒序）：大盘级 `query_news(subject_type="market", subject_code="_market", start=<近 7 日起>, limit=10)`，焦点个股按 `subject_type="stock"` + `subject_code` 同法读取；`count:0`（库内无资讯）属正常，非错误。新增块的取数路径：
+3. **读数**：`query_board_data` 取各核心表当日全部行；`query_snapshot` 取当日全市场行（广度与成交聚合用，同时供成交额前 75 选股）；lhb 各表有数据则一并取（`lhb_basic` / `lhb_stock_statistic` / `lhb_yyb_capital` / `lhb_yyb_most`）。**取数纪律：所有历史序列取数以 `trade_date` 为上限**——`query_daily` 显式传 `end=<trade_date>`（否则 `end` 缺省为执行日，执行日晚于复盘日时会把执行日盘中行带进序列末点）；`query_index_daily` 无 end 参数，取回后按 `≤ trade_date` 截断再喂管道。近期资讯经 `query_news` 读库（按资讯发布时间倒序）：大盘级 `query_news(subject_type="market", subject_code="_market", start=<近 7 日起>, limit=10)`，焦点个股按 `subject_type="stock"` + `subject_code` 同法读取；`count:0`（库内无资讯）属正常，非错误。新增块的取数路径：
    - **指数历史**：就绪检查已逐指数取回 60 根（`query_index_daily(index_code, limit=60)`，rows 按 trade_date 升序，含 OHLCV/amount/turnover_rate/amplitude/change_percent），直接复用，不重复查询。
    - **成交额前 75 名单**：从 `query_snapshot` 当日全市场行按 `amount`（成交额）降序取前 75 只；名单（代码/名称/成交额/涨跌幅）即报告附录表格的数据源。
    - **前 75 个股历史序列**：逐股 `query_daily(stock_code, days=60)`（明确接受 75 次调用——热门股成交对其指数/板块影响大，是重要因子）；单股查询失败或行数不足时记入 `data_gaps` 并从相关个股分析中剔除，不中断其余个股。
