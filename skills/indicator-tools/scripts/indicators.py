@@ -16,6 +16,11 @@ corr 输入为多标的：{"status":"ok","series":{代码: query_daily 输出}}�
 promote 输入为昨日/今日连板数据：{"status":"ok","yesterday":{...},"today":{...}}，
 其中 yesterday.boards 应只含昨日连板股（limit_count >= 2），today.boards 为
 今日全部涨停股。
+deviation 输入为个股/基准双腿：{"status":"ok","stock":<query_daily 输出>,
+"benchmark":<query_daily/query_index_daily 输出>}，按 trade_date 交集对齐、
+剔除任一侧 change_percent 为 null 的交易日，逐日偏离值 = 个股涨跌幅 − 基准
+涨跌幅，按 --windows（默认 10,30）滚动累计；--skip-leading N 剔除个股序列
+前 N 个交易日（新股上市无涨跌幅限制期不计入，调用方负责让序列从上市首日起）。
 
 退出码：0 = ok / insufficient_data（数据不足非错误）；1 = 输入/运行时错误；
 2 = 参数错误（argparse 或 --on 等取值非法）。
@@ -421,6 +426,76 @@ def run_corr(args, params) -> int:
     return 0
 
 
+def run_deviation(args, windows: list) -> int:
+    """deviation：个股对基准指数的偏离值窗口累计（严重异动监控口径）。
+
+    输入 {"stock": <query_daily 输出>, "benchmark": <query_daily/query_index_daily 输出>}；
+    按 trade_date 交集对齐、剔除任一侧 change_percent 为 null 的交易日与
+    --skip-leading 指定的个股前 N 个交易日，逐日偏离值 = 个股涨跌幅 − 基准涨跌幅，
+    各窗口滚动累计（min_periods=窗口，头部 null）。aligned < min(windows) 报
+    insufficient_data。"""
+    try:
+        payload = _read_payload()
+        legs = {}
+        for key in ("stock", "benchmark"):
+            leg = payload.get(key)
+            if not isinstance(leg, dict) or not isinstance(leg.get("rows"), list):
+                raise ValueError(f"输入缺少 {key}.rows 数组")
+            dates, cols = parse_cols(leg["rows"])
+            leg_params = leg.get("params") or {}
+            code = leg_params.get("stock_code") or leg_params.get("index_code")
+            legs[key] = {"dates": dates, "cp": cols["change_percent"],
+                         "code": code}
+    except (ValueError, TypeError, AttributeError) as e:
+        emit({"status": "error", "error": str(e)})
+        return 1
+
+    stock, bench = legs["stock"], legs["benchmark"]
+    excluded = stock["dates"][: args.skip_leading]
+    bench_by_date = dict(zip(bench["dates"], bench["cp"]))
+    stock_by_date = dict(zip(stock["dates"], stock["cp"]))
+    aligned = [d for d in stock["dates"]
+               if d not in excluded and d in bench_by_date
+               and stock_by_date[d] is not None and bench_by_date[d] is not None]
+
+    need = min(windows)
+    if len(aligned) < need:
+        emit({"status": "insufficient_data", "indicator": "deviation",
+              "params": {"windows": windows,
+                         "skip_leading": args.skip_leading},
+              "stock_code": stock["code"], "benchmark_code": bench["code"],
+              "required_length": need, "available_length": len(aligned),
+              "excluded_leading_days": excluded,
+              "message": f"deviation 至少需要 {need} 个对齐交易日，"
+                         f"当前交集仅 {len(aligned)} 个"})
+        return 0
+
+    devs = [stock_by_date[d] - bench_by_date[d] for d in aligned]
+    series = {f"dev{w}": _rolling(devs, w, lambda chunk: sum(chunk), w)
+              for w in windows}
+
+    tail = args.tail if args.tail > 0 else len(aligned)
+    points = []
+    for i in range(max(0, len(aligned) - tail), len(aligned)):
+        point = {"trade_date": aligned[i]}
+        for name, s in series.items():
+            v = s[i]
+            point[name] = None if v is None else round(v, 4)
+        points.append(point)
+
+    emit({"status": "ok", "indicator": "deviation",
+          "params": {"windows": windows, "skip_leading": args.skip_leading},
+          "stock_code": stock["code"], "benchmark_code": bench["code"],
+          "aligned_length": len(aligned),
+          "required_length": need,
+          "data_range": {"start": aligned[0], "end": aligned[-1]},
+          "excluded_leading_days": excluded,
+          "boundary_rule": "按 trade_date 交集对齐（任一侧涨跌幅为 null 的交易日剔除）；"
+                           "min_periods=窗口，各窗口序列前 窗口-1 点为 null",
+          "series": points})
+    return 0
+
+
 def run_promote(args, params) -> int:
     """promote：晋级率与连板梯队。输入昨日/今日连板数据
     {"yesterday": {"trade_date", "boards": [{stock_code, limit_count}]}, "today": {...}}。
@@ -486,7 +561,7 @@ def main() -> int:
     ap.add_argument("--indicator", required=True,
                     choices=["ma", "macd", "boll", "rsi", "diff1", "diff2",
                              "rolling_max", "rolling_min", "maxdd", "chg",
-                             "corr", "vol_price", "promote"])
+                             "corr", "vol_price", "promote", "deviation"])
     ap.add_argument("--periods", default=None, help="ma/rsi 周期列表，逗号分隔")
     ap.add_argument("--period", type=int, default=20, help="boll 周期")
     ap.add_argument("--k", type=float, default=2.0, help="boll 标准差倍数")
@@ -501,6 +576,10 @@ def main() -> int:
                          "corr 另支持 change_percent（涨跌幅序列）")
     ap.add_argument("--threshold", type=float, default=0.2,
                     help="vol_price 放量/缩量阈值（小数，默认 0.2=20%）")
+    ap.add_argument("--windows", default="10,30",
+                    help="deviation 累计窗口列表，逗号分隔（默认 10,30）")
+    ap.add_argument("--skip-leading", type=int, default=0,
+                    help="deviation 剔除个股序列前 N 个交易日（新股无涨跌幅限制期）")
     ap.add_argument("--tail", type=int, default=60, help="输出末尾 N 个点；0=全部")
     args = ap.parse_args()  # 参数错误由 argparse 以退出码 2 终止
 
@@ -531,6 +610,20 @@ def main() -> int:
         emit({"status": "error",
               "error": f"--threshold 须在 [0, 10) 区间: {args.threshold!r}"})
         return 2
+    if args.indicator == "deviation":
+        try:
+            windows = [int(w) for w in args.windows.split(",")]
+            if not windows or any(w < 1 for w in windows):
+                raise ValueError
+        except ValueError:
+            emit({"status": "error",
+                  "error": f"--windows 格式非法（须为正整数逗号列表）: {args.windows!r}"})
+            return 2
+        if args.skip_leading < 0:
+            emit({"status": "error",
+                  "error": f"--skip-leading 须 >= 0: {args.skip_leading!r}"})
+            return 2
+        return run_deviation(args, windows)
 
     if args.indicator == "corr":
         return run_corr(args, params)

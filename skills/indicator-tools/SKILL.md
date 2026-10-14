@@ -1,6 +1,6 @@
 ---
 name: indicator-tools
-description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口极值/最大回撤/N 日涨跌幅/一阶二阶导数/相关性矩阵/量价判定/晋级率）。管道版：stdin 吃 MCP query_daily 工具的 JSON 输出（corr/promote 为各自专用输入），stdout 吐指标 JSON；纯标准库，不访问数据库，现算现用不物化。
+description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口极值/最大回撤/N 日涨跌幅/一阶二阶导数/相关性矩阵/量价判定/晋级率/偏离值累计）。管道版：stdin 吃 MCP query_daily 工具的 JSON 输出（corr/promote/deviation 为各自专用输入），stdout 吐指标 JSON；纯标准库，不访问数据库，现算现用不物化。
 ---
 
 # indicator-tools
@@ -44,7 +44,7 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 
 `rows` 按 `trade_date` 升序；`open/high/low/close/volume/amount` 须为数值（缺失视为输入错误，exit 1）。`stock_code` 从 `params` 回显到输出。
 
-**例外输入**：`corr` 与 `promote` 不吃单标的 `rows`，输入形状见各自条目；公共校验不变（须为 JSON 对象且 `status="ok"`，否则 exit 1）。
+**例外输入**：`corr`、`promote` 与 `deviation` 不吃单标的 `rows`，输入形状见各自条目；公共校验不变（须为 JSON 对象且 `status="ok"`，否则 exit 1）。
 
 **输出契约**：`status=ok` 时含 `stock_code`、`indicator`、`params`（参数回显）、`data_range`、`required_length`/`available_length`、`boundary_rule`、`series`（每点含 `trade_date`，数值保留 4 位小数，头部按边界规则为 null）。`status=insufficient_data` 时明确给出 `required_length` 与 `available_length`，exit 0。
 
@@ -124,6 +124,19 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 ```
 
 `stock_code` 须为非空字符串、`limit_count` 须为正整数，否则 exit 1。输出含 `promote_rate`（%，4 位小数）、`promoted`/`failed`（晋级/断板代码列表，保持昨日输入顺序）、`ladder`/`ladder_detail`。
+
+### deviation — 个股对基准的偏离值窗口累计（严重异动监控口径）
+
+- **计算方法**：个股与基准（指数）按 `trade_date` 交集对齐（任一侧 `change_percent` 为 null 的交易日剔除），逐日偏离值 = 个股涨跌幅 − 基准涨跌幅；各窗口滚动累计（`min_periods=窗口`，前 `窗口-1` 点为 null）。`--skip-leading N` 剔除个股序列前 N 个交易日（**新股上市前 5 日无涨跌幅限制，涨跌不计入异动/严重异动**——调用方负责让个股序列从上市首日起取，并对上市未满窗口的新股传 `--skip-leading 5`）。
+- **使用方法**：`--indicator deviation [--windows 10,30] [--skip-leading 0]`。输入为个股/基准双腿：
+
+```json
+{"status": "ok",
+ "stock":     {"status": "ok", "params": {"stock_code": "002343"}, "rows": [...]},
+ "benchmark": {"status": "ok", "params": {"index_code": "399001"}, "rows": [...]}}
+```
+
+基准指数按上市板归属：沪主板→000001、科创板→000688、深主板→399001、创业板→399006；北交所个股无对应主要指数，调用方跳过。aligned < 最小窗口时报 `insufficient_data`（exit 0）；够小窗口但不够大窗口时大窗口序列全 null（如实降级）。输出含 `stock_code`/`benchmark_code`、`aligned_length`、`excluded_leading_days`（被剔除的前 N 日列表）与 `series`（每点含 `trade_date` 与各窗口 `dev<N>` 列）。典型用途：连板股严重异常波动监控（10 日/30 日偏离值累计对照交易所阈值）。
 
 > 新增指标不得改变既有指标的契约（输出结构、边界规则、退出码）。
 
