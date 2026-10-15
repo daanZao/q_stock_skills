@@ -8,10 +8,10 @@
 
 - **MCP 数据服务**（`src/qstock_mcp`，14 个工具，五个能力面）：
   - `init_database`：幂等建表 + 轻量初始化（股票清单/全市场快照/主要指数日线），可选 `backfill_history=True` 全量回溯
-  - `fetch_daily` / `query_daily`：个股日线抓取与查询，**查询自愈**——库内缺数据自动补抓头尾缺口
+  - `fetch_daily` / `query_daily`：个股日线抓取与查询，**查询自愈**——库内缺数据自动补抓头尾缺口；`days=N` 按交易日回溯
   - `query_index_daily`：主要指数历史日线纯读（7 个指数白名单），数据由 `init_database` 写入
-  - `fetch_market_snapshot` / `query_snapshot`：全市场快照（约 5000+ 只），业务键幂等 upsert
-  - `fetch_board_snapshot` / `query_board_data`：盘面快照（指数/板块/涨跌停池/强势股/龙虎榜），section 级独立成败
+  - `fetch_market_snapshot` / `query_snapshot`：全市场快照（约 5000+ 只），业务键幂等 upsert；抓取失败按三态错误契约分类上报（见下）；`query_snapshot` 支持服务端聚合（`aggregate=breadth,amount`，含分市场口径）与 `order_by+limit` 排序取前 N，大结果不必整表拉回
+  - `fetch_board_snapshot` / `query_board_data`：盘面快照（指数/板块/涨跌停池/强势股/龙虎榜），section 级独立成败；核心 section（指数/板块/涨跌停池/强势股）上游不可达即整体报错并携带 per-section 明细，中途失败不回滚、可按 section 分段重试；指数段按 7 大指数白名单定点补漏（含科创 50）
   - `get_fundamentals`：基本面透传（proxy），不规格化、不落库
   - `mx_query` / `mx_search` / `query_news`：妙想自然语言查数与资讯搜索（独立日配额，搜索落库 `news_items`）+ 库内资讯纯读
   - `save_conclusion` / `query_conclusions`：分析结论读写，通用结论表 + JSON payload，同键 upsert
@@ -19,8 +19,8 @@
   - `indicator-tools`：指标计算管道脚本（MA/MACD/BOLL/RSI/导数、corr 多标的相关性矩阵、vol_price 量价背离、promote 连板晋级率、deviation 个股对基准偏离值累计等），stdin 吃 `query_daily`/`query_index_daily` 输出、stdout 吐指标 JSON，纯标准库不触库
   - `sepa`：SEPA 方法论判断，经 MCP 取数 + indicator-tools 管道算指标
   - `limit-up-analysis`：涨停/连板分析——涨停归因（板块/大小票/业绩题材粗分）+ 连板梯队与晋级率 + 龙头点评，结论落库 `limit_up.close`，可单独调用
-  - `daily-review`：每日复盘编排（总体立场 ≤5 行递进摘要 + 六节：指数表现/板块轮动（含 5/10 日趋势）/涨停连板与龙虎榜（含严重异动偏离值监控）/成交额前 75 结构/归因与量价复盘/风险提示），执行入口先确认复盘日、交易时段禁跑当日；结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
-- **数据源**：efinance → akshare → baostock 多源 fallback（基本面链为 akshare → efinance → baostock）；失败明确报错，绝不伪造数据
+  - `daily-review`：每日复盘编排（总体立场 ≤5 行递进摘要 + 六节：指数表现/板块轮动（含 5/10 日趋势）/涨停连板与龙虎榜（含严重异动偏离值监控）/成交额前 75 结构/归因与量价复盘/风险提示），执行入口先确认复盘日、交易时段禁跑当日；数据源故障走中止分支并输出异常报告（不产出残缺复盘），取数优先走服务端聚合、备有 stdio 落盘通道脚本；结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
+- **数据源**：efinance → akshare → baostock 多源 fallback（基本面链为 akshare → efinance → baostock）；失败明确报错，绝不伪造数据；连接级故障（上游不可达）按三态错误契约结构化上报并附重试建议（ADR 0007）
 - **数据库**：PostgreSQL 独立新库（14 张表，DDL 在 `src/qstock_mcp/sql/`），连接只读 `PG_DSN` 环境变量
 
 ## 安装与接入
@@ -100,7 +100,7 @@ Ctrl+C 退出。握手本身不触库；若要手动实测工具调用，先在�
 
 ## 输出契约
 
-所有工具与 skill 脚本输出自描述 JSON：成功 `status:"ok"` + 参数回显 + 实际数据源；数据不足 `status:"insufficient_data"`（非错误）；失败 `status:"error"` + 已尝试数据源与原因。日志只走 stderr，不进数据通道。
+所有工具与 skill 脚本输出自描述 JSON：成功 `status:"ok"` + 参数回显 + 实际数据源；数据不足 `status:"insufficient_data"`（非错误）；失败 `status:"error"` + 已尝试数据源与原因。抓取类工具的错误另带机器可读三态分类（`error_kind`：`upstream_unreachable` 上游连接级故障、可稍后重试 / `no_data_for_date` 当日无数据 / `empty_ok` 正常空结果，语义见 ADR 0007）。日志只走 stderr，不进数据通道。
 
 ## 测试
 
@@ -114,5 +114,5 @@ pytest tests/ skills/
 
 - [`docs/knowledge-graph.md`](docs/knowledge-graph.md)：项目知识图谱——总览图、实体清单、关键流程、「想改 X 先看哪里」
 - [`CONTEXT.md`](CONTEXT.md)：领域词汇表
-- [`docs/adr/`](docs/adr/)：设计决策（MCP 边界 / PG 选型 / 通用结论表 / init 设计 / 妙想接入）
+- [`docs/adr/`](docs/adr/)：设计决策（MCP 边界 / PG 选型 / 通用结论表 / init 设计 / 妙想接入 / 金额单位万元 / 抓取三态错误契约）
 - [`docs/agents/`](docs/agents/)：agent 协作约定（issue 流程、triage 标签）
