@@ -6,7 +6,12 @@
 
 import pytest
 
-from qstock_mcp.dates import normalize_date, resolve_range
+from qstock_mcp.dates import (
+    is_trading_day,
+    next_trading_day,
+    normalize_date,
+    resolve_range,
+)
 from qstock_mcp.gaps import head_tail_gaps
 
 
@@ -49,6 +54,56 @@ class TestResolveRange:
     def test_start_after_end_raises(self):
         with pytest.raises(ValueError):
             resolve_range(None, "20240201", "20240101")
+
+
+class TestTradingDay:
+    """issue #51：交易日判定（周末 + 交易所公告休市日，2026 年日历取自上证公告〔2025〕45号）。"""
+
+    def test_plain_weekday_is_trading(self):
+        assert is_trading_day("20261014")  # 周三
+
+    def test_weekend_not_trading(self):
+        assert not is_trading_day("20260927")  # 周日
+
+    def test_holiday_weekday_not_trading(self):
+        assert not is_trading_day("20261005")  # 周一，国庆休市（10/1~10/7）
+
+    def test_next_trading_day_passthrough(self):
+        assert next_trading_day("20261014") == "20261014"
+
+    def test_next_trading_day_skips_weekend(self):
+        assert next_trading_day("20260927") == "20260928"
+
+    def test_next_trading_day_skips_holiday_week(self):
+        assert next_trading_day("20261001") == "20261008"  # 国庆连休后 10/8 开市
+        assert next_trading_day("20260220") == "20260224"  # 春节连休后 2/24 开市
+
+
+class TestDaysStartAlignsToTradingDay:
+    """issue #51：days=N 换算的 start 落在非交易日时向前对齐到最近交易日。"""
+
+    def test_start_off_weekend_aligns_to_monday(self):
+        # 工单取证场景：today=20261014、days=5 自然日换算落点 20260927（周日）
+        start, end = resolve_range(5, None, None, today="20261014")
+        assert (start, end) == ("20260928", "20261014")
+
+    def test_start_in_holiday_week_aligns_to_open_day(self):
+        # 落点 20261005 在国庆休市内，对齐到 10/8 开市日
+        start, _ = resolve_range(5, None, None, today="20261022")
+        assert start == "20261008"
+
+    def test_start_in_spring_festival_closure_aligns(self):
+        # 落点 20260220 在春节连休（2/15~2/23）内，对齐到 2/24 开市
+        start, _ = resolve_range(5, None, None, today="20260309")
+        assert start == "20260224"
+
+    def test_start_already_trading_day_unchanged(self):
+        start, _ = resolve_range(5, None, None, today="20261015")
+        assert start == "20260928"  # 周一，本身即交易日
+
+    def test_explicit_start_not_aligned(self):
+        # 显式 start/end 语义不变，不做交易日对齐
+        assert resolve_range(None, "20260927", "20261014") == ("20260927", "20261014")
 
 
 class TestHeadTailGaps:

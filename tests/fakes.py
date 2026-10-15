@@ -9,51 +9,66 @@ FakeSnapshotAdapter 记录调用次数、按脚本成败。
 from datetime import datetime, timedelta
 
 from qstock_mcp.adapters import FetchError
+from qstock_mcp.dates import is_trading_day
 from qstock_mcp.mx_client import MXError
 
 
-def weekday_rows(start: str, end: str, close: float = 10.0) -> list[dict]:
+def _daily_row(d, close: float) -> dict:
+    return {
+        "trade_date": d.strftime("%Y%m%d"),
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": 100,
+        "amount": 1000.0,
+        "amplitude": 1.0,
+        "change_percent": 0.5,
+        "change_amount": 0.05,
+        "turnover_rate": 1.0,
+    }
+
+
+def _rows_between(start: str, end: str, close: float, keep) -> list[dict]:
     rows = []
     d = datetime.strptime(start, "%Y%m%d").date()
     last = datetime.strptime(end, "%Y%m%d").date()
     while d <= last:
-        if d.weekday() < 5:
-            rows.append(
-                {
-                    "trade_date": d.strftime("%Y%m%d"),
-                    "open": close,
-                    "high": close,
-                    "low": close,
-                    "close": close,
-                    "volume": 100,
-                    "amount": 1000.0,
-                    "amplitude": 1.0,
-                    "change_percent": 0.5,
-                    "change_amount": 0.05,
-                    "turnover_rate": 1.0,
-                }
-            )
+        if keep(d):
+            rows.append(_daily_row(d, close))
         d += timedelta(days=1)
     return rows
+
+
+def weekday_rows(start: str, end: str, close: float = 10.0) -> list[dict]:
+    return _rows_between(start, end, close, lambda d: d.weekday() < 5)
+
+
+def trading_rows(start: str, end: str, close: float = 10.0) -> list[dict]:
+    """按 A 股交易日（周末 + 已知节假日）生成确定性日线行（issue #51）。"""
+    return _rows_between(start, end, close, lambda d: is_trading_day(d.strftime("%Y%m%d")))
 
 
 class FakeAdapter:
     """记录调用分段、按脚本成败的 fake 数据源。
 
-    rows 为 None 时返回请求分段的工作日行；否则固定返回 rows（可为 []）。
+    rows 为 None 时按 rows_fn（默认工作日行）返回请求分段的行；否则固定返回
+    rows（可为 []）。rows_fn=trading_rows 时按真实交易日生成，可复现非交易日
+    区间返回空行的场景（issue #51）。
     """
 
-    def __init__(self, name, *, fail_times=0, rows=None):
+    def __init__(self, name, *, fail_times=0, rows=None, rows_fn=weekday_rows):
         self.name = name
         self._fail_times = fail_times
         self._rows = rows
+        self._rows_fn = rows_fn
         self.calls = []
 
     def fetch_daily(self, stock_code, start, end, adj="qfq"):
         self.calls.append({"start": start, "end": end, "adj": adj})
         if len(self.calls) <= self._fail_times:
             raise FetchError(f"{self.name} boom")
-        return self._rows if self._rows is not None else weekday_rows(start, end)
+        return self._rows if self._rows is not None else self._rows_fn(start, end)
 
 
 def _snapshot_row(stock_code: str, stock_name: str, close: float) -> dict:

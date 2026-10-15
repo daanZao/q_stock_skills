@@ -6,11 +6,12 @@
 import psycopg2
 
 from qstock_mcp.adapters import FetchError
+from qstock_mcp.dates import is_trading_day
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.repository import select_daily, upsert_daily
 from qstock_mcp.tools_daily import fetch_daily
 
-from fakes import FakeAdapter, weekday_rows
+from fakes import FakeAdapter, trading_rows, weekday_rows
 
 
 def _init(pg_test):
@@ -119,6 +120,70 @@ def test_fetch_with_days_param(pg_test):
     assert result["params"]["days"] == 5
     assert result["data_range"] is not None  # 数据区间回显
     assert len(_rows_in_db(pg_test)) >= 5
+
+
+# ---------------------------------------------------------------- issue #51 交易日对齐
+
+
+def _pin_today(monkeypatch, ymd: str):
+    """固定 dates 模块的"今天"（先例：test_fetch_snapshot 的 _FakeDate）。"""
+    from qstock_mcp import dates
+
+    real_date = dates.date
+
+    class _FakeDate:
+        @staticmethod
+        def today():
+            return real_date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]))
+
+    monkeypatch.setattr(dates, "date", _FakeDate)
+
+
+def test_fetch_with_days_empty_db_start_aligned(pg_test, monkeypatch):
+    """库空：days 换算落点 20260927（周日），start 向前对齐到交易日 20260928。"""
+    _init(pg_test)
+    _pin_today(monkeypatch, "20261014")
+    ef = FakeAdapter("efinance", rows_fn=trading_rows)
+    result = fetch_daily("600519", days=5, adapters=[ef])
+    assert result["status"] == "ok"
+    assert result["range"] == {"start": "20260928", "end": "20261014"}
+    assert result["segments"] == [
+        {"start": "20260928", "end": "20261014", "source": "efinance", "rows": 8}
+    ]
+    assert result["data_range"] == {"start": "20260928", "end": "20261014"}
+
+
+def test_fetch_with_days_partial_db_no_empty_head_segment(pg_test, monkeypatch):
+    """工单 P2-2 场景：库已有数据且最早日即换算区间内的首个交易日，
+    start 对齐后与库内最早日相接，不再产生全非交易日的空抓分段。"""
+    _init(pg_test)
+    _pin_today(monkeypatch, "20261014")
+    conn = psycopg2.connect(pg_test)
+    upsert_daily(conn, "600519", "qfq", trading_rows("20260928", "20261014"), "baostock")
+    conn.close()
+    ef = FakeAdapter("efinance", rows_fn=trading_rows)
+    result = fetch_daily("600519", days=5, adapters=[ef])
+    assert result["status"] == "ok"
+    assert result["range"]["start"] == "20260928"
+    assert result["segments"] == []
+    assert ef.calls == []  # 零上游请求
+    assert result["rows_upserted"] == 0
+
+
+def test_fetch_with_days_head_gap_starts_on_trading_day(pg_test, monkeypatch):
+    """库有部分数据且存在真实头部缺口：分段起点落在交易日，且分段非空。"""
+    _init(pg_test)
+    _pin_today(monkeypatch, "20261014")
+    conn = psycopg2.connect(pg_test)
+    upsert_daily(conn, "600519", "qfq", trading_rows("20261008", "20261014"), "baostock")
+    conn.close()
+    ef = FakeAdapter("efinance", rows_fn=trading_rows)
+    result = fetch_daily("600519", days=5, adapters=[ef])
+    assert result["status"] == "ok"
+    assert result["segments"] == [
+        {"start": "20260928", "end": "20261007", "source": "efinance", "rows": 3}
+    ]
+    assert all(is_trading_day(s["start"]) for s in result["segments"])
 
 
 def test_fetch_error_reports_healed_segments(pg_test):
