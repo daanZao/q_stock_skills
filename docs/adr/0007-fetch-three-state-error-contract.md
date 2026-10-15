@@ -10,15 +10,21 @@
 
 连接级故障的**可机器判定标准**：沿异常的 `__cause__`/`__context__` 链按类名判定（标准库 `ConnectionError`/`TimeoutError`/`socket.gaierror`、`http.client.RemoteDisconnected`/`IncompleteRead`、requests/urllib3 的 `ConnectTimeout`/`ReadTimeout`/`MaxRetryError`/`NewConnectionError`/`ProtocolError` 等），命中即 `connection`。判定收敛在 `adapters/base.py` 的 `fetch_failure_kind`，按类名鸭子类型匹配、不 import 可选第三方库（与 `json_safe` 同策略）。by-design 拒绝（如 baostock 无全市场快照、efinance 不支持指数日线、北交所代码）由适配器抛 `FetchError(..., kind="unsupported")` 显式标注，**不算抓取故障、不参与 upstream_unreachable 判定**。
 
-逐源分类在 `fetch_chain._with_fallback` 记录（`attempted_sources` 每项增加 `failure_kind`：unsupported / connection / other）；工具层聚合：全源失败时任一抓取源为 `connection` 即 `error_kind:"upstream_unreachable"`，否则 `error_kind:"fetch_failed"`（三态之外的通用抓取失败，保持现有 error 语义，不带重试建议）。
+逐源分类在 `fetch_chain._with_fallback` 记录（`attempted_sources` 每项增加 `failure_kind`：unsupported / connection / other；补漏路径另有第四值 `empty`，见下节补记）；工具层聚合：全源失败时任一抓取源为 `connection` 即 `error_kind:"upstream_unreachable"`，否则 `error_kind:"fetch_failed"`（三态之外的通用抓取失败，保持现有 error 语义，不带重试建议）。
 
 **不加非 push2 兜底源**（已决策）：数据源故障时快速失败、告知调用方稍后重试，不硬绕路取数。本契约只做错误分类，不做新适配器。
 
 调用方（编排 skill）据此机械决策：`upstream_unreachable` → 中止并出异常报告、稍后重试；`no_data_for_date` / `empty_ok` → 按现有降级规则继续。逐源明细（适配器名 + 原始报错）可直接编进异常报告，并区分单源问题与集群性故障。
 
+## 补记（2026-10-15，issue #49）：补漏路径的第四个逐源 failure_kind `empty`
+
+`fetch_board_snapshot` 的 indices 段定点补漏按单 code 走 `fetch_index_spot_with_fallback`，源的指数口径可能根本不含该指数（如 efinance「沪深系列指数」口径系统性排除科创板系列）。此时上游正常响应、按 code 过滤后为空——属**口径性缺失而非故障**：`failure_kind:"empty"`，不视为该源成功（覆盖目标未达成，立即转下一源）、不计入抓取失败、与 `unsupported` 一样不参与 `upstream_unreachable` 判定，且不重试（口径不含，重试无意义）。聚合由 `aggregate_patch_error_kind` 负责：剔除 empty/unsupported 后任一连接级故障即 `upstream_unreachable`（带 retry_advice），有非连接失败为 `fetch_failed`，全源 empty/unsupported 归 `no_data_for_date`。
+
+边界：`empty` 仅限补漏（patch）路径的逐源 `failure_kind`；通用 fallback（`_with_fallback`）逐源分类仍只有 unsupported / connection / other 三值，工具层 `error_kind` 侧仍严格三态，均不得引入 `empty`。
+
 ## Consequences
 
-- `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类。
+- `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类（补漏路径的 `empty` 是本 ADR 补记明定的唯一例外，边界见上节）。
 - 新增数据源适配器时：by-design 不支持的能力必须抛 `FetchError(kind="unsupported")`；连接级异常不得被吞掉或改写成无 `__cause__` 的普通报错（保持 `raise FetchError(...) from e`），否则该源故障会被误分类为 `other`。
 - `attempted_sources` 项新增 `failure_kind` 字段，属增量字段，消费方按既有结构读取不受影响。
 - 空结果不触发 fallback 的既有语义不变：上游正常响应空 = `no_data_for_date`（成功语义），不视为该源失败。
