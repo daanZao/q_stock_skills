@@ -18,7 +18,12 @@ from typing import Sequence
 from .adapters import SnapshotAdapter, default_adapters
 from .dates import normalize_date
 from .db import connect
-from .fetch_chain import AllSourcesFailed, fetch_snapshot_with_fallback
+from .fetch_chain import (
+    UPSTREAM_RETRY_ADVICE,
+    AllSourcesFailed,
+    aggregate_error_kind,
+    fetch_snapshot_with_fallback,
+)
 from .output import error as _error
 from .repository import select_latest_snapshot_date, select_snapshot, upsert_snapshot
 
@@ -47,15 +52,13 @@ def fetch_market_snapshot(
         try:
             result = fetch_snapshot_with_fallback(adapters)
         except AllSourcesFailed as e:
-            failures = [a for a in e.attempted if a["failure_kind"] != "unsupported"]
-            if any(a["failure_kind"] == "connection" for a in failures):
+            if aggregate_error_kind(e.attempted) == "upstream_unreachable":
                 return _error(
                     tool,
                     params,
                     "上游不可达：全部数据源失败（连接级故障，请求未获得 HTTP 响应）",
                     error_kind="upstream_unreachable",
-                    retry_advice="连接级故障通常为临时性，建议稍后重试；"
-                    "持续失败请按 attempted_sources 逐源检查数据源可达性",
+                    retry_advice=UPSTREAM_RETRY_ADVICE,
                     attempted_sources=e.attempted,
                 )
             return _error(

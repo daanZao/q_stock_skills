@@ -3,9 +3,17 @@
 工具函数层（server.py）只做薄包装；本层是测试接缝：注入 fake 适配器 +
 真实 PG 测试库（见 tests/）。盘面快照契约（issue #5）：按 section
 （indices/boards/zt_pool/strong_stocks/lhb）独立 fallback 重试、独立成败报告，
-单 section 失败不拖垮其他，仅全部失败才整体 error；盘中 lhb_basic 为空
-返回 rows:0 + note（龙虎榜盘后发布是正常语义），不算失败；各表按业务键
-upsert，重复执行幂等。
+各表按业务键 upsert，重复执行幂等。核心 section fail-fast（issue #47，
+ADR 0007）：CORE_SECTIONS 显式声明核心 section 集，任一核心 section 因
+upstream_unreachable（连接级故障）失败 → 工具整体 error，响应携带
+per-section 明细（成败/已落库行数/error_kind/逐源 attempted_sources）；
+fetch_failed（非连接级）与 no_data_for_date（上游正常响应空结果）不触发。
+中途失败不回滚：per-section 独立 commit，已落库 section 保留，
+调用方可用 sections 参数只重试失败分段（幂等）。lhb 永不进核心集：
+盘中 lhb_basic 为空返回 rows:0 + note + empty_kind=no_data_for_date
+（龙虎榜盘后发布是正常语义），lhb 抓取失败按三态结构化返回
+（status error + error_kind + 逐源明细），与"未发布"可区分；
+lhb 子项部分失败落已得数据并报 partial_error。
 """
 
 import logging
@@ -15,7 +23,12 @@ from typing import Sequence
 from .adapters import BoardAdapter, default_adapters
 from .dates import normalize_date
 from .db import connect
-from .fetch_chain import AllSourcesFailed, fetch_section_with_fallback
+from .fetch_chain import (
+    UPSTREAM_RETRY_ADVICE,
+    AllSourcesFailed,
+    aggregate_error_kind,
+    fetch_section_with_fallback,
+)
 from .output import error as _error
 from .repository import (
     BOARD_QUERY_TABLES,
@@ -28,6 +41,11 @@ from .repository import (
 log = logging.getLogger(__name__)
 
 ALL_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
+
+# 核心 section 集（issue #47）：任一核心 section 因 upstream_unreachable 失败
+# 即整体 error。lhb 永不进核心集（盘中"未发布"是常态）；新增 section 默认非核心，
+# 入核心集需显式更新本常量。
+CORE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks")
 
 _LHB_EMPTY_NOTE = "当日无龙虎榜数据（龙虎榜盘后发布）"
 
@@ -89,19 +107,34 @@ def fetch_board_snapshot(
             try:
                 r = fetch_section_with_fallback(adapters, name, effective)
             except AllSourcesFailed as e:
-                results[name] = {"rows": 0, "status": "error", "error": str(e)}
+                kind = aggregate_error_kind(e.attempted)
+                entry = {
+                    "rows": 0,
+                    "status": "error",
+                    "error": str(e),
+                    "error_kind": kind,
+                    "attempted_sources": e.attempted,
+                }
+                if kind == "upstream_unreachable":
+                    entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
+                results[name] = entry
                 continue
             res = {
                 "rows": _upsert_section(conn, name, r["data"], effective),
                 "source": r["source"],
                 "status": "ok",
             }
+            if r["attempted_sources"]:
+                res["attempted_sources"] = r["attempted_sources"]
             if name == "lhb":
                 if r["data"].get("errors"):
                     # 子项部分失败：拿到什么落什么，但失败原因必须报告
                     res["partial_error"] = "; ".join(r["data"]["errors"])
                 if not r["data"]["lhb_basic"]:
+                    res["empty_kind"] = "no_data_for_date"
                     res["note"] = _LHB_EMPTY_NOTE
+            elif not r["data"]:
+                res["empty_kind"] = "no_data_for_date"
             results[name] = res
     finally:
         conn.close()
@@ -113,12 +146,37 @@ def fetch_board_snapshot(
         "sections": results,
         "failed_sections": failed,
     }
-    if len(failed) == len(results):
+    unreachable_core = [
+        k
+        for k in failed
+        if k in CORE_SECTIONS
+        and results[k].get("error_kind") == "upstream_unreachable"
+    ]
+    if unreachable_core:
         return {
             "status": "error",
-            "error": f"全部 section 抓取失败: {', '.join(failed)}",
+            "error": f"核心 section 上游不可达: {', '.join(unreachable_core)}",
+            "error_kind": "upstream_unreachable",
+            "retry_advice": UPSTREAM_RETRY_ADVICE,
             **payload,
         }
+    if len(failed) == len(results):
+        kind = (
+            "upstream_unreachable"
+            if any(
+                results[k].get("error_kind") == "upstream_unreachable" for k in failed
+            )
+            else "fetch_failed"
+        )
+        out = {
+            "status": "error",
+            "error": f"全部 section 抓取失败: {', '.join(failed)}",
+            "error_kind": kind,
+            **payload,
+        }
+        if kind == "upstream_unreachable":
+            out["retry_advice"] = UPSTREAM_RETRY_ADVICE
+        return out
     return {"status": "ok", **payload}
 
 

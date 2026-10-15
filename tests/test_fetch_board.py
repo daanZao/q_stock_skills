@@ -181,6 +181,7 @@ def test_fetch_intraday_empty_lhb_is_ok_with_note(pg_test):
         "rows": 0,
         "source": "akshare",
         "status": "ok",
+        "empty_kind": "no_data_for_date",
         "note": "当日无龙虎榜数据（龙虎榜盘后发布）",
     }
     assert _count(pg_test, "lhb_basic") == 0

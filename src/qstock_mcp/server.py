@@ -96,11 +96,15 @@ def query_snapshot(trade_date: str | None = None, stock_code: str | None = None)
 
 @mcp.tool()
 def fetch_board_snapshot(trade_date: str | None = None, sections: str | None = None) -> dict:
-    """抓取盘面快照并落库：指数/板块/涨跌停池/强势股/龙虎榜五 section 独立抓取（单 section 失败不拖垮其他），各表按业务键幂等 upsert。
+    """抓取盘面快照并落库：指数/板块/涨跌停池/强势股/龙虎榜五 section 独立抓取、独立 commit（中途失败不回滚，按 trade_date 幂等，可用 sections 分段重试）。
 
     trade_date: yyyymmdd 或 yyyy-mm-dd，缺省今天；sections: 逗号分隔子集
     （可选 indices,boards,zt_pool,strong_stocks,lhb），缺省全量。
-    盘中龙虎榜无数据返回 rows:0 + note（盘后发布，非失败）。
+    核心 section（indices/boards/zt_pool/strong_stocks，ADR 0007 三态契约）因上游不可达
+    失败 → 整体 error（error_kind=upstream_unreachable + retry_advice + per-section
+    成败/行数/逐源明细）；lhb 永不进核心集。盘中龙虎榜无数据返回
+    rows:0 + note + empty_kind=no_data_for_date（盘后发布，非失败）；lhb 抓取失败返回
+    status error + error_kind + attempted_sources，与"未发布"可区分。
     """
     return tools_board.fetch_board_snapshot(trade_date, sections)
 

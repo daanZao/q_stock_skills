@@ -239,18 +239,23 @@ class FakeBoardAdapter:
 
     fail_sections: 指定 section 永远失败；fail_times: 前 N 次调用（不分 section）失败。
     rows: {section: rows} 覆盖默认返回；lhb 的 rows 为 {表名: [row]} 字典。
+    exc: 非 None 时失败即抛该异常实例（模拟连接级故障/不支持等特定失败，
+    issue #47 三态契约测试）。
     """
 
-    def __init__(self, name, *, fail_times=0, fail_sections=(), rows=None):
+    def __init__(self, name, *, fail_times=0, fail_sections=(), rows=None, exc=None):
         self.name = name
         self._fail_times = fail_times
         self._fail_sections = set(fail_sections)
         self._rows = rows or {}
+        self._exc = exc
         self.calls = []
 
     def _get(self, section):
         self.calls.append(section)
         if section in self._fail_sections or len(self.calls) <= self._fail_times:
+            if self._exc is not None:
+                raise self._exc
             raise FetchError(f"{self.name} {section} boom")
         return self._rows.get(section, _BOARD_DEFAULTS[section])
 

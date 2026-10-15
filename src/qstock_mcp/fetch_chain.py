@@ -23,6 +23,11 @@ from .adapters.base import (
 
 DEFAULT_MAX_RETRIES = 2
 
+UPSTREAM_RETRY_ADVICE = (
+    "连接级故障通常为临时性，建议稍后重试；"
+    "持续失败请按 attempted_sources 逐源检查数据源可达性"
+)
+
 
 class AllSourcesFailed(RuntimeError):
     """所有数据源在给定分段上均失败。
@@ -35,6 +40,18 @@ class AllSourcesFailed(RuntimeError):
         self.attempted = attempted
         summary = "; ".join(f"{a['source']}: {a['error']}" for a in attempted)
         super().__init__(f"全部数据源失败（{summary}）")
+
+
+def aggregate_error_kind(attempted: list[dict]) -> str:
+    """逐源 failure_kind 聚合 error_kind（ADR 0007）。
+
+    by-design 不支持（unsupported）的源不算抓取故障、不参与判定；其余源中
+    任一连接级故障即 upstream_unreachable，否则 fetch_failed。
+    """
+    failures = [a for a in attempted if a["failure_kind"] != "unsupported"]
+    if any(a["failure_kind"] == "connection" for a in failures):
+        return "upstream_unreachable"
+    return "fetch_failed"
 
 
 def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
