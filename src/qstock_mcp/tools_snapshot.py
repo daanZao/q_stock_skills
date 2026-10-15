@@ -9,6 +9,9 @@ error_kind——任一抓取源连接级故障（请求未获得 HTTP 响应）�
 upstream_unreachable（带 retry_advice），否则 fetch_failed；by-design 不
 支持的源（unsupported，如 baostock）不参与判定。上游正常响应空结果为
 no_data_for_date（status ok + empty_kind + note），语义正常非失败。
+query_snapshot 服务端聚合与排序取前 N（issue #48）：aggregate=breadth,amount
+返回涨跌家数（含沪/深/北分市场）与成交额合计（万元）；order_by + limit
+排序取前 N，行字段不裁剪；均下推 SQL，不做通用 offset 分页。
 """
 
 import logging
@@ -25,7 +28,13 @@ from .fetch_chain import (
     fetch_snapshot_with_fallback,
 )
 from .output import error as _error
-from .repository import select_latest_snapshot_date, select_snapshot, upsert_snapshot
+from .repository import (
+    SNAPSHOT_ORDER_COLUMNS,
+    select_latest_snapshot_date,
+    select_snapshot,
+    select_snapshot_aggregate,
+    upsert_snapshot,
+)
 
 log = logging.getLogger(__name__)
 
@@ -96,13 +105,56 @@ def fetch_market_snapshot(
     return out
 
 
+# 聚合模式（issue #48）可选聚合项；环比由调用方对当日/前一日各调一次完成
+_SNAPSHOT_AGGREGATE_KINDS = ("breadth", "amount")
+
+
 def query_snapshot(
     trade_date: str | None = None,
     stock_code: str | None = None,
+    aggregate: str | None = None,
+    order_by: str | None = None,
+    order: str = "desc",
+    limit: int | None = None,
 ) -> dict:
-    """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。"""
+    """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。
+
+    aggregate（逗号分隔，可选 breadth,amount）为服务端聚合模式：返回涨跌
+    家数（最新价 vs 昨收，含沪/深/北分市场口径）与两市成交额合计（万元，
+    ADR 0006），不返回行；order_by/limit/order 在聚合模式下不生效。
+    order_by（快照列）+ limit 为排序取前 N（order asc/desc，缺省 desc），
+    行字段与整表查询一致。不传新参数时行为与整表查询完全一致。
+    """
     tool = "query_snapshot"
-    params = {"trade_date": trade_date, "stock_code": stock_code}
+    params: dict = {"trade_date": trade_date, "stock_code": stock_code}
+    kinds: tuple[str, ...] = ()
+    if aggregate is not None:
+        kinds = tuple(k.strip() for k in aggregate.split(","))
+        unknown = [k for k in kinds if k not in _SNAPSHOT_AGGREGATE_KINDS]
+        if not any(kinds) or unknown:
+            return _error(
+                tool,
+                params,
+                f"未知聚合项: {aggregate}（可选: {', '.join(_SNAPSHOT_AGGREGATE_KINDS)}）",
+            )
+        params["aggregate"] = aggregate
+    if order_by is not None:
+        params["order_by"] = order_by
+        params["order"] = order
+    if limit is not None:
+        params["limit"] = limit
+    if order_by is not None and order_by not in SNAPSHOT_ORDER_COLUMNS:
+        return _error(
+            tool,
+            params,
+            f"未知快照排序列: {order_by}（可选: {', '.join(SNAPSHOT_ORDER_COLUMNS)}）",
+        )
+    if order not in ("asc", "desc"):
+        return _error(tool, params, f"order 只能是 asc/desc: {order!r}")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
+        return _error(tool, params, f"limit 必须为正整数: {limit!r}")
     if trade_date is not None:
         try:
             trade_date = normalize_date(trade_date)
@@ -114,7 +166,16 @@ def query_snapshot(
     try:
         if trade_date is None:
             trade_date = select_latest_snapshot_date(conn)
-        rows = select_snapshot(conn, trade_date, stock_code)
+        if aggregate is not None:
+            aggregates = select_snapshot_aggregate(conn, trade_date, stock_code)
+            return {
+                "status": "ok",
+                "tool": tool,
+                "params": params,
+                "trade_date": trade_date,
+                "aggregates": {k: aggregates[k] for k in kinds},
+            }
+        rows = select_snapshot(conn, trade_date, stock_code, order_by, order, limit)
     finally:
         conn.close()
     return {

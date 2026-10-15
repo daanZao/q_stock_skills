@@ -105,8 +105,19 @@ ON CONFLICT (trade_date, stock_code) DO UPDATE SET
 _SELECT_SNAPSHOT_SQL = """
 SELECT trade_date, {cols}, source FROM market_snapshot
 {{where}}
-ORDER BY stock_code
+{{order}}
 """.format(cols=", ".join(SNAPSHOT_FIELDS))
+
+# 排序取前 N（issue #48）的 order_by 白名单：列名只来自内部常量，不接外部输入
+SNAPSHOT_ORDER_COLUMNS = ("trade_date",) + SNAPSHOT_FIELDS
+
+# 分市场口径（沪/深/北）按代码前缀判定，与 is_bse_code 同例：4/8/9 开头为北交所，
+# 6 开头为沪市，其余（0/3）归深市；%% 为 psycopg2 占位符转义
+_SNAPSHOT_MARKET_CASE = (
+    "CASE WHEN stock_code LIKE '6%%' THEN 'sh'"
+    " WHEN stock_code LIKE '4%%' OR stock_code LIKE '8%%' OR stock_code LIKE '9%%'"
+    " THEN 'bj' ELSE 'sz' END"
+)
 
 
 def upsert_snapshot(conn, trade_date: str, rows: list[dict], source: str) -> int:
@@ -130,9 +141,74 @@ def upsert_snapshot(conn, trade_date: str, rows: list[dict], source: str) -> int
 
 
 def select_snapshot(
-    conn, trade_date: str | None = None, stock_code: str | None = None
+    conn,
+    trade_date: str | None = None,
+    stock_code: str | None = None,
+    order_by: str | None = None,
+    order: str = "desc",
+    limit: int | None = None,
 ) -> list[dict]:
-    """按日期/代码过滤查询快照；两者都为 None 时返回全表（慎用）。"""
+    """按日期/代码过滤查询快照；两者都为 None 时返回全表（慎用）。
+
+    order_by（白名单列）+ limit 为排序取前 N（issue #48），排序与限量下推
+    到数据库；order_by 缺省时按 stock_code 升序（原行为）。NULL 值恒排末尾。
+    """
+    where: list[str] = []
+    args: list = []
+    if trade_date is not None:
+        where.append("trade_date = %s")
+        args.append(trade_date)
+    if stock_code is not None:
+        where.append("stock_code = %s")
+        args.append(stock_code)
+    if order_by is not None:
+        if order_by not in SNAPSHOT_ORDER_COLUMNS:
+            raise ValueError(f"未知快照排序列: {order_by}")
+        direction = "ASC" if order == "asc" else "DESC"
+        order_sql = f"ORDER BY {order_by} {direction} NULLS LAST, stock_code"
+    else:
+        order_sql = "ORDER BY stock_code"
+    sql = _SELECT_SNAPSHOT_SQL.format(
+        where="WHERE " + " AND ".join(where) if where else "",
+        order=order_sql,
+    )
+    if limit is not None:
+        sql += " LIMIT %s"
+        args.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        return [
+            dict(zip(("trade_date",) + SNAPSHOT_FIELDS + ("source",), row))
+            for row in cur.fetchall()
+        ]
+
+
+_SNAPSHOT_AGGREGATE_SQL = """
+SELECT {market} AS market,
+    count(*) FILTER (WHERE latest_price > pre_close) AS up,
+    count(*) FILTER (WHERE latest_price < pre_close) AS down,
+    count(*) FILTER (WHERE latest_price = pre_close) AS flat,
+    sum(amount) AS total_amount
+FROM market_snapshot
+{{where}}
+GROUP BY {market}
+""".format(market=_SNAPSHOT_MARKET_CASE)
+
+_MARKETS = ("sh", "sz", "bj")
+
+
+def select_snapshot_aggregate(
+    conn,
+    trade_date: str | None = None,
+    stock_code: str | None = None,
+) -> dict:
+    """快照聚合（issue #48）下推到数据库：涨跌家数与成交额合计，全市场 + 分市场。
+
+    上涨/下跌/平盘按最新价 vs 昨收判定；最新价或昨收为 NULL 的行不计入家数。
+    成交额合计为库内万元口径（ADR 0006）。无行时各项为 0 / 0.0。
+    返回 {"breadth": {"total", "by_market"}, "amount": {"total_amount", "by_market"}}，
+    by_market 恒含 sh/sz/bj 三键。
+    """
     where, args = [], []
     if trade_date is not None:
         where.append("trade_date = %s")
@@ -140,15 +216,32 @@ def select_snapshot(
     if stock_code is not None:
         where.append("stock_code = %s")
         args.append(stock_code)
-    sql = _SELECT_SNAPSHOT_SQL.format(
+    sql = _SNAPSHOT_AGGREGATE_SQL.format(
         where="WHERE " + " AND ".join(where) if where else ""
     )
     with conn.cursor() as cur:
         cur.execute(sql, args)
-        return [
-            dict(zip(("trade_date",) + SNAPSHOT_FIELDS + ("source",), row))
+        grouped = {
+            row[0]: {"up": row[1], "down": row[2], "flat": row[3], "amount": row[4]}
             for row in cur.fetchall()
-        ]
+        }
+    zero = {"up": 0, "down": 0, "flat": 0}
+    breadth_by_market = {
+        m: {k: grouped.get(m, {}).get(k, 0) for k in zero} for m in _MARKETS
+    }
+    amount_by_market = {
+        m: float(grouped[m]["amount"]) if m in grouped else 0.0 for m in _MARKETS
+    }
+    return {
+        "breadth": {
+            "total": {k: sum(v[k] for v in breadth_by_market.values()) for k in zero},
+            "by_market": breadth_by_market,
+        },
+        "amount": {
+            "total_amount": sum(amount_by_market.values()),
+            "by_market": amount_by_market,
+        },
+    }
 
 
 def select_latest_snapshot_date(conn) -> str | None:
