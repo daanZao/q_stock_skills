@@ -14,6 +14,14 @@ fetch_failed（非连接级）与 no_data_for_date（上游正常响应空结果
 （龙虎榜盘后发布是正常语义），lhb 抓取失败按三态结构化返回
 （status error + error_kind + 逐源明细），与"未发布"可区分；
 lhb 子项部分失败落已得数据并报 partial_error。
+
+indices 段白名单定点补漏（issue #49）：主源 efinance「沪深系列指数」口径系统性
+排除科创板系列指数（缺 000688），备选 akshare 含 000688 但主源成功时轮不到。
+indices 段抓取后对照 MAJOR_INDICES 白名单（复用 tools_init 清单，单一事实来源）
+检查覆盖，缺谁按单 code 补抓补落库（fetch_index_spot_with_fallback）。补漏失败
+不静默也不触发核心 section fail-fast——section 维持 ok，失败按三态分类进
+patch failed 明细（复用 ADR 0007 命名：upstream_unreachable 带 retry_advice /
+fetch_failed / 全源口径不含该指数 no_data_for_date）。
 """
 
 import logging
@@ -27,6 +35,8 @@ from .fetch_chain import (
     UPSTREAM_RETRY_ADVICE,
     AllSourcesFailed,
     aggregate_error_kind,
+    aggregate_patch_error_kind,
+    fetch_index_spot_with_fallback,
     fetch_section_with_fallback,
 )
 from .output import error as _error
@@ -37,6 +47,7 @@ from .repository import (
     select_latest_board_date,
     upsert_board_rows,
 )
+from .tools_init import MAJOR_INDICES
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +86,47 @@ def _upsert_section(conn, section: str, data, trade_date: str) -> int:
             conn, table, date_col, key_cols, fields, trade_date, rows
         )
     return total
+
+
+def _patch_major_indices(
+    adapters: Sequence[BoardAdapter], data: list[dict]
+) -> tuple[list[dict], dict | None]:
+    """indices 段白名单定点补漏（issue #49）：对照 MAJOR_INDICES 检查覆盖，
+    缺者按单 code 补抓，返回 (含补抓行的行列表, patch 报告)。
+
+    白名单全命中返回 (原数据, None)——零补抓请求。补抓失败不抛错（不拖垮
+    section、不触发 fail-fast），按三态分类记入报告 failed 明细并 log；
+    全源口径不含该指数（empty）归 no_data_for_date——正常语义，但覆盖目标
+    未达成，同样列入 failed 明细。
+    """
+    present = {row.get("index_code") for row in data}
+    missing = [code for code, _ in MAJOR_INDICES if code not in present]
+    if not missing:
+        return data, None
+    rows = list(data)
+    patched = []
+    failed = {}
+    for code in missing:
+        try:
+            r = fetch_index_spot_with_fallback(adapters, code)
+        except AllSourcesFailed as e:
+            kind = aggregate_patch_error_kind(e.attempted)
+            entry = {
+                "error": str(e),
+                "error_kind": kind,
+                "attempted_sources": e.attempted,
+            }
+            if kind == "upstream_unreachable":
+                entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
+            failed[code] = entry
+            log.warning("indices 段白名单补漏失败 %s: %s", code, e)
+            continue
+        rows += r["rows"]
+        patched.append({"index_code": code, "source": r["source"]})
+    report: dict = {"patched": patched}
+    if failed:
+        report["failed"] = failed
+    return rows, report
 
 
 def fetch_board_snapshot(
@@ -119,11 +171,17 @@ def fetch_board_snapshot(
                     entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
                 results[name] = entry
                 continue
+            data = r["data"]
+            patch = None
+            if name == "indices":
+                data, patch = _patch_major_indices(adapters, data)
             res = {
-                "rows": _upsert_section(conn, name, r["data"], effective),
+                "rows": _upsert_section(conn, name, data, effective),
                 "source": r["source"],
                 "status": "ok",
             }
+            if patch:
+                res["patch"] = patch
             if r["attempted_sources"]:
                 res["attempted_sources"] = r["attempted_sources"]
             if name == "lhb":
@@ -133,7 +191,7 @@ def fetch_board_snapshot(
                 if not r["data"]["lhb_basic"]:
                     res["empty_kind"] = "no_data_for_date"
                     res["note"] = _LHB_EMPTY_NOTE
-            elif not r["data"]:
+            elif not data:
                 res["empty_kind"] = "no_data_for_date"
             results[name] = res
     finally:

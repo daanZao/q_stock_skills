@@ -50,6 +50,14 @@ class EfinanceAdapter:
 
     def fetch_indices(self, trade_date: str) -> list[dict]:
         """沪深系列指数快照；行级"最新交易日"在映射层写入 trade_date。"""
+        return self._index_rows()
+
+    def fetch_index_spot(self, index_code: str) -> list[dict]:
+        """单 code 指数行情（issue #49 补漏）：沪深系列指数全量口径按 code 过滤；
+        该口径系统性排除科创板系列指数（如 000688），过滤为空由工具层转下一源。"""
+        return [r for r in self._index_rows() if r["index_code"] == index_code]
+
+    def _index_rows(self) -> list[dict]:
         ef = _ef()
         try:
             df = ef.stock.get_realtime_quotes(["沪深系列指数"])

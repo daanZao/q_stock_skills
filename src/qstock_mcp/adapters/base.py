@@ -262,11 +262,16 @@ class BoardAdapter(Protocol):
     工具层据此报告 partial_error。盘中/非交易日 lhb_basic 为空列表是正常语义
     （盘后发布），适配器应将其归一化为空列表而非抛错；不支持某 section 的源
     抛 FetchError。
+
+    fetch_index_spot（issue #49 白名单定点补漏）：按单 code 取指数行情，返回
+    0 或 1 行（键同 fetch_indices）；空列表表示源口径不含该指数（非错误，
+    工具层转下一源），抓取失败抛 FetchError。
     """
 
     name: str
 
     def fetch_indices(self, trade_date: str) -> list[dict]: ...
+    def fetch_index_spot(self, index_code: str) -> list[dict]: ...
     def fetch_boards(self, trade_date: str) -> list[dict]: ...
     def fetch_zt_pool(self, trade_date: str) -> list[dict]: ...
     def fetch_strong_stocks(self, trade_date: str) -> list[dict]: ...

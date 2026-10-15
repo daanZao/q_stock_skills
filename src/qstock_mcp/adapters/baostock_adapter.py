@@ -233,6 +233,9 @@ class BaostockAdapter:
     def fetch_indices(self, trade_date: str) -> list[dict]:
         self._unsupported_board("indices")
 
+    def fetch_index_spot(self, index_code: str) -> list[dict]:
+        self._unsupported_board("index_spot")
+
     def fetch_boards(self, trade_date: str) -> list[dict]:
         self._unsupported_board("boards")
 

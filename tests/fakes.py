@@ -115,22 +115,34 @@ class FakeSnapshotAdapter:
 
 # ---------------------------------------------------------------- 盘面快照（issue #5）
 
-INDEX_ROWS = [
-    {
-        "index_code": "000001",
-        "index_name": "上证指数",
-        "latest_price": 3000.0,
+def _index_row(index_code: str, index_name: str, close: float) -> dict:
+    return {
+        "index_code": index_code,
+        "index_name": index_name,
+        "latest_price": close,
         "change_percent": 0.5,
         "change_amount": 15.0,
         "volume": 100,
         "amount": 1.0e9,
         "amplitude": 1.0,
-        "high": 3010.0,
-        "low": 2990.0,
-        "open": 2995.0,
-        "pre_close": 2985.0,
+        "high": close + 10.0,
+        "low": close - 10.0,
+        "open": close - 5.0,
+        "pre_close": close - 15.0,
         "volume_ratio": 1.1,
     }
+
+
+# 默认指数清单覆盖 MAJOR_INDICES 白名单全 7 只（issue #49：全命中时零补抓）；
+# 模拟主源口径缺 000688 的场景用 [r for r in INDEX_ROWS if r["index_code"] != "000688"]
+INDEX_ROWS = [
+    _index_row("000001", "上证指数", 3000.0),
+    _index_row("399001", "深证成指", 9500.0),
+    _index_row("399006", "创业板指", 1900.0),
+    _index_row("000300", "沪深300", 3500.0),
+    _index_row("000016", "上证50", 2400.0),
+    _index_row("000905", "中证500", 5400.0),
+    _index_row("000688", "科创50", 800.0),
 ]
 
 BOARD_ROWS = [
@@ -241,15 +253,31 @@ class FakeBoardAdapter:
     rows: {section: rows} 覆盖默认返回；lhb 的 rows 为 {表名: [row]} 字典。
     exc: 非 None 时失败即抛该异常实例（模拟连接级故障/不支持等特定失败，
     issue #47 三态契约测试）。
+    spot_rows/spot_exc: 单 code 指数补抓（issue #49）的脚本——spot_rows 为补抓源
+    清单（按 index_code 过滤返回），None 时按自身 indices 行过滤（模拟同源同口径）；
+    spot_exc 非 None 时补抓调用即抛。补抓调用记录在 spot_calls。
     """
 
-    def __init__(self, name, *, fail_times=0, fail_sections=(), rows=None, exc=None):
+    def __init__(
+        self,
+        name,
+        *,
+        fail_times=0,
+        fail_sections=(),
+        rows=None,
+        exc=None,
+        spot_rows=None,
+        spot_exc=None,
+    ):
         self.name = name
         self._fail_times = fail_times
         self._fail_sections = set(fail_sections)
         self._rows = rows or {}
         self._exc = exc
+        self._spot_rows = spot_rows
+        self._spot_exc = spot_exc
         self.calls = []
+        self.spot_calls = []
 
     def _get(self, section):
         self.calls.append(section)
@@ -261,6 +289,15 @@ class FakeBoardAdapter:
 
     def fetch_indices(self, trade_date):
         return self._get("indices")
+
+    def fetch_index_spot(self, index_code):
+        self.spot_calls.append(index_code)
+        if self._spot_exc is not None:
+            raise self._spot_exc
+        rows = self._spot_rows
+        if rows is None:
+            rows = self._rows.get("indices", _BOARD_DEFAULTS["indices"])
+        return [r for r in rows if r["index_code"] == index_code]
 
     def fetch_boards(self, trade_date):
         return self._get("boards")

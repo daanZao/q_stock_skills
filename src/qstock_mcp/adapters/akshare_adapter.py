@@ -136,6 +136,14 @@ class AkshareAdapter:
     # ---------------------------------------------------------------- 盘面快照（issue #5）
 
     def fetch_indices(self, trade_date: str) -> list[dict]:
+        return self._index_rows()
+
+    def fetch_index_spot(self, index_code: str) -> list[dict]:
+        """单 code 指数行情（issue #49 补漏）：沪深重要指数口径按 code 过滤
+        （该口径 43 只含科创50 000688）；过滤为空由工具层转下一源。"""
+        return [r for r in self._index_rows() if r["index_code"] == index_code]
+
+    def _index_rows(self) -> list[dict]:
         ak = _ak()
         try:
             df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")

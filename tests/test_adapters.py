@@ -392,3 +392,5 @@ def test_baostock_rejects_all_board_sections():
                bs.fetch_strong_stocks, bs.fetch_lhb):
         with pytest.raises(FetchError, match="不支持"):
             fn("20240105")
+    with pytest.raises(FetchError, match="不支持"):
+        bs.fetch_index_spot("000688")

@@ -33,7 +33,9 @@ class AllSourcesFailed(RuntimeError):
     """所有数据源在给定分段上均失败。
 
     attempted 为每源的 {source, attempts, error, failure_kind}；failure_kind 取值
-    unsupported / connection / other（ADR 0007）。
+    unsupported / connection / other（ADR 0007）；单 code 指数补漏路径
+    （fetch_index_spot_with_fallback）另有 empty——源口径不含该指数，
+    与 unsupported 一样不算抓取故障。
     """
 
     def __init__(self, attempted: list[dict]):
@@ -52,6 +54,24 @@ def aggregate_error_kind(attempted: list[dict]) -> str:
     if any(a["failure_kind"] == "connection" for a in failures):
         return "upstream_unreachable"
     return "fetch_failed"
+
+
+def aggregate_patch_error_kind(attempted: list[dict]) -> str:
+    """单 code 指数补漏的 error_kind 聚合（issue #49，复用 ADR 0007 三态命名）。
+
+    empty（源口径不含该指数）与 unsupported 一样不算抓取故障；其余源中任一
+    连接级故障即 upstream_unreachable，有非连接级失败即 fetch_failed；
+    全部 empty/unsupported 为 no_data_for_date（白名单指数当日全源无行情，
+    正常语义，但覆盖目标未达成，由工具层列入 patch failed 明细）。
+    """
+    failures = [
+        a for a in attempted if a["failure_kind"] not in ("unsupported", "empty")
+    ]
+    if any(a["failure_kind"] == "connection" for a in failures):
+        return "upstream_unreachable"
+    if failures:
+        return "fetch_failed"
+    return "no_data_for_date"
 
 
 def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
@@ -162,6 +182,51 @@ def fetch_section_with_fallback(
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
+
+
+def fetch_index_spot_with_fallback(
+    adapters: Sequence[BoardAdapter],
+    index_code: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """单 code 指数行情补抓（issue #49 白名单定点补漏），成功返回
+    {rows, source, attempted_sources}。
+
+    与 fetch_section_with_fallback 不同：空结果（源口径不含该指数，如 efinance
+    沪深系列指数口径系统性排除科创板系列）不视为成功，立即转下一源并记
+    failure_kind "empty"（口径性缺失，重试无意义）；异常仍按每源最多重试 2 次。
+    全源无果抛 AllSourcesFailed，error_kind 由 aggregate_patch_error_kind 判定。
+    """
+    attempted: list[dict] = []
+    for adapter in adapters:
+        error = None
+        kind = None
+        attempts = 0
+        for _ in range(max_retries + 1):
+            attempts += 1
+            try:
+                rows = adapter.fetch_index_spot(index_code)
+                if rows:
+                    return {
+                        "rows": rows,
+                        "source": adapter.name,
+                        "attempted_sources": attempted,
+                    }
+                error = "源口径不含该指数"
+                kind = "empty"
+                break
+            except Exception as e:  # noqa: BLE001 - 适配器任何失败都收敛为"该源失败"
+                error = str(e)
+                kind = fetch_failure_kind(e)
+        attempted.append(
+            {
+                "source": adapter.name,
+                "attempts": attempts,
+                "error": error,
+                "failure_kind": kind,
+            }
+        )
+    raise AllSourcesFailed(attempted)
 
 
 def fetch_stock_list_with_fallback(
