@@ -16,6 +16,10 @@ _Avoid_: 后端、B/S 服务
 执行 web 数据源接口获取证券数据，多源 fallback（efinance → akshare → baostock）。
 _Avoid_: 爬虫
 
+**抓取三态错误契约**:
+抓取结果中"抓不到"与"没有"的机械区分（决策见 `docs/adr/0007`）：`upstream_unreachable`（连接级故障——请求未获得任何 HTTP 响应：连接重置/空响应/超时/DNS 失败；错误语义，携带重试建议）/ `no_data_for_date`（上游正常响应但该日期无数据，如非交易日、盘后未发布；正常语义非失败）/ `empty_ok`（查询条件合理的空集）。by-design 不支持某能力的源（`FetchError(kind="unsupported")`）不算抓取故障。
+_Avoid_: 抓取失败（不加限定时）
+
 **规格化落库（ingest）**:
 对基础证券数据做清洗/规格化，写入本地数据库。
 

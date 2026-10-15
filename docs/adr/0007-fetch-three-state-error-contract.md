@@ -1,0 +1,25 @@
+# 抓取错误三态契约：upstream_unreachable / no_data_for_date / empty_ok
+
+2026-10-14 上游 `push2.eastmoney.com` 集群整体故障（TCP/TLS 握手成功后空响应，HTTP 000），`fetch_market_snapshot` 的 efinance 与 akshare 两源全断、baostock 按设计不支持全市场快照，但工具返回的错误无法区分三种本质不同的情况：**上游不可达**（应中止并稍后重试）、**该交易日无数据**（非交易日/盘后未发布，正常语义）、**正常空结果**。编排 skill 拿到含混错误无法决定中止还是降级，当日复盘在数据就绪阶段中止（取证见 `files/daily_review_20261014_blockers.md` P0-1）。
+
+抓取（fetch）能力面的错误契约定为三态：
+
+- **`upstream_unreachable`**：连接级故障——请求**未获得任何 HTTP 响应**（连接被重置、TLS 后空响应、超时、DNS/建连失败）。收到 HTTP 响应（含 4xx/5xx）不属此类，按各工具现有语义处理。工具返回 `status:"error"` + `error_kind:"upstream_unreachable"` + `retry_advice`（稍后重试）+ `attempted_sources` 逐源明细。
+- **`no_data_for_date`**：上游正常响应但该日期无数据（非交易日、盘后未发布等）。语义为**正常而非失败**：`status:"ok"` + `rows_upserted:0` + `empty_kind:"no_data_for_date"` + `note`。
+- **`empty_ok`**：查询条件合理的空集。本工具（全市场快照，无过滤条件）无此路径；该态预留给带过滤条件的抓取/查询工具。
+
+连接级故障的**可机器判定标准**：沿异常的 `__cause__`/`__context__` 链按类名判定（标准库 `ConnectionError`/`TimeoutError`/`socket.gaierror`、`http.client.RemoteDisconnected`/`IncompleteRead`、requests/urllib3 的 `ConnectTimeout`/`ReadTimeout`/`MaxRetryError`/`NewConnectionError`/`ProtocolError` 等），命中即 `connection`。判定收敛在 `adapters/base.py` 的 `fetch_failure_kind`，按类名鸭子类型匹配、不 import 可选第三方库（与 `json_safe` 同策略）。by-design 拒绝（如 baostock 无全市场快照、efinance 不支持指数日线、北交所代码）由适配器抛 `FetchError(..., kind="unsupported")` 显式标注，**不算抓取故障、不参与 upstream_unreachable 判定**。
+
+逐源分类在 `fetch_chain._with_fallback` 记录（`attempted_sources` 每项增加 `failure_kind`：unsupported / connection / other）；工具层聚合：全源失败时任一抓取源为 `connection` 即 `error_kind:"upstream_unreachable"`，否则 `error_kind:"fetch_failed"`（三态之外的通用抓取失败，保持现有 error 语义，不带重试建议）。
+
+**不加非 push2 兜底源**（已决策）：数据源故障时快速失败、告知调用方稍后重试，不硬绕路取数。本契约只做错误分类，不做新适配器。
+
+调用方（编排 skill）据此机械决策：`upstream_unreachable` → 中止并出异常报告、稍后重试；`no_data_for_date` / `empty_ok` → 按现有降级规则继续。逐源明细（适配器名 + 原始报错）可直接编进异常报告，并区分单源问题与集群性故障。
+
+## Consequences
+
+- `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类。
+- 新增数据源适配器时：by-design 不支持的能力必须抛 `FetchError(kind="unsupported")`；连接级异常不得被吞掉或改写成无 `__cause__` 的普通报错（保持 `raise FetchError(...) from e`），否则该源故障会被误分类为 `other`。
+- `attempted_sources` 项新增 `failure_kind` 字段，属增量字段，消费方按既有结构读取不受影响。
+- 空结果不触发 fallback 的既有语义不变：上游正常响应空 = `no_data_for_date`（成功语义），不视为该源失败。
+- 判定依赖异常类名白名单，新型连接层库接入时需把其连接级异常类名补进 `_CONNECTION_ERROR_NAMES`。

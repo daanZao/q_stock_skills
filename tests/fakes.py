@@ -89,19 +89,23 @@ class FakeSnapshotAdapter:
     """记录调用次数、按脚本成败的 fake 全市场快照源。
 
     trade_date 模拟 API 报告的最新交易日；None 表示 API 未报告。
-    rows 为 None 时返回 SNAPSHOT_ROWS。
+    rows 为 None 时返回 SNAPSHOT_ROWS。exc 非 None 时失败即抛该异常实例
+    （模拟连接级故障/不支持等特定失败，issue #46 三态契约测试）。
     """
 
-    def __init__(self, name, *, fail_times=0, rows=None, trade_date=None):
+    def __init__(self, name, *, fail_times=0, rows=None, trade_date=None, exc=None):
         self.name = name
         self._fail_times = fail_times
         self._rows = rows
         self._trade_date = trade_date
+        self._exc = exc
         self.calls = 0
 
     def fetch_market_snapshot(self):
         self.calls += 1
         if self.calls <= self._fail_times:
+            if self._exc is not None:
+                raise self._exc
             raise FetchError(f"{self.name} boom")
         return {
             "trade_date": self._trade_date,

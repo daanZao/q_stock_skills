@@ -172,7 +172,69 @@ LHB_YYB_MOST_FIELDS = (
 
 
 class FetchError(RuntimeError):
-    """单个数据源抓取失败（库未安装、网络错误、接口报错、代码不支持等）。"""
+    """单个数据源抓取失败（库未安装、网络错误、接口报错、代码不支持等）。
+
+    kind 为显式故障分类（三态契约，ADR 0007）："unsupported" 表示该源按设计
+    不支持此能力（如 baostock 无全市场快照），不算抓取故障；缺省 None 由
+    fetch_failure_kind 沿异常链自动判定。
+    """
+
+    def __init__(self, msg: str, *, kind: str | None = None):
+        self.kind = kind
+        super().__init__(msg)
+
+
+# 连接级故障（ADR 0007）：请求未获得任何 HTTP 响应——连接重置、TLS 后空响应、
+# 超时、DNS/建连失败。按异常类名鸭子类型判定，不 import requests/urllib3（可选依赖）；
+# 覆盖标准库、http.client、requests、urllib3 的对应类名。
+_CONNECTION_ERROR_NAMES = frozenset(
+    {
+        # 标准库 / socket
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "ConnectionRefusedError",
+        "TimeoutError",
+        "timeout",
+        "gaierror",
+        # http.client
+        "RemoteDisconnected",
+        "IncompleteRead",
+        "BadStatusLine",
+        # requests / urllib3
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ConnectTimeoutError",
+        "ReadTimeoutError",
+        "MaxRetryError",
+        "NewConnectionError",
+        "NameResolutionError",
+        "ProtocolError",
+        "ChunkedEncodingError",
+        "SSLError",
+    }
+)
+
+
+def fetch_failure_kind(exc: BaseException) -> str:
+    """抓取失败分类：unsupported / connection / other（ADR 0007 判定内核）。
+
+    显式 kind（FetchError.kind）优先；否则沿 __cause__/__context__ 链按类名
+    判定连接级故障（请求未获得任何 HTTP 响应）；收到响应后的失败（含 4xx/5xx、
+    解析错误）归 other。
+    """
+    for want_connection in (False, True):
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if want_connection:
+                if type(cur).__name__ in _CONNECTION_ERROR_NAMES:
+                    return "connection"
+            elif isinstance(cur, FetchError) and cur.kind is not None:
+                return cur.kind
+            cur = cur.__cause__ or cur.__context__
+    return "other"
 
 
 class DailyAdapter(Protocol):

@@ -81,7 +81,7 @@ class EfinanceAdapter:
 
     def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
         """efinance 无干净的指数历史接口，明确拒绝（不伪造）。"""
-        raise FetchError("efinance 不支持指数日线")
+        raise FetchError("efinance 不支持指数日线", kind="unsupported")
 
     # ---------------------------------------------------------------- 基本面透传（issue #6）
 
@@ -97,7 +97,7 @@ class EfinanceAdapter:
         return {"base_info": json_safe(dict(info))}
 
     def _unsupported(self, section: str) -> NoReturn:
-        raise FetchError(f"efinance 不支持盘面 section: {section}")
+        raise FetchError(f"efinance 不支持盘面 section: {section}", kind="unsupported")
 
     def fetch_boards(self, trade_date: str) -> list[dict]:
         self._unsupported("boards")

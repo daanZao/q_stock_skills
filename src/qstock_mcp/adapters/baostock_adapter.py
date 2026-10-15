@@ -108,7 +108,10 @@ class BaostockAdapter:
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
     ) -> list[dict]:
         if is_bse_code(stock_code):
-            raise FetchError(f"baostock 不支持北交所代码 {stock_code}（4/8/9 开头）")
+            raise FetchError(
+                f"baostock 不支持北交所代码 {stock_code}（4/8/9 开头）",
+                kind="unsupported",
+            )
         bs_code = to_baostock_code(stock_code)
         bs = _login()
         try:
@@ -131,7 +134,7 @@ class BaostockAdapter:
 
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
-        raise FetchError("baostock 不支持全市场快照")
+        raise FetchError("baostock 不支持全市场快照", kind="unsupported")
 
     # ---------------------------------------------------------------- init 轻量初始化（issue #8）
 
@@ -181,7 +184,10 @@ class BaostockAdapter:
         均无数据才抛 FetchError 结束 fallback 链。
         """
         if is_bse_code(stock_code):
-            raise FetchError(f"baostock 不支持北交所代码 {stock_code}（4/8/9 开头）")
+            raise FetchError(
+                f"baostock 不支持北交所代码 {stock_code}（4/8/9 开头）",
+                kind="unsupported",
+            )
         bs_code = to_baostock_code(stock_code)
         bs = _login()
         try:
@@ -222,7 +228,7 @@ class BaostockAdapter:
 
     def _unsupported_board(self, section: str) -> NoReturn:
         """baostock 无盘面快照接口（issue #5），明确拒绝（不伪造）。"""
-        raise FetchError(f"baostock 不支持盘面 section: {section}")
+        raise FetchError(f"baostock 不支持盘面 section: {section}", kind="unsupported")
 
     def fetch_indices(self, trade_date: str) -> list[dict]:
         self._unsupported_board("indices")

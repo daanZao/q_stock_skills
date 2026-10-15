@@ -4,6 +4,11 @@
 真实 PG 测试库（见 tests/）。快照契约（issue #4）：单次全市场调用，
 API 返回的最新交易日优先于传入日期；按 (trade_date, stock_code) 业务键
 幂等 upsert；全失败时报错并给出 attempted_sources，绝不伪造数据。
+三态错误契约（issue #46，ADR 0007）：全源失败按逐源 failure_kind 聚合
+error_kind——任一抓取源连接级故障（请求未获得 HTTP 响应）即
+upstream_unreachable（带 retry_advice），否则 fetch_failed；by-design 不
+支持的源（unsupported，如 baostock）不参与判定。上游正常响应空结果为
+no_data_for_date（status ok + empty_kind + note），语义正常非失败。
 """
 
 import logging
@@ -42,10 +47,22 @@ def fetch_market_snapshot(
         try:
             result = fetch_snapshot_with_fallback(adapters)
         except AllSourcesFailed as e:
+            failures = [a for a in e.attempted if a["failure_kind"] != "unsupported"]
+            if any(a["failure_kind"] == "connection" for a in failures):
+                return _error(
+                    tool,
+                    params,
+                    "上游不可达：全部数据源失败（连接级故障，请求未获得 HTTP 响应）",
+                    error_kind="upstream_unreachable",
+                    retry_advice="连接级故障通常为临时性，建议稍后重试；"
+                    "持续失败请按 attempted_sources 逐源检查数据源可达性",
+                    attempted_sources=e.attempted,
+                )
             return _error(
                 tool,
                 params,
                 "全部数据源失败（各源错误见 attempted_sources）",
+                error_kind="fetch_failed",
                 attempted_sources=e.attempted,
             )
         if result["trade_date"] is not None:
@@ -57,7 +74,7 @@ def fetch_market_snapshot(
         n = upsert_snapshot(conn, effective, result["rows"], result["source"])
     finally:
         conn.close()
-    return {
+    out = {
         "status": "ok",
         "tool": tool,
         "params": params,
@@ -67,6 +84,13 @@ def fetch_market_snapshot(
         "rows_upserted": n,
         "attempted_sources": result["attempted_sources"],
     }
+    if not result["rows"]:
+        out["empty_kind"] = "no_data_for_date"
+        out["note"] = (
+            "上游正常响应但该日期无快照数据（非交易日或盘后未发布），"
+            "语义为正常而非失败"
+        )
+    return out
 
 
 def query_snapshot(

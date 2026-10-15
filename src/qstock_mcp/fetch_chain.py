@@ -5,7 +5,8 @@ fetch_fundamentals），不感知具体数据库/第三方库，测试注入 fak
 fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
-全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数与最后错误）。
+全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数、错误与
+failure_kind 故障分类——三态契约 ADR 0007）。
 """
 
 from typing import Callable, Sequence
@@ -17,13 +18,18 @@ from .adapters.base import (
     IndexDailyAdapter,
     ListAdapter,
     SnapshotAdapter,
+    fetch_failure_kind,
 )
 
 DEFAULT_MAX_RETRIES = 2
 
 
 class AllSourcesFailed(RuntimeError):
-    """所有数据源在给定分段上均失败。attempted 为每源的 {source, attempts, error}。"""
+    """所有数据源在给定分段上均失败。
+
+    attempted 为每源的 {source, attempts, error, failure_kind}；failure_kind 取值
+    unsupported / connection / other（ADR 0007）。
+    """
 
     def __init__(self, attempted: list[dict]):
         self.attempted = attempted
@@ -36,6 +42,7 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
     attempted: list[dict] = []
     for adapter in adapters:
         error = None
+        kind = None
         for _ in range(max_retries + 1):
             try:
                 result = call(adapter)
@@ -46,8 +53,14 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
                 }
             except Exception as e:  # noqa: BLE001 - 适配器任何失败都收敛为"该源失败"
                 error = str(e)
+                kind = fetch_failure_kind(e)
         attempted.append(
-            {"source": adapter.name, "attempts": max_retries + 1, "error": error}
+            {
+                "source": adapter.name,
+                "attempts": max_retries + 1,
+                "error": error,
+                "failure_kind": kind,
+            }
         )
     raise AllSourcesFailed(attempted)
 

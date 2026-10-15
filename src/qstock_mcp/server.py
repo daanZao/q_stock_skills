@@ -81,6 +81,9 @@ def fetch_market_snapshot(trade_date: str | None = None) -> dict:
     """抓取全市场快照（约 5000+ 只 A 股）并落库：单次调用，efinance → akshare → baostock fallback，按 (trade_date, stock_code) 幂等 upsert。
 
     API 返回的最新交易日优先于传入的 trade_date（yyyymmdd 或 yyyy-mm-dd）。
+    错误三态（ADR 0007）：全源失败时 error_kind=upstream_unreachable（连接级故障，
+    带 retry_advice 与逐源 attempted_sources 明细）或 fetch_failed；上游正常响应但
+    该日期无数据返回 status ok + empty_kind=no_data_for_date（非失败）。
     """
     return tools_snapshot.fetch_market_snapshot(trade_date)
 

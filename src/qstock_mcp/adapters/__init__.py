@@ -12,6 +12,7 @@ from .base import (
     IndexDailyAdapter,
     ListAdapter,
     SnapshotAdapter,
+    fetch_failure_kind,
     is_bse_code,
     json_safe,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "IndexDailyAdapter",
     "ListAdapter",
     "SnapshotAdapter",
+    "fetch_failure_kind",
     "is_bse_code",
     "json_safe",
     "default_adapters",
