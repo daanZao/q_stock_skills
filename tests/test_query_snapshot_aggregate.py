@@ -73,12 +73,14 @@ def test_aggregate_breadth_and_amount_totals_and_by_market(pg_test):
     assert result["trade_date"] == DAY2
     assert "rows" not in result
     agg = result["aggregates"]
-    assert agg["breadth"]["total"] == {"up": 3, "down": 1, "flat": 1}
+    # 停牌行（最新价/昨收为 NULL）进 no_price 桶：up+down+flat+no_price = 当日总行数
+    assert agg["breadth"]["total"] == {"up": 3, "down": 1, "flat": 1, "no_price": 1}
     assert agg["breadth"]["by_market"] == {
-        "sh": {"up": 1, "down": 1, "flat": 0},
-        "sz": {"up": 1, "down": 0, "flat": 1},
-        "bj": {"up": 1, "down": 0, "flat": 0},
+        "sh": {"up": 1, "down": 1, "flat": 0, "no_price": 0},
+        "sz": {"up": 1, "down": 0, "flat": 1, "no_price": 0},
+        "bj": {"up": 1, "down": 0, "flat": 0, "no_price": 1},
     }
+    assert sum(agg["breadth"]["total"].values()) == len(DAY2_ROWS)
     assert agg["amount"]["total_amount"] == 1060.0
     assert agg["amount"]["by_market"] == {"sh": 300.0, "sz": 700.0, "bj": 60.0}
 
@@ -97,11 +99,11 @@ def test_aggregate_empty_date_returns_zeros(pg_test):
     result = query_snapshot(trade_date="20240103", aggregate="breadth,amount")
     assert result["status"] == "ok"
     agg = result["aggregates"]
-    assert agg["breadth"]["total"] == {"up": 0, "down": 0, "flat": 0}
+    assert agg["breadth"]["total"] == {"up": 0, "down": 0, "flat": 0, "no_price": 0}
     assert agg["breadth"]["by_market"] == {
-        "sh": {"up": 0, "down": 0, "flat": 0},
-        "sz": {"up": 0, "down": 0, "flat": 0},
-        "bj": {"up": 0, "down": 0, "flat": 0},
+        "sh": {"up": 0, "down": 0, "flat": 0, "no_price": 0},
+        "sz": {"up": 0, "down": 0, "flat": 0, "no_price": 0},
+        "bj": {"up": 0, "down": 0, "flat": 0, "no_price": 0},
     }
     assert agg["amount"]["total_amount"] == 0.0
     assert agg["amount"]["by_market"] == {"sh": 0.0, "sz": 0.0, "bj": 0.0}
@@ -111,7 +113,9 @@ def test_aggregate_combines_with_stock_code_filter(pg_test):
     _seed(pg_test, DAY2, DAY2_ROWS)
     result = query_snapshot(trade_date=DAY2, stock_code="600519", aggregate="breadth")
     assert result["status"] == "ok"
-    assert result["aggregates"]["breadth"]["total"] == {"up": 1, "down": 0, "flat": 0}
+    assert result["aggregates"]["breadth"]["total"] == {
+        "up": 1, "down": 0, "flat": 0, "no_price": 0,
+    }
 
 
 def test_aggregate_two_days_same_shape_supports_dod(pg_test):
@@ -125,7 +129,29 @@ def test_aggregate_two_days_same_shape_supports_dod(pg_test):
         assert day1["aggregates"][kind].keys() == day2["aggregates"][kind].keys()
     assert day1["aggregates"]["amount"]["total_amount"] == 1000.0
     assert day2["aggregates"]["amount"]["total_amount"] == 1060.0
-    assert day1["aggregates"]["breadth"]["total"] == {"up": 1, "down": 1, "flat": 0}
+    assert day1["aggregates"]["breadth"]["total"] == {
+        "up": 1, "down": 1, "flat": 0, "no_price": 0,
+    }
+
+
+def test_breadth_no_price_bucket_reconciles_with_row_count(pg_test):
+    rows = [
+        _row("600519", "贵州茅台", 10.0, 9.0, 100.0),  # 沪 涨
+        _row("600001", "浦发银行", None, 8.0, 0.0),  # 沪 停牌：无最新价
+        _row("000001", "平安银行", 11.0, None, 50.0),  # 深 无昨收
+    ]
+    _seed(pg_test, DAY2, rows)
+    result = query_snapshot(trade_date=DAY2, aggregate="breadth")
+    assert result["status"] == "ok"
+    total = result["aggregates"]["breadth"]["total"]
+    assert total == {"up": 1, "down": 0, "flat": 0, "no_price": 2}
+    # 四桶之和恒等于当日总行数；分市场同样成立
+    assert sum(total.values()) == len(rows)
+    by_market = result["aggregates"]["breadth"]["by_market"]
+    assert by_market["sh"] == {"up": 1, "down": 0, "flat": 0, "no_price": 1}
+    assert by_market["sz"] == {"up": 0, "down": 0, "flat": 0, "no_price": 1}
+    assert by_market["bj"] == {"up": 0, "down": 0, "flat": 0, "no_price": 0}
+    assert sum(sum(b.values()) for b in by_market.values()) == len(rows)
 
 
 # ---------------------------------------------------------------- 排序取前 N
@@ -166,13 +192,21 @@ def test_order_asc(pg_test):
     assert [r["stock_code"] for r in result["rows"]] == ["920001", "830799"]
 
 
-def test_order_by_without_limit_orders_all_rows(pg_test):
+def test_rejects_order_by_without_limit(pg_test):
     _seed(pg_test, DAY2, DAY2_ROWS)
     result = query_snapshot(trade_date=DAY2, order_by="amount")
+    assert result["status"] == "error"
+    # 不带 limit 的排序会退化为排序后全表（约 3.3MB），按参数校验错误拒绝
+    assert "limit" in result["error"]
+
+
+def test_limit_without_order_by_limits_in_stock_code_order(pg_test):
+    _seed(pg_test, DAY2, DAY2_ROWS)
+    result = query_snapshot(trade_date=DAY2, limit=2)
     assert result["status"] == "ok"
-    assert result["count"] == len(DAY2_ROWS)
-    amounts = [r["amount"] for r in result["rows"]]
-    assert amounts == sorted(amounts, reverse=True)
+    assert result["count"] == 2
+    codes = [r["stock_code"] for r in result["rows"]]
+    assert codes == sorted(r["stock_code"] for r in DAY2_ROWS)[:2]
 
 
 def test_topn_empty_date_returns_zero_count(pg_test):

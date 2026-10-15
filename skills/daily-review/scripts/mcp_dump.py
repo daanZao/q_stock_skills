@@ -12,8 +12,8 @@
 
 --server 为 server 启动命令行（shlex 切分），缺省 .venv/bin/qstock-mcp（相对执行目录）。
 --local-aggregate 对落盘 rows 本地聚合（breadth/amount，口径与 server 聚合一致：
-涨跌家数按最新价 vs 昨收、分市场按代码前缀 6→sh / 4,8,9→bj / 其余→sz，金额为
-库内万元口径），聚合结果打 stdout。
+涨跌家数按最新价 vs 昨收、最新价或昨收缺失的行进 no_price 桶、分市场按代码前缀
+6→sh / 4,8,9→bj / 其余→sz，金额为库内万元口径），聚合结果打 stdout。
 
 退出码：0 = ok；1 = 传输/工具错误（server 启动失败、握手失败、超时、isError）；
 2 = 参数错误（argparse、params 非 JSON 对象、未知聚合项）。
@@ -48,14 +48,20 @@ def market_bucket(stock_code: str) -> str:
 def aggregate_rows(rows: list[dict], kinds: tuple[str, ...]) -> dict:
     """对快照 rows 本地聚合，结构与 server aggregate 模式一致。
 
-    上涨/下跌/平盘按 latest_price vs pre_close 判定；任一缺失的行不计入家数。
-    无行时各项为 0 / 0.0；by_market 恒含 sh/sz/bj 三键。
+    上涨/下跌/平盘按 latest_price vs pre_close 判定；任一缺失的行计入 no_price
+    桶（停牌等），up+down+flat+no_price = 总行数。无行时各项为 0 / 0.0；
+    by_market 恒含 sh/sz/bj 三键。
     """
-    grouped = {m: {"up": 0, "down": 0, "flat": 0, "amount": 0.0} for m in ("sh", "sz", "bj")}
+    grouped = {
+        m: {"up": 0, "down": 0, "flat": 0, "no_price": 0, "amount": 0.0}
+        for m in ("sh", "sz", "bj")
+    }
     for row in rows:
         bucket = grouped[market_bucket(str(row.get("stock_code", "")))]
         latest, pre = row.get("latest_price"), row.get("pre_close")
-        if latest is not None and pre is not None:
+        if latest is None or pre is None:
+            bucket["no_price"] += 1
+        else:
             key = "up" if latest > pre else "down" if latest < pre else "flat"
             bucket[key] += 1
         amount = row.get("amount")
@@ -63,9 +69,10 @@ def aggregate_rows(rows: list[dict], kinds: tuple[str, ...]) -> dict:
             bucket["amount"] += float(amount)
     out = {}
     if "breadth" in kinds:
-        by_market = {m: {k: grouped[m][k] for k in ("up", "down", "flat")} for m in grouped}
+        keys = ("up", "down", "flat", "no_price")
+        by_market = {m: {k: grouped[m][k] for k in keys} for m in grouped}
         out["breadth"] = {
-            "total": {k: sum(v[k] for v in by_market.values()) for k in ("up", "down", "flat")},
+            "total": {k: sum(v[k] for v in by_market.values()) for k in keys},
             "by_market": by_market,
         }
     if "amount" in kinds:

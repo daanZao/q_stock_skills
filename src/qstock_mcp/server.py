@@ -100,10 +100,12 @@ def query_snapshot(
     """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。日期格式 yyyymmdd 或 yyyy-mm-dd。
 
     aggregate（逗号分隔，可选 breadth,amount）为服务端聚合模式：返回上涨/下跌/平盘
-    家数（最新价 vs 昨收判定，含沪/深/北分市场口径）与两市成交额合计（万元，ADR 0006
-    口径），不返回行；环比由调用方对当日/前一日各调一次完成。order_by（快照列名，如
-    amount）+ limit=N 为服务端排序取前 N（order asc/desc，缺省 desc），行字段与整表
-    查询一致（不裁剪列）。不提供通用 offset 分页。不传新参数时行为与整表查询一致。
+    家数（最新价 vs 昨收判定，含沪/深/北分市场口径；最新价或昨收为 NULL 的停牌行
+    计入 no_price 桶，up+down+flat+no_price = 过滤后总行数）与两市成交额合计（万元，
+    ADR 0006 口径），不返回行；环比由调用方对当日/前一日各调一次完成。order_by
+    （快照列名，如 amount）+ limit=N 为服务端排序取前 N（order asc/desc，缺省 desc），
+    行字段与整表查询一致（不裁剪列）；order_by 必须配 limit，单独 limit 按 stock_code
+    升序截断。不提供通用 offset 分页。不传新参数时行为与整表查询一致。
     """
     return tools_snapshot.query_snapshot(
         trade_date, stock_code, aggregate, order_by, order, limit

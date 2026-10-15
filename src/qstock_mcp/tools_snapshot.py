@@ -10,8 +10,10 @@ upstream_unreachable（带 retry_advice），否则 fetch_failed；by-design 不
 支持的源（unsupported，如 baostock）不参与判定。上游正常响应空结果为
 no_data_for_date（status ok + empty_kind + note），语义正常非失败。
 query_snapshot 服务端聚合与排序取前 N（issue #48）：aggregate=breadth,amount
-返回涨跌家数（含沪/深/北分市场）与成交额合计（万元）；order_by + limit
-排序取前 N，行字段不裁剪；均下推 SQL，不做通用 offset 分页。
+返回涨跌家数（含沪/深/北分市场；最新价或昨收为 NULL 的停牌行计入 no_price
+桶，up+down+flat+no_price = 过滤后总行数）与成交额合计（万元）；order_by +
+limit 排序取前 N，行字段不裁剪；order_by 必须配 limit（排序后全表是大结果
+通道，按参数错误拒绝）；均下推 SQL，不做通用 offset 分页。
 """
 
 import logging
@@ -120,10 +122,13 @@ def query_snapshot(
     """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。
 
     aggregate（逗号分隔，可选 breadth,amount）为服务端聚合模式：返回涨跌
-    家数（最新价 vs 昨收，含沪/深/北分市场口径）与两市成交额合计（万元，
-    ADR 0006），不返回行；order_by/limit/order 在聚合模式下不生效。
-    order_by（快照列）+ limit 为排序取前 N（order asc/desc，缺省 desc），
-    行字段与整表查询一致。不传新参数时行为与整表查询完全一致。
+    家数（最新价 vs 昨收，含沪/深/北分市场口径；最新价或昨收为 NULL 的停牌
+    行计入 no_price 桶，up+down+flat+no_price = 过滤后总行数）与两市成交额
+    合计（万元，ADR 0006），不返回行；order_by/limit/order 在聚合模式下
+    不生效。order_by（快照列）+ limit 为排序取前 N（order asc/desc，缺省
+    desc），行字段与整表查询一致；order_by 必须配 limit（不带 limit 的排序
+    会退化为排序后全表，按参数校验错误拒绝）。limit 单独使用时按 stock_code
+    升序截断。不传新参数时行为与整表查询完全一致。
     """
     tool = "query_snapshot"
     params: dict = {"trade_date": trade_date, "stock_code": stock_code}
@@ -148,6 +153,12 @@ def query_snapshot(
             tool,
             params,
             f"未知快照排序列: {order_by}（可选: {', '.join(SNAPSHOT_ORDER_COLUMNS)}）",
+        )
+    if aggregate is None and order_by is not None and limit is None:
+        return _error(
+            tool,
+            params,
+            f"order_by 需配合 limit 使用（排序取前 N；不带 limit 会退化为排序后全表）: {order_by}",
         )
     if order not in ("asc", "desc"):
         return _error(tool, params, f"order 只能是 asc/desc: {order!r}")

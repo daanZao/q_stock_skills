@@ -34,19 +34,21 @@ def test_aggregate_rows_breadth_and_amount():
     ]
     out = mcp_dump.aggregate_rows(rows, ("breadth", "amount"))
     assert out["breadth"]["by_market"] == {
-        "sh": {"up": 1, "down": 1, "flat": 0},
-        "sz": {"up": 0, "down": 0, "flat": 1},
-        "bj": {"up": 1, "down": 1, "flat": 0},
+        "sh": {"up": 1, "down": 1, "flat": 0, "no_price": 0},
+        "sz": {"up": 0, "down": 0, "flat": 1, "no_price": 1},
+        "bj": {"up": 1, "down": 1, "flat": 0, "no_price": 0},
     }
-    assert out["breadth"]["total"] == {"up": 2, "down": 2, "flat": 1}
+    assert out["breadth"]["total"] == {"up": 2, "down": 2, "flat": 1, "no_price": 1}
+    # 停牌行（最新价/昨收缺失）进 no_price 桶：四桶之和 = 总行数
+    assert sum(out["breadth"]["total"].values()) == len(rows)
     assert out["amount"]["by_market"] == {"sh": 150.0, "sz": 500.0, "bj": 10.0}
     assert out["amount"]["total_amount"] == 660.0
 
 
 def test_aggregate_rows_empty():
     out = mcp_dump.aggregate_rows([], ("breadth", "amount"))
-    assert out["breadth"]["total"] == {"up": 0, "down": 0, "flat": 0}
-    assert out["breadth"]["by_market"]["bj"] == {"up": 0, "down": 0, "flat": 0}
+    assert out["breadth"]["total"] == {"up": 0, "down": 0, "flat": 0, "no_price": 0}
+    assert out["breadth"]["by_market"]["bj"] == {"up": 0, "down": 0, "flat": 0, "no_price": 0}
     assert out["amount"] == {"total_amount": 0.0, "by_market": {"sh": 0.0, "sz": 0.0, "bj": 0.0}}
 
 
@@ -76,7 +78,7 @@ def test_dump_end_to_end(monkeypatch, capsys, tmp_path):
     assert payload["count"] == 6
     summary = json.loads(captured.out)
     assert summary["out"] == str(out)
-    assert summary["aggregates"]["breadth"]["total"] == {"up": 2, "down": 2, "flat": 1}
+    assert summary["aggregates"]["breadth"]["total"] == {"up": 2, "down": 2, "flat": 1, "no_price": 1}
     assert summary["aggregates"]["amount"]["total_amount"] == 660.0
 
 

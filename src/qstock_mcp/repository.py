@@ -151,7 +151,9 @@ def select_snapshot(
     """按日期/代码过滤查询快照；两者都为 None 时返回全表（慎用）。
 
     order_by（白名单列）+ limit 为排序取前 N（issue #48），排序与限量下推
-    到数据库；order_by 缺省时按 stock_code 升序（原行为）。NULL 值恒排末尾。
+    到数据库；order_by 缺省时按 stock_code 升序（原行为），此时 limit 单独
+    生效（按代码序截断）。NULL 值恒排末尾。order_by 不配 limit 会退化为
+    排序后全表（大结果通道），属调用方契约错误，直接 ValueError。
     """
     where: list[str] = []
     args: list = []
@@ -164,6 +166,8 @@ def select_snapshot(
     if order_by is not None:
         if order_by not in SNAPSHOT_ORDER_COLUMNS:
             raise ValueError(f"未知快照排序列: {order_by}")
+        if limit is None:
+            raise ValueError(f"order_by 须配合 limit（排序取前 N）: {order_by}")
         direction = "ASC" if order == "asc" else "DESC"
         order_sql = f"ORDER BY {order_by} {direction} NULLS LAST, stock_code"
     else:
@@ -188,6 +192,7 @@ SELECT {market} AS market,
     count(*) FILTER (WHERE latest_price > pre_close) AS up,
     count(*) FILTER (WHERE latest_price < pre_close) AS down,
     count(*) FILTER (WHERE latest_price = pre_close) AS flat,
+    count(*) FILTER (WHERE latest_price IS NULL OR pre_close IS NULL) AS no_price,
     sum(amount) AS total_amount
 FROM market_snapshot
 {{where}}
@@ -204,8 +209,10 @@ def select_snapshot_aggregate(
 ) -> dict:
     """快照聚合（issue #48）下推到数据库：涨跌家数与成交额合计，全市场 + 分市场。
 
-    上涨/下跌/平盘按最新价 vs 昨收判定；最新价或昨收为 NULL 的行不计入家数。
-    成交额合计为库内万元口径（ADR 0006）。无行时各项为 0 / 0.0。
+    上涨/下跌/平盘按最新价 vs 昨收判定；最新价或昨收为 NULL 的行（停牌等）计入
+    no_price 桶，up + down + flat + no_price = 过滤后总行数（total 与 by_market
+    同口径），调用方无需假设三桶之和即全部家数。成交额合计为库内万元口径
+    （ADR 0006）。无行时各项为 0 / 0.0。
     返回 {"breadth": {"total", "by_market"}, "amount": {"total_amount", "by_market"}}，
     by_market 恒含 sh/sz/bj 三键。
     """
@@ -222,10 +229,13 @@ def select_snapshot_aggregate(
     with conn.cursor() as cur:
         cur.execute(sql, args)
         grouped = {
-            row[0]: {"up": row[1], "down": row[2], "flat": row[3], "amount": row[4]}
+            row[0]: {
+                "up": row[1], "down": row[2], "flat": row[3],
+                "no_price": row[4], "amount": row[5],
+            }
             for row in cur.fetchall()
         }
-    zero = {"up": 0, "down": 0, "flat": 0}
+    zero = {"up": 0, "down": 0, "flat": 0, "no_price": 0}
     breadth_by_market = {
         m: {k: grouped.get(m, {}).get(k, 0) for k in zero} for m in _MARKETS
     }
