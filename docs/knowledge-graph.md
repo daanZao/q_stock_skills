@@ -16,7 +16,7 @@ flowchart LR
 
     subgraph mcp["MCP 数据服务（src/qstock_mcp，stdio）"]
         direction TB
-        SRV["server.py<br/>17 工具薄包装"]
+        SRV["server.py<br/>18 工具薄包装"]
         subgraph faces["五个能力面（tools_* 核心层 = 测试接缝）"]
             INIT["tools_init<br/>init_database 轻量初始化/全量回溯"]
             DAILY["tools_daily<br/>fetch_daily / query_daily 自愈"]
@@ -25,6 +25,7 @@ flowchart LR
             SWB["tools_sw_board<br/>query_sw_board_daily 板块自算行情"]
             FUND["tools_fundamentals<br/>get_fundamentals 透传"]
             CONC["tools_conclusions<br/>save/query_conclusions"]
+            LEDGER["tools_ledger<br/>query_collection_log 采集台账"]
             MX["tools_mx（妙想接入，跨三面）<br/>mx_query=proxy 透传 /<br/>mx_search=抓取+落库 /<br/>query_news=查询"]
         end
         CHAIN["fetch_chain<br/>fallback 编排 + 重试"]
@@ -41,12 +42,13 @@ flowchart LR
         BS["baostock（第 3 位兜底）"]
     end
 
-    subgraph pg["PostgreSQL 独立新库（sql/001-012，17 张表）"]
+    subgraph pg["PostgreSQL 独立新库（sql/001-013，18 张表）"]
         T1["stock_daily / index_daily / stock_list"]
         T2["market_snapshot"]
         T3["盘面表：market_indices / market_boards /<br/>zt_pool / strong_stocks / lhb_*×5"]
         T4["conclusions（通用结论表，jsonb payload）"]
         T5["news_items（资讯表，mx-search 落库）"]
+        T6["collection_log（采集台账，append-only）"]
     end
 
     AGENT["外部 AI agent（stdio 客户端）"] --> SRV
@@ -73,7 +75,7 @@ flowchart LR
 
 ### MCP server 入口与公共层
 
-- **`server.py`**：stdio MCP server，17 个工具只做薄包装，核心逻辑全在 `tools_*` 模块（`src/qstock_mcp/server.py:1-5`）；数据库连接按工具调用建立，启动不依赖 PG 可达（`server.py:4`）。入口 `qstock-mcp = qstock_mcp.server:main`（`pyproject.toml:17`）。
+- **`server.py`**：stdio MCP server，18 个工具只做薄包装，核心逻辑全在 `tools_*` 模块（`src/qstock_mcp/server.py:1-5`）；数据库连接按工具调用建立，启动不依赖 PG 可达（`server.py:4`）。入口 `qstock-mcp = qstock_mcp.server:main`（`pyproject.toml:17`）。
 - **`output.py`**：统一错误输出契约——`status:"error"` + 工具名 + 参数回显 + 原因，工具层不抛异常（`output.py:4-6`、`db.py:31-41`）。
 - **`dates.py`**：日期统一 `yyyymmdd`（接受 `yyyy-mm-dd`）；`days` 按交易日≈自然日 7/5 加 buffer 换算区间，宁多抓不少抓，换算落点是非交易日时 start 向前对齐到最近交易日（周末 + `_MARKET_CLOSURES` 已知休市表，issue #51）（`dates.py:62-73`、`dates.py:75-97`）。
 - **`db.py`**：连接串只从 `PG_DSN` 环境变量读（ADR 0002）；`ensure_schema` 幂等执行 `sql/*.sql` 全部 DDL（`db.py:21-28`、`db.py:44-54`）。
@@ -88,6 +90,7 @@ flowchart LR
 - **proxy — `tools_fundamentals.py`**：基本面透传，`{section: 原始记录}` 键名保留上游、仅 JSON 安全化，不规格化、不连数据库、不落库；全失败 `status:"error"` 绝不伪造（`tools_fundamentals.py:1-8`）。
 - **conclusions — `tools_conclusions.py`**：结论读写。写入校验日期与 payload 可 JSON 序列化；同业务键重复写为 upsert，`outcome` 报告 `inserted/updated`（`tools_conclusions.py:21-59`、ADR 0003）。
 - **妙想接入 — `tools_mx.py`**：三工具共享 `_mx_exchange` 骨架（配额先检、触顶不调上游、上游触达即记账、code!=0 走统一 error 契约）。`mx_query` 妙想 mx-data 透传（同 proxy 语义：不规格化、不落库、不进 fallback 链）；`mx_search` 资讯搜索并落库 `news_items`（响应内按 news_code 去重、业务键幂等 upsert，subject 缺省 `market`/`_market`）；`query_news` 库内资讯纯读（subject + 发布时间范围过滤、倒序、limit，空结果 `count:0` 非错误，不调上游不计配额）（ADR 0005、`tools_mx.py:60-116`、`tools_mx.py:142-180`、`tools_mx.py:183-230`）。
+- **采集台账 — `tools_ledger.py` + `ledger.py`（issue #77，spec #71/W4）**：一切写库路径（fetch_daily/query_daily 自愈、fetch_market_snapshot、fetch_board_snapshot 逐 section、init 各 part、成分字典/名称表导入）每次采集动作落一行 `collection_log`（trade_date/section/status(ok·empty·error)/source/rows/error_kind/detail/起止时间，append-only 全历史保留；`record_collection` 落账失败仅 log 不拖垮主流程）；区间采集（日线）记区间尾日、区间见 detail。`query_collection_log` 按日期/section/状态过滤、完成时间倒序、limit 缺省 100 上限 500（约束输出体量），空结果 `count:0` 非错误。就绪检查语义：无台账行=未采集，empty=上游确认无数据，error=采集失败。
 
 ### 编排与落库
 
@@ -111,6 +114,7 @@ flowchart LR
 - `conclusions`：业务唯一键 `(subject_type, subject_code, trade_date, conclusion_type)` 在 schema 层钉死，`payload` 为 jsonb、结构由写入方 skill 自报、server 不校验（`sql/008_conclusions.sql:3-17`、ADR 0003）。
 - `news_items`：资讯表（mx-search 落库，ADR 0005）。业务唯一键 `(news_code, subject_type, subject_code)`；列含资讯类型/标题/正文截断/`publish_time`（timestamptz）/来源/链接（可空，研报无原文链接）/研报机构评级（可空）/`raw` jsonb 原文（`sql/011_news_items.sql:1-24`）。
 - 成分字典与名称表（issue #72，spec #70）：`sw_industry_class` 多体系同构形态，主键 `(source_system, stock_code, board_code, effective_date)`（'sw'/'em' 等，为东财概念成分预留）；`sw_industry_meta` 行业名称表（`industry_code` 主键 / name / level 1-3），种子数据由 `import_sw_industry_meta` 工具（issue #74）幂等 upsert 灌入。`sql/012` 同时承担现库旧形态（手工建表，主键 `(stock_code, effective_date)`，列 `industry_code`）的幂等迁移：改名 `board_code`、回填 `source_system='sw'`、主键扩为四元组。
+- `collection_log`：采集台账（issue #77，append-only 全历史保留），字段与就绪检查语义见 `sql/013_collection_log.sql` 文件头注释与上文 tools_ledger 条目。
 
 ### agent skill（`skills/`，第二测试接缝：脚本 stdin/stdout）
 

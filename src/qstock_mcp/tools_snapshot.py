@@ -17,7 +17,7 @@ limit 排序取前 N，行字段不裁剪；order_by 必须配 limit（排序后
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 from .adapters import SnapshotAdapter, default_adapters
@@ -29,6 +29,7 @@ from .fetch_chain import (
     aggregate_error_kind,
     fetch_snapshot_with_fallback,
 )
+from .ledger import record_collection, summarize_attempted
 from .output import error as _error
 from .repository import (
     SNAPSHOT_ORDER_COLUMNS,
@@ -60,10 +61,21 @@ def fetch_market_snapshot(
     if err:
         return _error(tool, params, err)
     try:
+        started = datetime.now(timezone.utc)
         try:
             result = fetch_snapshot_with_fallback(adapters)
         except AllSourcesFailed as e:
-            if aggregate_error_kind(e.attempted) == "upstream_unreachable":
+            kind = aggregate_error_kind(e.attempted)
+            record_collection(
+                conn,
+                trade_date=passed or date.today().strftime("%Y%m%d"),
+                section="market_snapshot",
+                status="error",
+                error_kind=kind,
+                detail=summarize_attempted(e.attempted),
+                started_at=started,
+            )
+            if kind == "upstream_unreachable":
                 return _error(
                     tool,
                     params,
@@ -86,6 +98,17 @@ def fetch_market_snapshot(
         else:
             effective, origin = date.today().strftime("%Y%m%d"), "today"
         n = upsert_snapshot(conn, effective, result["rows"], result["source"])
+        record_collection(
+            conn,
+            trade_date=effective,
+            section="market_snapshot",
+            status="ok" if result["rows"] else "empty",
+            source=result["source"],
+            rows=n,
+            error_kind=None if result["rows"] else "no_data_for_date",
+            detail=summarize_attempted(result["attempted_sources"]),
+            started_at=started,
+        )
     finally:
         conn.close()
     out = {

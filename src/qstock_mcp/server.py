@@ -14,6 +14,7 @@ from . import (
     tools_daily,
     tools_fundamentals,
     tools_init,
+    tools_ledger,
     tools_mx,
     tools_snapshot,
     tools_sw_board,
@@ -177,6 +178,24 @@ def query_board_data(
     code 为各表业务代码（指数代码/板块名称/股票代码/营业部名称）。
     """
     return tools_board.query_board_data(table, trade_date, code)
+
+
+@mcp.tool()
+def query_collection_log(
+    trade_date: str | None = None,
+    section: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> dict:
+    """采集台账查询（统一查询能力面）：按日期/section/状态过滤采集历史，按完成时间倒序返回。
+
+    一切写库路径（fetch/init/调度/手动补抓）每次执行落一条台账（issue #77，
+    spec #71/W4）：status 三态 ok/empty/error 与 error_kind 同 ADR 0007 词汇；
+    无台账行 = 未采集，empty = 上游确认无数据，error = 采集失败（detail 含逐源
+    明细摘要）。trade_date: yyyymmdd 或 yyyy-mm-dd；section 如 boards/zt_pool/
+    stock_daily/market_snapshot；limit 缺省 100、上限 500。空结果 count:0 非错误。
+    """
+    return tools_ledger.query_collection_log(trade_date, section, status, limit)
 
 
 @mcp.tool()

@@ -8,13 +8,15 @@ akshare → baostock fallback；全失败时报错并给出 attempted_sources，
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import NamedTuple, Sequence
 
 from .adapters import DailyAdapter, default_adapters
 from .dates import resolve_range
 from .db import connect
-from .fetch_chain import AllSourcesFailed, fetch_with_fallback
+from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_with_fallback
 from .gaps import head_tail_gaps
+from .ledger import record_collection, summarize_attempted
 from .output import error as _error
 from .repository import select_daily, select_dates, upsert_daily
 
@@ -46,6 +48,28 @@ def ensure_coverage(
             {"start": seg_start, "end": seg_end, "source": result["source"], "rows": n}
         )
     return {"ok": True, "segments": segments}
+
+
+def _ledger_daily(
+    conn, start: str, end: str, segments: list[dict], started: datetime
+) -> None:
+    """日线采集落账（issue #77）：一次区间补抓一行，trade_date 记区间尾日。"""
+    rows = sum(s["rows"] for s in segments)
+    sources = ",".join(sorted({s["source"] for s in segments}))
+    seg_detail = "; ".join(
+        f"{s['start']}~{s['end']}:{s['source']}:{s['rows']}" for s in segments
+    )
+    record_collection(
+        conn,
+        trade_date=end,
+        section="stock_daily",
+        status="ok" if rows > 0 else "empty",
+        source=sources,
+        rows=rows,
+        error_kind=None if rows > 0 else "no_data_for_date",
+        detail=f"range {start}~{end}; {seg_detail}",
+        started_at=started,
+    )
 
 
 def _data_range(rows: list[dict]) -> dict | None:
@@ -83,8 +107,22 @@ def _run(stock_code: str, days, start, end, adj, adapters, tool: str):
     if err:
         return None, _error(tool, params, err)
     try:
+        started = datetime.now(timezone.utc)
         cover = ensure_coverage(conn, adapters, stock_code, adj, start_d, end_d)
+        if cover["ok"] and cover["segments"]:
+            # 采集台账（issue #77）：真实发生抓取/写库才落账；无缺口零动作不落账
+            _ledger_daily(conn, start_d, end_d, cover["segments"], started)
         if not cover["ok"]:
+            record_collection(
+                conn,
+                trade_date=end_d,
+                section="stock_daily",
+                status="error",
+                error_kind=aggregate_error_kind(cover["attempted_sources"]),
+                detail=f"range {start_d}~{end_d}; "
+                + (summarize_attempted(cover["attempted_sources"]) or ""),
+                started_at=started,
+            )
             return None, _error(
                 tool,
                 params,

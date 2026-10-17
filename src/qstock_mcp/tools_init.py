@@ -20,7 +20,7 @@ import_sw_industry_meta（issue #74）：申万行业名称表（sw_industry_met
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 from ._sw_classify import (
@@ -33,10 +33,12 @@ from .dates import normalize_date
 from .db import connect, ensure_schema, list_tables
 from .fetch_chain import (
     AllSourcesFailed,
+    aggregate_error_kind,
     fetch_index_daily_with_fallback,
     fetch_snapshot_with_fallback,
     fetch_stock_list_with_fallback,
 )
+from .ledger import record_collection, summarize_attempted
 from .output import error as _error
 from .repository import (
     replace_board_classification,
@@ -66,27 +68,53 @@ FULL_HISTORY_START = "19900101"  # 全量回溯/指数日线起点，各源自�
 
 
 def _init_stock_list(conn, adapters: Sequence[DataAdapter]) -> dict:
+    today = date.today().strftime("%Y%m%d")
+    started = datetime.now(timezone.utc)
     try:
         r = fetch_stock_list_with_fallback(adapters)
     except AllSourcesFailed as e:
+        record_collection(
+            conn, trade_date=today, section="stock_list", status="error",
+            error_kind=aggregate_error_kind(e.attempted),
+            detail=summarize_attempted(e.attempted), started_at=started,
+        )
         return {"status": "error", "error": str(e), "attempted_sources": e.attempted}
+    n = upsert_stock_list(conn, r["rows"], r["source"])
+    record_collection(
+        conn, trade_date=today, section="stock_list",
+        status="ok" if n > 0 else "empty", source=r["source"], rows=n,
+        started_at=started,
+    )
     return {
         "status": "ok",
-        "rows": upsert_stock_list(conn, r["rows"], r["source"]),
+        "rows": n,
         "source": r["source"],
     }
 
 
 def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
+    today = date.today().strftime("%Y%m%d")
+    started = datetime.now(timezone.utc)
     try:
         r = fetch_snapshot_with_fallback(adapters)
     except AllSourcesFailed as e:
+        record_collection(
+            conn, trade_date=today, section="market_snapshot", status="error",
+            error_kind=aggregate_error_kind(e.attempted),
+            detail=summarize_attempted(e.attempted), started_at=started,
+        )
         return {"status": "error", "error": str(e), "attempted_sources": e.attempted}
     # API 报告的交易日优先，未报告回退当天（同 fetch_market_snapshot 工具契约）
-    effective = r["trade_date"] or date.today().strftime("%Y%m%d")
+    effective = r["trade_date"] or today
+    n = upsert_snapshot(conn, effective, r["rows"], r["source"])
+    record_collection(
+        conn, trade_date=effective, section="market_snapshot",
+        status="ok" if n > 0 else "empty", source=r["source"], rows=n,
+        started_at=started,
+    )
     return {
         "status": "ok",
-        "rows": upsert_snapshot(conn, effective, r["rows"], r["source"]),
+        "rows": n,
         "source": r["source"],
         "trade_date": effective,
     }
@@ -95,6 +123,7 @@ def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
 def _init_index_daily(conn, adapters: Sequence[DataAdapter]) -> dict:
     """主要指数全历史日线：按指数独立 fallback，仅全部失败才 part error。"""
     today = date.today().strftime("%Y%m%d")
+    started = datetime.now(timezone.utc)
     indices: list[dict] = []
     for code, name in MAJOR_INDICES:
         try:
@@ -121,9 +150,17 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter]) -> dict:
             }
         )
     failed = [i for i in indices if i["status"] != "ok"]
+    status = "error" if len(failed) == len(indices) else "ok"
+    total_rows = sum(i.get("rows", 0) for i in indices)
+    record_collection(
+        conn, trade_date=today, section="index_daily", status=status,
+        rows=total_rows,
+        detail=",".join(i["index_code"] for i in failed) or None,
+        started_at=started,
+    )
     return {
-        "status": "error" if len(failed) == len(indices) else "ok",
-        "rows": sum(i.get("rows", 0) for i in indices),
+        "status": status,
+        "rows": total_rows,
         "indices": indices,
     }
 
@@ -131,6 +168,7 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter]) -> dict:
 def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
     """全市场个股历史日线回溯：复用日线头尾自愈，单股失败不中断。"""
     today = date.today().strftime("%Y%m%d")
+    started = datetime.now(timezone.utc)
     codes = select_stock_codes(conn)
     if not codes:
         return {
@@ -170,6 +208,14 @@ def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
         status = "error"
     else:
         status = "partial_error"
+    # 采集台账（issue #77）：回溯整体落一行；部分失败以 detail 呈现
+    record_collection(
+        conn, trade_date=today, section="stock_daily",
+        status="error" if status == "error" else "ok",
+        rows=rows_upserted,
+        detail=f"backfill total={len(codes)} succeeded={succeeded} failed={len(failed)}",
+        started_at=started,
+    )
     return {
         "status": status,
         "total": len(codes),
@@ -304,7 +350,16 @@ def query_index_daily(
 def _ingest_ledger_hook(
     conn, source_system: str, file_path: str, counts: dict
 ) -> None:
-    """采集台账挂接点：台账表由 issue #71 落地后在此记录导入批次。"""
+    """采集台账（issue #77）：成分字典导入批次落账（source=file，行数=重载后插入数）。"""
+    record_collection(
+        conn,
+        trade_date=date.today().strftime("%Y%m%d"),
+        section="sw_industry_class",
+        status="ok",
+        source=source_system,
+        rows=counts["inserted"],
+        detail=f"deleted={counts['deleted']} file={file_path}",
+    )
 
 
 def import_board_classification(source_system: str, file_path: str) -> dict:
@@ -334,6 +389,14 @@ def import_board_classification(source_system: str, file_path: str) -> dict:
             conn.commit()
         except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
             conn.rollback()
+            record_collection(
+                conn,
+                trade_date=date.today().strftime("%Y%m%d"),
+                section="sw_industry_class",
+                status="error",
+                source=source_system,
+                detail=str(e)[:200],
+            )
             log.exception("成分字典导入失败")
             return _error(tool, params, f"成分字典导入失败: {e}")
     finally:
@@ -363,10 +426,25 @@ def import_sw_industry_meta() -> dict:
         try:
             ensure_schema(conn)
             rows = upsert_sw_industry_meta(conn, load_sw_industry_meta_seed())
+            record_collection(
+                conn,
+                trade_date=date.today().strftime("%Y%m%d"),
+                section="sw_industry_meta",
+                status="ok",
+                source="seed_csv",
+                rows=rows,
+            )
         except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
             # upsert_sw_industry_meta 内部自 commit；此 rollback 仅清理失败语句的
             # 事务残余，成功路径的已提交行不受影响（空转 rollback 是有意为之）
             conn.rollback()
+            record_collection(
+                conn,
+                trade_date=date.today().strftime("%Y%m%d"),
+                section="sw_industry_meta",
+                status="error",
+                detail=str(e)[:200],
+            )
             log.exception("行业名称表种子导入失败")
             return _error(tool, params, f"行业名称表种子导入失败: {e}")
     finally:

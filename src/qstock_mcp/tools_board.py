@@ -25,7 +25,7 @@ fetch_failed / 全源口径不含该指数 no_data_for_date）。
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, default_adapters
@@ -39,6 +39,7 @@ from .fetch_chain import (
     fetch_index_spot_with_fallback,
     fetch_section_with_fallback,
 )
+from .ledger import record_collection, summarize_attempted
 from .output import error as _error
 from .repository import (
     BOARD_QUERY_TABLES,
@@ -156,6 +157,7 @@ def fetch_board_snapshot(
     results = {}
     try:
         for name in selected:
+            started = datetime.now(timezone.utc)
             try:
                 r = fetch_section_with_fallback(adapters, name, effective)
             except AllSourcesFailed as e:
@@ -170,6 +172,15 @@ def fetch_board_snapshot(
                 if kind == "upstream_unreachable":
                     entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
                 results[name] = entry
+                record_collection(
+                    conn,
+                    trade_date=effective,
+                    section=name,
+                    status="error",
+                    error_kind=kind,
+                    detail=summarize_attempted(e.attempted),
+                    started_at=started,
+                )
                 continue
             data = r["data"]
             patch = None
@@ -193,6 +204,17 @@ def fetch_board_snapshot(
                     res["note"] = _LHB_EMPTY_NOTE
             elif not data:
                 res["empty_kind"] = "no_data_for_date"
+            record_collection(
+                conn,
+                trade_date=effective,
+                section=name,
+                status="ok" if res["rows"] > 0 else "empty",
+                source=r["source"],
+                rows=res["rows"],
+                error_kind=None if res["rows"] > 0 else "no_data_for_date",
+                detail=summarize_attempted(r["attempted_sources"]),
+                started_at=started,
+            )
             results[name] = res
     finally:
         conn.close()
