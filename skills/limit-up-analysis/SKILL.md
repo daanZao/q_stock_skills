@@ -80,5 +80,6 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），字段�
 
 - **数据缺失不编造**：某维度数据缺失时，在结论 `data_gaps` 与对话文本中标注，该维度降级为定性描述或直接缺省，不得编造家数、晋级率、市值或点评依据。
 - **晋级率/梯队只认管道输出**：`promote_rate`、`ladder`、`ladder_detail`、`promoted`、`failed` 一律取自 indicator-tools promote 指标输出，agent 不得手算；管道返回 `insufficient_data` 时如实标注，不得用其他口径凑数。
+- **停牌表述**：连板股历史序列中停牌交易日的占位行（`query_daily` 行带 `suspended=true`/`suspended_basis`，词汇见 CONTEXT.md"停牌占位行"）由 indicator-tools 管道入口自动剔除（剔除明细见响应 `excluded_suspended`），无需手工预处理；文本表述统一为"停牌"（不写"无数据"）。
 - **核心数据全缺即中止**：`zt_pool` 当日数据全缺且补抓失败时，中止分析并向用户报告缺失范围与失败原因；关键数据（strong_stocks / market_snapshot / market_boards / 昨日 zt_pool）部分缺失时标注缺失维度后继续。
 - **落库失败即中止**：`save_conclusion` 失败时向用户报告失败，不算分析完成。

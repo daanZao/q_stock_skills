@@ -6,6 +6,7 @@
 -- 新库建表与现库迁移——industry_code 改名 board_code、加 source_system 回填 'sw'、
 -- 主键扩为四元组，已有行不丢。幂等：迁移以旧列 industry_code 是否存在为条件，
 -- 重复执行不重复迁移。
+-- 承载：写 import_board_classification/import_sw_industry_meta、close 批概念成分积累（'em' 体系）；读 query_sw_board_daily（point-in-time 归属）
 
 -- 行业名称表
 CREATE TABLE IF NOT EXISTS sw_industry_meta (

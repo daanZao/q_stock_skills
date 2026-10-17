@@ -1,4 +1,5 @@
 -- 市场指数快照，结构继承旧 appdb 实测
+-- 承载：写 fetch_board_snapshot(indices 段，含白名单补漏)；读 query_board_data
 CREATE TABLE IF NOT EXISTS market_indices (
     id              bigserial PRIMARY KEY,
     trade_date      text NOT NULL,  -- yyyymmdd

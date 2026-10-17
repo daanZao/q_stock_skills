@@ -1,4 +1,5 @@
 -- 个股日线（前复权 OHLCV），结构继承旧 appdb 实测
+-- 承载：写 fetch_daily/query_daily 自愈、init 全量回溯、次晨批（morning）；读 query_daily、自算板块行情
 CREATE TABLE IF NOT EXISTS stock_daily (
     id              bigserial PRIMARY KEY,
     stock_code      text NOT NULL,

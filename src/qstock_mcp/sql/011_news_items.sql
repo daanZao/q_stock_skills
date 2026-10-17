@@ -1,6 +1,7 @@
 -- 资讯条目（mx-search 落库，issue #24/T2）
 -- 业务唯一键 (news_code, subject_type, subject_code)：同一资讯可挂多个 subject；
 -- subject 词汇沿用 ADR 0003（market 级为 market/_market）
+-- 承载：写 mx_search 落库；读 query_news
 CREATE TABLE IF NOT EXISTS news_items (
     id               bigserial PRIMARY KEY,
     news_code        text NOT NULL,   -- 上游条目 id（恒有），如 NW..._1 / AN...

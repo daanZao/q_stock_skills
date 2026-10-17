@@ -3,6 +3,7 @@
 -- lhb_stock_detail 无业务唯一键（忠于 appdb）：detail 行随父行 upsert 整体替换，不做行级 ON CONFLICT
 -- lhb_basic 业务键含 lhb_reason：上游按 (股票, 上榜原因) 一行一条，同股当日可多榜单；
 -- 键若仅 (trade_date, stock_code)，单批多行 INSERT ... ON CONFLICT 撞键整批回滚
+-- 承载：写 fetch_board_snapshot(lhb 段)；读 query_board_data
 CREATE TABLE IF NOT EXISTS lhb_basic (
     id              bigserial PRIMARY KEY,
     trade_date      text NOT NULL,  -- yyyymmdd

@@ -1,4 +1,6 @@
--- 板块快照（行业/概念），结构继承旧 appdb 实测（注意：无 source 列）
+-- 板块快照（行业/概念），结构继承旧 appdb 实测
+-- source 列由 sql/015 追加（NULL=实时采集，'push2his'=backfill 回补）
+-- 承载：写 fetch_board_snapshot(boards 段)、scheduler backfill（回补行 source='push2his'，见 sql/015）；读 query_board_data
 CREATE TABLE IF NOT EXISTS market_boards (
     id              bigserial PRIMARY KEY,
     trade_date      text NOT NULL,  -- yyyymmdd

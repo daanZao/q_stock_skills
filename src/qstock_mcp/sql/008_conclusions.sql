@@ -1,5 +1,6 @@
 -- 通用结论表：schema 对未来 skill 保持开放（docs/adr/0003）
 -- 业务唯一键在 schema 层钉死（旧 analysis_conclusions 无唯一约束、sequence 漂移的教训）
+-- 承载：写 save_conclusion；读 query_conclusions
 CREATE TABLE IF NOT EXISTS conclusions (
     id              bigserial PRIMARY KEY,
     subject_type    text NOT NULL,  -- market | stock

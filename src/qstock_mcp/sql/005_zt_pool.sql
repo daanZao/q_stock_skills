@@ -1,6 +1,7 @@
 -- 涨跌停/炸板池，结构继承旧 appdb 实测
 -- 表名/枚举约定：zt=涨停 dt=跌停 zb=炸板（pool_type 取值）
 -- 注意：旧库历史 amount 列数据损坏（等于 volume），新项目由本服务写入，不迁移旧数据
+-- 承载：写 fetch_board_snapshot(zt_pool 段)；读 query_board_data
 CREATE TABLE IF NOT EXISTS zt_pool (
     id                  bigserial PRIMARY KEY,
     trade_date          text NOT NULL,  -- yyyymmdd

@@ -1,4 +1,5 @@
 -- 强势股池，结构继承旧 appdb 实测（历史 amount 同样不可信，不迁移）
+-- 承载：写 fetch_board_snapshot(strong_stocks 段)；读 query_board_data
 CREATE TABLE IF NOT EXISTS strong_stocks (
     id                  bigserial PRIMARY KEY,
     trade_date          text NOT NULL,  -- yyyymmdd

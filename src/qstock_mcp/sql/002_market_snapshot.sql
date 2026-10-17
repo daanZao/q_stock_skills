@@ -1,4 +1,5 @@
 -- 全市场快照（一只一行），结构继承旧 appdb 实测
+-- 承载：写 fetch_market_snapshot/init 轻量初始化；读 query_snapshot
 CREATE TABLE IF NOT EXISTS market_snapshot (
     id              bigserial PRIMARY KEY,
     trade_date      text NOT NULL,  -- yyyymmdd

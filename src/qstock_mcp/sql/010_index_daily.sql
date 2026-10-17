@@ -1,5 +1,6 @@
 -- 主要指数日线（issue #8）：指数代码与个股代码冲突（000001 既是上证指数又是
 -- 平安银行），不复用 stock_daily，独立建表；指数无复权概念，无 adj 列
+-- 承载：写 init 轻量初始化、次晨批指数尾行补漏；读 query_index_daily
 CREATE TABLE IF NOT EXISTS index_daily (
     id              bigserial PRIMARY KEY,
     index_code      text NOT NULL,
