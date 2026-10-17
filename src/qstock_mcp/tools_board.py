@@ -22,6 +22,11 @@ indices 段抓取后对照 MAJOR_INDICES 白名单（复用 tools_init 清单，
 不静默也不触发核心 section fail-fast——section 维持 ok，失败按三态分类进
 patch failed 明细（复用 ADR 0007 命名：upstream_unreachable 带 retry_advice /
 fetch_failed / 全源口径不含该指数 no_data_for_date）。
+
+服务端防线（issue #78，ADR 0007 补记）：boards/indices 为实时语义 section
+（REALTIME_SECTIONS），对历史日期调用返回 section 级 unsupported
+（detail=realtime_section_no_backfill）零落库；indices 段落库前校验行级日期
+==请求日期（不符 detail=date_mismatch 零落库）。
 """
 
 import logging
@@ -58,6 +63,11 @@ ALL_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
 # 即整体 error。lhb 永不进核心集（盘中"未发布"是常态）；新增 section 默认非核心，
 # 入核心集需显式更新本常量。
 CORE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks")
+
+# 实时语义 section（issue #78，ADR 0007 补记）：上游接口只有当日实时口径，
+# 历史日期回补不支持——对历史日期调用返回 unsupported + detail，零落库。
+REALTIME_SECTIONS = ("indices", "boards")
+REALTIME_NO_BACKFILL = "realtime_section_no_backfill"
 
 _LHB_EMPTY_NOTE = "当日无龙虎榜数据（龙虎榜盘后发布）"
 
@@ -156,8 +166,19 @@ def fetch_board_snapshot(
         return _error(tool, params, err)
     results = {}
     try:
+        today = date.today().strftime("%Y%m%d")
         for name in selected:
             started = datetime.now(timezone.utc)
+            if effective < today and name in REALTIME_SECTIONS:
+                # 服务端防线（issue #78）：实时语义 section 不可回补历史日期，零落库
+                results[name] = {
+                    "rows": 0,
+                    "status": "error",
+                    "error": f"{name} 为实时语义 section，不支持历史日期回补（{effective}）",
+                    "error_kind": "unsupported",
+                    "detail": REALTIME_NO_BACKFILL,
+                }
+                continue
             try:
                 r = fetch_section_with_fallback(adapters, name, effective)
             except AllSourcesFailed as e:
@@ -186,6 +207,23 @@ def fetch_board_snapshot(
             patch = None
             if name == "indices":
                 data, patch = _patch_major_indices(adapters, data)
+                # 行级日期校验（issue #78）：行级日期与请求日期不符即拒收零落库，
+                # 防止上游返回陈旧交易日数据被静默计入请求日（efinance 行级"最新交易日"）
+                mismatched = sorted(
+                    {
+                        row["trade_date"]
+                        for row in data
+                        if row.get("trade_date") and row["trade_date"] != effective
+                    }
+                )
+                if mismatched:
+                    results[name] = {
+                        "rows": 0,
+                        "status": "error",
+                        "error": f"indices 行级日期与请求日期不符: {mismatched} != {effective}",
+                        "detail": "date_mismatch",
+                    }
+                    continue
             res = {
                 "rows": _upsert_section(conn, name, data, effective),
                 "source": r["source"],
@@ -241,13 +279,17 @@ def fetch_board_snapshot(
             **payload,
         }
     if len(failed) == len(results):
-        kind = (
-            "upstream_unreachable"
-            if any(
-                results[k].get("error_kind") == "upstream_unreachable" for k in failed
+        if all(results[k].get("error_kind") == "unsupported" for k in failed):
+            # 全部为防线拒收（实时 section 历史回补不支持，ADR 0007 补记）
+            kind = "unsupported"
+        else:
+            kind = (
+                "upstream_unreachable"
+                if any(
+                    results[k].get("error_kind") == "upstream_unreachable" for k in failed
+                )
+                else "fetch_failed"
             )
-            else "fetch_failed"
-        )
         out = {
             "status": "error",
             "error": f"全部 section 抓取失败: {', '.join(failed)}",

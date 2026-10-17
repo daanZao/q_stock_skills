@@ -9,6 +9,7 @@ query_collection_log 为统一查询面：按日期/section/状态过滤，空�
 """
 
 import psycopg2
+from datetime import date
 
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.ledger import record_collection
@@ -25,6 +26,9 @@ from fakes import (
     FakeSnapshotAdapter,
     trading_rows,
 )
+
+
+TODAY = date.today().strftime("%Y%m%d")
 
 
 def _init(pg_test):
@@ -83,13 +87,16 @@ def test_record_collection_failure_does_not_raise(pg_test):
 
 
 def test_fetch_board_snapshot_ledgers_three_states(pg_test):
-    """抓取成功/空/失败三态各落一条台账且可查回（含 error_kind 与逐源明细摘要）。"""
+    """抓取成功/空/失败三态各落一条台账且可查回（含 error_kind 与逐源明细摘要）。
+
+    boards/indices 为实时语义 section（issue #78），用当日日期。
+    """
     _init(pg_test)
     ak = FakeBoardAdapter("akshare", fail_sections=("zt_pool",), rows={"boards": []})
-    result = fetch_board_snapshot(trade_date="20261014", adapters=[ak])
+    result = fetch_board_snapshot(trade_date=TODAY, adapters=[ak])
     assert result["status"] == "ok"
 
-    rows = {r["section"]: r for r in _ledger_rows(pg_test, "WHERE trade_date = %s", ("20261014",))}
+    rows = {r["section"]: r for r in _ledger_rows(pg_test, "WHERE trade_date = %s", (TODAY,))}
     assert set(rows) == {"indices", "boards", "zt_pool", "strong_stocks", "lhb"}
     assert rows["indices"]["status"] == "ok"
     assert rows["indices"]["rows"] > 0
@@ -178,13 +185,16 @@ def test_query_collection_log_filters(pg_test):
     """统一查询面：按日期/section/状态过滤；空结果 count:0 非错误。"""
     _init(pg_test)
     ak = FakeBoardAdapter("akshare", fail_sections=("zt_pool",), rows={"boards": []})
-    fetch_board_snapshot(trade_date="20261014", adapters=[ak])
+    fetch_board_snapshot(trade_date=TODAY, adapters=[ak])
     fetch_daily("600519", start="20261012", end="20261014",
                 adapters=[FakeAdapter("efake", rows_fn=trading_rows)])
 
-    all_rows = query_collection_log(trade_date="20261014")
+    all_rows = query_collection_log(trade_date=TODAY)
     assert all_rows["status"] == "ok"
-    assert all_rows["count"] == 6  # 5 section + 1 stock_daily
+    assert all_rows["count"] == 5  # 5 个盘面 section
+    daily_rows = query_collection_log(trade_date="20261014")
+    assert daily_rows["count"] == 1
+    assert daily_rows["rows"][0]["section"] == "stock_daily"
     by_section = query_collection_log(section="zt_pool")
     assert by_section["count"] == 1
     assert by_section["rows"][0]["status"] == "error"

@@ -9,7 +9,12 @@ akshare「沪深重要指数」含 000688 但主源成功时轮不到。定点�
 也不把整个 indices 段拖进 upstream_unreachable——补漏源与主源不同，section
 维持 ok、不触发整体 error；连接级故障 error_kind=upstream_unreachable 带
 retry_advice，全源口径不含该指数为 no_data_for_date，其余 fetch_failed。
+
+日期口径（issue #78 服务端防线）：indices 为实时语义 section，历史日期拒收——
+本文件一律用当日日期。
 """
+
+from datetime import date
 
 import psycopg2
 
@@ -19,6 +24,8 @@ from qstock_mcp import tools_board, tools_init
 from qstock_mcp.tools_board import fetch_board_snapshot
 
 from fakes import INDEX_ROWS, FakeBoardAdapter
+
+TODAY = date.today().strftime("%Y%m%d")
 
 ROWS_MISSING_KC50 = [r for r in INDEX_ROWS if r["index_code"] != "000688"]
 
@@ -63,7 +70,7 @@ def test_missing_major_index_is_patched_and_landed(pg_test):
         "akshare", rows={"indices": ROWS_MISSING_KC50}, spot_rows=INDEX_ROWS
     )
     result = fetch_board_snapshot(
-        trade_date="20240105", sections="indices", adapters=[ef, ak]
+        trade_date=TODAY, sections="indices", adapters=[ef, ak]
     )
     assert result["status"] == "ok"
     sec = result["sections"]["indices"]
@@ -74,9 +81,9 @@ def test_missing_major_index_is_patched_and_landed(pg_test):
     assert "failed" not in sec["patch"]
     assert ef.spot_calls == ["000688"]
     assert ak.spot_calls == ["000688"]
-    assert _index_codes(pg_test, "20240105") == {r["index_code"] for r in INDEX_ROWS}
+    assert _index_codes(pg_test, TODAY) == {r["index_code"] for r in INDEX_ROWS}
     again = fetch_board_snapshot(
-        trade_date="20240105",
+        trade_date=TODAY,
         sections="indices",
         adapters=[
             FakeBoardAdapter("efinance", rows={"indices": ROWS_MISSING_KC50}),
@@ -86,7 +93,7 @@ def test_missing_major_index_is_patched_and_landed(pg_test):
         ],
     )
     assert again["sections"]["indices"]["rows"] == len(INDEX_ROWS)
-    assert len(_index_codes(pg_test, "20240105")) == len(INDEX_ROWS)
+    assert len(_index_codes(pg_test, TODAY)) == len(INDEX_ROWS)
 
 
 def test_full_whitelist_coverage_triggers_zero_patch(pg_test):
@@ -94,7 +101,7 @@ def test_full_whitelist_coverage_triggers_zero_patch(pg_test):
     _init(pg_test)
     ak = FakeBoardAdapter("akshare")
     result = fetch_board_snapshot(
-        trade_date="20240105", sections="indices", adapters=[ak]
+        trade_date=TODAY, sections="indices", adapters=[ak]
     )
     assert result["sections"]["indices"] == {
         "rows": len(INDEX_ROWS),
@@ -106,7 +113,7 @@ def test_full_whitelist_coverage_triggers_zero_patch(pg_test):
 
 def test_patch_connection_failure_keeps_section_ok_no_failfast(pg_test):
     """补漏全源连接级故障：不静默（patch failed 明细 + upstream_unreachable +
-    retry_advice + 逐源 failure_kind），但不触发 #47 fail-fast——section 与整体
+    retry_advice），但不触发 #47 fail-fast——section 与整体
     均维持 ok，其他 section 正常落库。"""
     _init(pg_test)
     ef = FakeBoardAdapter(
@@ -115,7 +122,7 @@ def test_patch_connection_failure_keeps_section_ok_no_failfast(pg_test):
     ak = FakeBoardAdapter(
         "akshare", rows={"indices": ROWS_MISSING_KC50}, spot_exc=_conn_exc("akshare")
     )
-    result = fetch_board_snapshot(trade_date="20240105", adapters=[ef, ak])
+    result = fetch_board_snapshot(trade_date=TODAY, adapters=[ef, ak])
     assert result["status"] == "ok"
     assert result["failed_sections"] == []
     sec = result["sections"]["indices"]
@@ -130,7 +137,7 @@ def test_patch_connection_failure_keeps_section_ok_no_failfast(pg_test):
     assert attempted["akshare"]["failure_kind"] == "connection"
     assert "Connection aborted" in attempted["efinance"]["error"]
     assert result["sections"]["boards"]["status"] == "ok"
-    assert "000688" not in _index_codes(pg_test, "20240105")
+    assert "000688" not in _index_codes(pg_test, TODAY)
 
 
 def test_patch_all_sources_empty_is_no_data_for_date(pg_test):
@@ -140,7 +147,7 @@ def test_patch_all_sources_empty_is_no_data_for_date(pg_test):
     ef = FakeBoardAdapter("efinance", rows={"indices": ROWS_MISSING_KC50})
     ak = FakeBoardAdapter("akshare", rows={"indices": ROWS_MISSING_KC50})
     result = fetch_board_snapshot(
-        trade_date="20240105", sections="indices", adapters=[ef, ak]
+        trade_date=TODAY, sections="indices", adapters=[ef, ak]
     )
     assert result["status"] == "ok"
     sec = result["sections"]["indices"]
@@ -149,7 +156,7 @@ def test_patch_all_sources_empty_is_no_data_for_date(pg_test):
     assert failed["error_kind"] == "no_data_for_date"
     assert "retry_advice" not in failed
     assert all(a["failure_kind"] == "empty" for a in failed["attempted_sources"])
-    assert "000688" not in _index_codes(pg_test, "20240105")
+    assert "000688" not in _index_codes(pg_test, TODAY)
 
 
 def test_patch_non_connection_failure_is_fetch_failed(pg_test):
@@ -161,7 +168,7 @@ def test_patch_non_connection_failure_is_fetch_failed(pg_test):
         spot_exc=FetchError("akshare 补抓返回异常"),
     )
     result = fetch_board_snapshot(
-        trade_date="20240105", sections="indices", adapters=[ak]
+        trade_date=TODAY, sections="indices", adapters=[ak]
     )
     assert result["status"] == "ok"
     failed = result["sections"]["indices"]["patch"]["failed"]["000688"]
@@ -177,7 +184,7 @@ def test_patch_not_attempted_when_section_fetch_fails(pg_test):
         "akshare", fail_sections=("indices",), spot_rows=INDEX_ROWS
     )
     result = fetch_board_snapshot(
-        trade_date="20240105", sections="indices", adapters=[ak]
+        trade_date=TODAY, sections="indices", adapters=[ak]
     )
     assert result["sections"]["indices"]["status"] == "error"
     assert "patch" not in result["sections"]["indices"]

@@ -29,7 +29,7 @@ from ._sw_classify import (
     parse_sw_classification,
 )
 from .adapters import DataAdapter, default_adapters
-from .dates import normalize_date
+from .dates import is_trading_time, normalize_date, today_str
 from .db import connect, ensure_schema, list_tables
 from .fetch_chain import (
     AllSourcesFailed,
@@ -120,9 +120,14 @@ def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
     }
 
 
-def _init_index_daily(conn, adapters: Sequence[DataAdapter]) -> dict:
-    """主要指数全历史日线：按指数独立 fallback，仅全部失败才 part error。"""
-    today = date.today().strftime("%Y%m%d")
+def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
+    """主要指数全历史日线：按指数独立 fallback，仅全部失败才 part error。
+
+    盘中禁写（issue #78）：交易时段内当日行不落库（未收盘数据非最终值），
+    历史行照常；deferred 计数进 part 明细。
+    """
+    today = today_str(now)
+    defer_today = today if is_trading_time(now) else None
     started = datetime.now(timezone.utc)
     indices: list[dict] = []
     for code, name in MAJOR_INDICES:
@@ -140,15 +145,22 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter]) -> dict:
                 }
             )
             continue
-        indices.append(
-            {
-                "index_code": code,
-                "index_name": name,
-                "status": "ok",
-                "rows": upsert_index_daily(conn, code, r["rows"], r["source"]),
-                "source": r["source"],
-            }
-        )
+        rows = r["rows"]
+        deferred = 0
+        if defer_today is not None:
+            keep = [row for row in rows if row["trade_date"] != defer_today]
+            deferred = len(rows) - len(keep)
+            rows = keep
+        entry = {
+            "index_code": code,
+            "index_name": name,
+            "status": "ok",
+            "rows": upsert_index_daily(conn, code, rows, r["source"]),
+            "source": r["source"],
+        }
+        if deferred:
+            entry["deferred"] = deferred
+        indices.append(entry)
     failed = [i for i in indices if i["status"] != "ok"]
     status = "error" if len(failed) == len(indices) else "ok"
     total_rows = sum(i.get("rows", 0) for i in indices)
@@ -228,8 +240,12 @@ def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
 def init_database(
     backfill_history: bool = False,
     adapters: Sequence[DataAdapter] | None = None,
+    now=None,
 ) -> dict:
-    """建表 + 轻量初始化数据；backfill_history=True 追加全市场历史日线回溯。"""
+    """建表 + 轻量初始化数据；backfill_history=True 追加全市场历史日线回溯。
+
+    now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内 index_daily
+    当日行不落库）。"""
     tool = "init_database"
     params = {"backfill_history": backfill_history}
     if adapters is None:
@@ -252,7 +268,7 @@ def init_database(
         parts = {
             "stock_list": _init_stock_list(conn, adapters),
             "market_snapshot": _init_market_snapshot(conn, adapters),
-            "index_daily": _init_index_daily(conn, adapters),
+            "index_daily": _init_index_daily(conn, adapters, now),
         }
         if backfill_history:
             parts["backfill"] = _init_backfill(conn, adapters)

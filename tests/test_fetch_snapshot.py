@@ -30,20 +30,17 @@ def _snapshot_count(pg_test, trade_date: str) -> int:
     return n
 
 
-def test_fetch_lands_rows_under_api_trade_date_not_passed_date(pg_test):
+def test_passed_date_mismatching_api_date_is_rejected(pg_test):
+    """issue #78 服务端防线：传入日期与 API 生效日期不符 → date_mismatch 零落库
+    （旧契约"API 日期优先于传入日期"被防线取代：日期假设错误必须显式暴露，
+    不把执行日数据静默写成历史日期，#45 型污染）。"""
     _init(pg_test)
     ef = FakeSnapshotAdapter("efinance", trade_date="20240105")
     result = fetch_market_snapshot(trade_date="20240101", adapters=[ef])
-    assert result["status"] == "ok"
+    assert result["status"] == "error"
     assert result["tool"] == "fetch_market_snapshot"
-    assert result["params"] == {"trade_date": "20240101"}
-    # API 返回的最新交易日优先于传入日期
-    assert result["trade_date"] == "20240105"
-    assert result["trade_date_origin"] == "api"
-    assert result["source"] == "efinance"
-    assert result["rows_upserted"] == len(SNAPSHOT_ROWS)
-    assert ef.calls == 1  # 单次全市场调用
-    assert _snapshot_count(pg_test, "20240105") == len(SNAPSHOT_ROWS)
+    assert result["detail"] == "date_mismatch"
+    assert _snapshot_count(pg_test, "20240105") == 0
     assert _snapshot_count(pg_test, "20240101") == 0
 
 
@@ -67,14 +64,15 @@ def test_fetch_repeated_is_idempotent_and_updates_values(pg_test):
     conn.close()
 
 
-def test_fetch_falls_back_to_passed_date_when_api_silent(pg_test):
+def test_fetch_api_silent_with_passed_date_is_rejected(pg_test):
+    """issue #78：API 未报告交易日而调用方传了日期——无法自证数据归属，
+    date_mismatch 零落库（旧契约"回退传入日期"会把执行日数据静默写成历史日期）。"""
     _init(pg_test)
     ef = FakeSnapshotAdapter("efinance", trade_date=None)  # API 未报告交易日
     result = fetch_market_snapshot(trade_date="2024-01-05", adapters=[ef])
-    assert result["status"] == "ok"
-    assert result["trade_date"] == "20240105"
-    assert result["trade_date_origin"] == "param"
-    assert _snapshot_count(pg_test, "20240105") == len(SNAPSHOT_ROWS)
+    assert result["status"] == "error"
+    assert result["detail"] == "date_mismatch"
+    assert _snapshot_count(pg_test, "20240105") == 0
 
 
 def test_fetch_falls_back_to_today_when_api_silent_and_no_param(pg_test, monkeypatch):

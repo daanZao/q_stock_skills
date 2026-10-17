@@ -9,6 +9,9 @@ error_kind——任一抓取源连接级故障（请求未获得 HTTP 响应）�
 upstream_unreachable（带 retry_advice），否则 fetch_failed；by-design 不
 支持的源（unsupported，如 baostock）不参与判定。上游正常响应空结果为
 no_data_for_date（status ok + empty_kind + note），语义正常非失败。
+服务端防线（issue #78，ADR 0007 补记）：传入日期与 API 生效日期不符（含 API
+未报告日期）即 status error + detail=date_mismatch 零落库，防止把执行日数据
+静默写成历史日期（#45 型污染）；"API 日期优先于传入日期"的旧契约仅限不传参。
 query_snapshot 服务端聚合与排序取前 N（issue #48）：aggregate=breadth,amount
 返回涨跌家数（含沪/深/北分市场；最新价或昨收为 NULL 的停牌行计入 no_price
 桶，up+down+flat+no_price = 过滤后总行数）与成交额合计（万元）；order_by +
@@ -90,6 +93,16 @@ def fetch_market_snapshot(
                 "全部数据源失败（各源错误见 attempted_sources）",
                 error_kind="fetch_failed",
                 attempted_sources=e.attempted,
+            )
+        if passed is not None and result["trade_date"] != passed:
+            # 服务端防线（issue #78）：API 生效日期与请求日期不符即显式报错零落库，
+            # 防止把执行日数据静默写成历史日期（#45 型污染）
+            return _error(
+                tool,
+                params,
+                f"snapshot API 生效日期({result['trade_date'] or '未报告'})"
+                f"与请求日期({passed})不符，拒绝落库",
+                detail="date_mismatch",
             )
         if result["trade_date"] is not None:
             effective, origin = result["trade_date"], "api"

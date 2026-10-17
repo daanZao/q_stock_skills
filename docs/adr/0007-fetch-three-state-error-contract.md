@@ -22,6 +22,12 @@
 
 边界：`empty` 仅限补漏（patch）路径的逐源 `failure_kind`；通用 fallback（`_with_fallback`）逐源分类仍只有 unsupported / connection / other 三值，工具层 `error_kind` 侧仍严格三态，均不得引入 `empty`。
 
+## 补记（2026-10-17，issue #78，spec #71/W1）：实时 section 历史回补不支持 + 盘中禁写
+
+实时语义 section（`fetch_board_snapshot` 的 `boards`/`indices`、`fetch_market_snapshot`）的上游接口只有当日实时口径，**历史日期回补 by-design 不支持**，归 `unsupported`：对历史日期（trade_date < 当日）调用返回 section 级/工具级 `status:"error"` + `error_kind:"unsupported"` + `detail:"realtime_section_no_backfill"`，**零落库**（含台账——未发生采集动作）。请求的 section 全部被防线拒收时工具整体 `error_kind:"unsupported"`。这与适配器层 `FetchError(kind="unsupported")` 同词汇：by-design 不支持，不算抓取故障、不参与 `upstream_unreachable` 判定、不触发核心 section fail-fast。
+
+关联防线（同属 #78，细节不在本 ADR 展开）：`indices` 段落库前校验行级日期==请求日期（不符即 `detail:"date_mismatch"` 零落库）；`fetch_market_snapshot` 传入日期与 API 生效日期不符（含 API 未报告）即 `status:"error"` + `detail:"date_mismatch"` 零落库；交易时段内（交易日 09:30–15:00 东八区）`stock_daily`/`index_daily` 写路径跳过当日行落库（盘中禁写，响应带 `note`，盘中 fetch/query 正常返回数据）。当日正常路径行为不变。
+
 ## Consequences
 
 - `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类（补漏路径的 `empty` 是本 ADR 补记明定的唯一例外，边界见上节）。

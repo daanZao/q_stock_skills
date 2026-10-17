@@ -7,7 +7,9 @@ days 参数按"交易日 ≈ 自然日 7/5"加 buffer 换算成 start/end：
 """
 
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+
+_TZ8 = timezone(timedelta(hours=8))  # A 股语境东八区（无夏令时）
 
 _CALENDAR_PER_TRADING = 7 / 5
 _DAYS_BUFFER = 10
@@ -70,6 +72,23 @@ def next_trading_day(yyyymmdd: str) -> str:
     while not is_trading_day(yyyymmdd):
         yyyymmdd = add_days(yyyymmdd, 1)
     return yyyymmdd
+
+
+def today_str(now: datetime | None = None) -> str:
+    """东八区当日 yyyymmdd；now 可注入（测试）。"""
+    now = (now or datetime.now(_TZ8)).astimezone(_TZ8)
+    return now.strftime("%Y%m%d")
+
+
+# 交易时段（盘中禁写防线，issue #78）：交易日 09:30–15:00（东八区）
+_SESSION_OPEN = time(9, 30)
+_SESSION_CLOSE = time(15, 0)
+
+
+def is_trading_time(now: datetime | None = None) -> bool:
+    """交易时段判定：交易日的连续竞价时段内（09:30–15:00）为 True。"""
+    now = (now or datetime.now(_TZ8)).astimezone(_TZ8)
+    return is_trading_day(now.strftime("%Y%m%d")) and _SESSION_OPEN <= now.time() <= _SESSION_CLOSE
 
 
 def resolve_range(
