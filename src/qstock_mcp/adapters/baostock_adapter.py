@@ -102,6 +102,45 @@ def map_baostock_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
     return bars
 
 
+# adjustflag（次晨批一把抓返回列）→ 库内 adj 词汇；未知/缺失按不复权计
+_ADJUSTFLAG_TO_ADJ = {"1": "hfq", "2": "qfq", "3": "none"}
+
+
+def map_astock_daily_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
+    """query_daily_history_k_AStock 行 → 全市场日线行 dict（次晨批，issue #83）。
+
+    每行带 stock_code（剥 sh./sz. 前缀，过滤非 A 股个股前缀行）与 adj
+    （adjustflag 列映射）；turn → turnover_rate，tradestatus 权威停牌状态，
+    volume 原生为股透传、amount 元→万元（ADR 0006/0008）；无来源列
+    （amplitude/change_amount）置 None 不伪造。
+    """
+    bars = []
+    for row in rows:
+        r = dict(zip(fields, row))
+        code = r.get("code") or ""
+        if not code.startswith(_STOCK_PREFIXES):
+            continue
+        bars.append(
+            {
+                "stock_code": code.split(".", 1)[1],
+                "trade_date": str(r["date"]).replace("-", ""),
+                "open": _num(r.get("open")),
+                "high": _num(r.get("high")),
+                "low": _num(r.get("low")),
+                "close": _num(r.get("close")),
+                "volume": _int(r.get("volume")),
+                "amount": _wan(r.get("amount")),
+                "amplitude": None,
+                "change_percent": _num(r.get("pctChg")),
+                "change_amount": None,
+                "turnover_rate": _num(r.get("turn")),
+                "tradestatus": _int(r.get("tradestatus")),
+                "adj": _ADJUSTFLAG_TO_ADJ.get(str(r.get("adjustflag") or ""), "none"),
+            }
+        )
+    return bars
+
+
 class BaostockAdapter:
     name = "baostock"
 
@@ -136,6 +175,26 @@ class BaostockAdapter:
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
         raise FetchError("baostock 不支持全市场快照", kind="unsupported")
+
+    def fetch_astock_daily(self, trade_date: str) -> list[dict]:
+        """一把抓某日全市场 A 股日线（query_daily_history_k_AStock，次晨批用）。
+
+        单次调用全量返回（上游单页上限 20000 行）；映射见 map_astock_daily_rows。
+        """
+        bs = _login()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rs = bs.query_daily_history_k_AStock(
+                    date=f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+                )
+            if rs.error_code != "0":
+                raise FetchError(f"baostock 查询失败: {rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            return map_astock_daily_rows(list(rs.fields), rows)
+        finally:
+            _logout(bs)
 
     # ---------------------------------------------------------------- init 轻量初始化（issue #8）
 

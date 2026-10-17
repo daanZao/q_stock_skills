@@ -84,6 +84,10 @@ _Avoid_: 停牌零值行
 `qstock-scheduler close` 执行的交易日收盘后采集：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照，直调 tools_* 核心层、不经 MCP 协议层，逐 section 独立成败并落采集台账。调度安装（launchd）为用户侧动作，见 `docs/scheduler-launchd.md`。
 _Avoid_: 定时任务（不加限定时）
 
+**次晨批**:
+`qstock-scheduler morning` 执行的开盘前采集（目标日恒为前一交易日）：baostock 一把抓全市场日线（含 tradestatus 权威停牌列、turn 换手率，volume 股 / amount 万元口径）+ 7 大指数尾行缺失即补，逐部分独立成败并落采集台账。baostock 当日 bar 晚间才就绪，次晨批不用于当日。
+_Avoid_: 早盘补抓
+
 ### Skill 家族（继承自旧项目词汇）
 
 **Agent skill**:

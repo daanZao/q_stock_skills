@@ -9,6 +9,7 @@ import pytest
 from qstock_mcp.adapters._eastmoney import _money_cn, map_eastmoney_rows, map_spot_rows, spot_trade_date
 from qstock_mcp.adapters.baostock_adapter import (
     BaostockAdapter,
+    map_astock_daily_rows,
     map_baostock_rows,
     map_stock_basic_rows,
     to_baostock_code,
@@ -65,6 +66,50 @@ def test_baostock_mapping_missing_columns_are_none():
     assert bar["amplitude"] is None
     assert bar["change_amount"] is None
     assert bar["turnover_rate"] is None
+
+
+def test_astock_daily_mapping_full_row():
+    """次晨批一把抓（issue #83）：字段映射 + adjustflag → adj + 前缀过滤。"""
+    fields = ("date,code,open,high,low,close,preclose,volume,amount,adjustflag,"
+              "turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST").split(",")
+    rows = [
+        ["2026-10-16", "sh.600519", "1700.0", "1720.0", "1690.0", "1710.0",
+         "1700.0", "3000000", "5130000000", "3", "0.24", "1", "0.59",
+         "20.0", "8.0", "5.0", "30.0", "0"],
+        ["2026-10-16", "sz.002813", "26.38", "26.38", "26.38", "26.38",
+         "26.38", "", "", "3", "", "0", "", "", "", "", "", "0"],
+    ]
+    bars = map_astock_daily_rows(fields, rows)
+    assert len(bars) == 2
+    normal, suspended = bars
+    assert normal["stock_code"] == "600519"
+    assert normal["trade_date"] == "20261016"
+    assert normal["volume"] == 3000000  # 股口径透传（ADR 0008）
+    assert normal["amount"] == 513000.0  # 元 → 万元（ADR 0006）
+    assert normal["turnover_rate"] == 0.24  # turn 列映射
+    assert normal["tradestatus"] == 1
+    assert normal["adj"] == "none"  # adjustflag=3 不复权
+    assert suspended["tradestatus"] == 0  # 停牌权威标注
+    assert suspended["volume"] is None
+    assert suspended["turnover_rate"] is None
+
+
+def test_astock_daily_mapping_filters_non_a_share():
+    fields = "date,code,close,volume,amount,adjustflag,turn,tradestatus,pctChg".split(",")
+    rows = [
+        ["2026-10-16", "sz.200002", "1", "1", "1", "3", "1", "1", "1"],  # 深 B 股
+        ["2026-10-16", "sh.000001", "1", "1", "1", "3", "1", "1", "1"],  # 指数
+        ["2026-10-16", "sz.300408", "1", "1", "1", "3", "1", "1", "1"],
+    ]
+    bars = map_astock_daily_rows(fields, rows)
+    assert [b["stock_code"] for b in bars] == ["300408"]
+
+
+def test_astock_daily_mapping_unknown_adjustflag_defaults_none():
+    fields = "date,code,close,volume,amount,adjustflag,turn,tradestatus,pctChg".split(",")
+    rows = [["2026-10-16", "sh.600519", "1", "1", "1", "", "1", "1", "1"]]
+    (bar,) = map_astock_daily_rows(fields, rows)
+    assert bar["adj"] == "none"
 
 
 def test_bse_code_detection():

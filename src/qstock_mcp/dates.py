@@ -74,6 +74,14 @@ def next_trading_day(yyyymmdd: str) -> str:
     return yyyymmdd
 
 
+def prev_trading_day(yyyymmdd: str) -> str:
+    """前一交易日（本身是否交易日不影响：恒向前取更早的交易日）。"""
+    yyyymmdd = add_days(yyyymmdd, -1)
+    while not is_trading_day(yyyymmdd):
+        yyyymmdd = add_days(yyyymmdd, -1)
+    return yyyymmdd
+
+
 def today_str(now: datetime | None = None) -> str:
     """东八区当日 yyyymmdd；now 可注入（测试）。"""
     now = (now or datetime.now(_TZ8)).astimezone(_TZ8)

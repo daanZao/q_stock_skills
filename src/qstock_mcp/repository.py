@@ -73,6 +73,30 @@ def upsert_daily(conn, stock_code: str, adj: str, rows: list[dict], source: str)
     return len(values)
 
 
+def upsert_daily_rows(conn, rows: list[dict], source: str) -> int:
+    """全市场批量 upsert（次晨批，issue #83）：行自带 stock_code 与 adj。
+
+    与 upsert_daily 同业务键（stock_code, trade_date, adj），重复执行幂等覆盖。
+    """
+    values = [
+        [row["stock_code"], row["trade_date"]]
+        + [row.get(f) for f in BAR_FIELDS[1:]]
+        + [row["adj"], source, row.get("tradestatus")]
+        for row in rows
+    ]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            _UPSERT_SQL,
+            values,
+            template="(" + ", ".join(["%s"] * (len(BAR_FIELDS) + 4)) + ", CURRENT_TIMESTAMP)",
+        )
+    conn.commit()
+    return len(values)
+
+
 def select_daily(
     conn, stock_code: str, adj: str, start: str, end: str
 ) -> list[dict]:
