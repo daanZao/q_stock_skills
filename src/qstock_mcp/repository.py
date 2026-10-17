@@ -717,3 +717,159 @@ def select_news_items(
     for row in rows:
         row["publish_time"] = row["publish_time"].isoformat()
     return rows
+
+
+# ---------------------------------------------------------------- 成分字典（issue #73）
+
+# sw_industry_class 多体系同构形态（sql/012）：业务键
+# (source_system, stock_code, board_code, effective_date)。
+def replace_board_classification(conn, source_system: str, rows: list[dict]) -> dict:
+    """以文件为准清空重载某 source_system 的成分行，返回 {"deleted", "inserted"}。
+
+    事务由调用方管理（删除与重载须原子，本函数不 commit）；其他
+    source_system 的行不受影响。写入前按业务键去重（last-wins，
+    upsert_board_rows 同例）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM sw_industry_class WHERE source_system = %s",
+            (source_system,),
+        )
+        deleted = cur.rowcount
+        deduped = {
+            (r["stock_code"], r["board_code"], r["effective_date"]): r for r in rows
+        }
+        dropped = len(rows) - len(deduped)
+        if dropped:
+            log.warning(
+                "replace_board_classification: %s 丢弃 %d 行业务键重复行（last-wins）",
+                source_system,
+                dropped,
+            )
+        if deduped:
+            execute_values(
+                cur,
+                "INSERT INTO sw_industry_class"
+                " (source_system, stock_code, board_code, effective_date, updated_at)"
+                " VALUES %s",
+                [
+                    [
+                        source_system,
+                        r["stock_code"],
+                        r["board_code"],
+                        r["effective_date"],
+                        r["updated_at"],
+                    ]
+                    for r in deduped.values()
+                ],
+            )
+    return {"deleted": deleted, "inserted": len(deduped)}
+
+
+def upsert_sw_industry_meta(conn, rows: list[dict]) -> int:
+    """按 industry_code 幂等 upsert 行业名称表（issue #74），返回写入行数。
+
+    只动 sw_industry_meta，不碰成分变更史；名称修正即改后重导。
+    """
+    values = [[r["industry_code"], r["name"], r["level"]] for r in rows]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            "INSERT INTO sw_industry_meta (industry_code, name, level) VALUES %s"
+            " ON CONFLICT (industry_code) DO UPDATE SET"
+            " name = EXCLUDED.name, level = EXCLUDED.level",
+            values,
+        )
+    conn.commit()
+    return len(values)
+
+
+# ---------------------------------------------------------------- 申万板块自算行情（issue #75）
+
+
+def select_latest_daily_date(conn) -> str | None:
+    """stock_daily 库内最新交易日（qfq 口径，与板块聚合行口径一致）。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(trade_date) FROM stock_daily WHERE adj = 'qfq'")
+        return cur.fetchone()[0]
+
+
+_SW_BOARD_AGG_SQL = """
+WITH pit AS (
+    SELECT DISTINCT ON (stock_code) stock_code, board_code
+    FROM sw_industry_class
+    WHERE source_system = 'sw' AND effective_date <= to_date(%s, 'YYYYMMDD')
+    ORDER BY stock_code, effective_date DESC
+),
+agg AS (
+    SELECT CASE WHEN %s = 1 THEN substr(p.board_code, 1, 2) || '0000'
+                ELSE substr(p.board_code, 1, 4) || '00' END AS industry_code,
+           SUM(d.change_percent * d.amount)
+               FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL)
+           / NULLIF(SUM(d.amount)
+               FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL), 0)
+               AS change_pct,
+           COUNT(*) FILTER (WHERE d.change_percent > 0 AND d.amount IS NOT NULL)
+               AS up_count,
+           COUNT(*) FILTER (WHERE d.change_percent < 0 AND d.amount IS NOT NULL)
+               AS down_count,
+           COUNT(*) FILTER (WHERE d.change_percent = 0 AND d.amount IS NOT NULL)
+               AS flat_count,
+           SUM(d.amount) AS amount,
+           COUNT(*) AS stock_count,
+           COUNT(*) FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL)
+               AS counted_count
+    FROM pit p
+    LEFT JOIN stock_daily d
+      ON d.stock_code = p.stock_code AND d.trade_date = %s AND d.adj = 'qfq'
+    {where}
+    GROUP BY 1
+    HAVING COUNT(d.stock_code) > 0
+)
+SELECT a.industry_code, m.name AS industry_name, a.change_pct,
+       a.up_count, a.down_count, a.flat_count, a.amount,
+       a.stock_count, a.counted_count
+FROM agg a
+LEFT JOIN sw_industry_meta m ON m.industry_code = a.industry_code
+ORDER BY a.industry_code
+"""
+
+
+def select_sw_board_daily(
+    conn, trade_date: str, level: int, prefix: str | None = None
+) -> list[dict]:
+    """单日截面：point-in-time 成分 × stock_daily(qfq) 按行业聚合（下推 SQL）。
+
+    聚合码形态与 sw_industry_meta 一致（一级前2位补 0000、二级前4位补 00），
+    名称 join 缺失时 industry_name 为 None。change_pct 为成交额加权
+    （change_percent 或 amount 为 null 的停牌占位行从权重剔除并归一，spec #70）；
+    涨/跌/平家数与加权同一口径（change_percent 与 amount 双非 null 才计家数）；
+    stock_count 为 point-in-time 归属该行业的成分股总数（LEFT JOIN：当日无
+    日线行的成分也计入），counted_count 为参与加权数，差即停牌/无行情数；
+    全行业当日无任何日线行时该行业不出现（HAVING），空日期 count:0。
+    amount 单位万元（库内已是万元口径，ADR 0006）。每行携带 basis 口径标注。
+    """
+    where, args = "", [trade_date, level, trade_date]
+    if prefix is not None:
+        where = "WHERE p.board_code LIKE %s"
+        args.append(prefix + "%")
+    with conn.cursor() as cur:
+        cur.execute(_SW_BOARD_AGG_SQL.format(where=where), args)
+        return [
+            {
+                "industry_code": code,
+                "industry_name": name,
+                "change_pct": round(float(pct), 4) if pct is not None else None,
+                "up_count": up,
+                "down_count": down,
+                "flat_count": flat,
+                "amount": round(float(amt), 2) if amt is not None else None,
+                "stock_count": stocks,
+                "counted_count": counted,
+                "basis": "sw_amount_weighted",
+            }
+            for code, name, pct, up, down, flat, amt, stocks, counted
+            in cur.fetchall()
+        ]

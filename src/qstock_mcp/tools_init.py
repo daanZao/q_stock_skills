@@ -10,12 +10,24 @@ schema_files / tables / parts / failed_parts。
 query_index_daily（issue #33/T1）：index_daily 已沉淀数据的纯读查询，不触发
 补抓；未知指数代码、坏日期、非法 limit 走统一 error 契约，空结果 count:0
 非错误。
+
+import_board_classification（issue #73，spec #70）：成分字典显式导入入口，
+以文件为准清空重载某 source_system（事务内删除后重载，陈旧行不残留），
+本期仅支持申万 .xls（解析在 _sw_classify，纯函数不连库）。
+
+import_sw_industry_meta（issue #74）：申万行业名称表（sw_industry_meta）
+种子导入，仓库内置 CSV 种子幂等 upsert，只动 meta 不碰成分变更史。
 """
 
 import logging
 from datetime import date
 from typing import Sequence
 
+from ._sw_classify import (
+    ClassificationFileError,
+    load_sw_industry_meta_seed,
+    parse_sw_classification,
+)
 from .adapters import DataAdapter, default_adapters
 from .dates import normalize_date
 from .db import connect, ensure_schema, list_tables
@@ -27,11 +39,13 @@ from .fetch_chain import (
 )
 from .output import error as _error
 from .repository import (
+    replace_board_classification,
     select_index_daily,
     select_stock_codes,
     upsert_index_daily,
     upsert_snapshot,
     upsert_stock_list,
+    upsert_sw_industry_meta,
 )
 from .tools_daily import ensure_coverage
 
@@ -282,3 +296,79 @@ def query_index_daily(
         "count": len(rows),
         "rows": rows,
     }
+
+
+# ------------------------------------------------- import_board_classification（issue #73）
+
+
+def _ingest_ledger_hook(
+    conn, source_system: str, file_path: str, counts: dict
+) -> None:
+    """采集台账挂接点：台账表由 issue #71 落地后在此记录导入批次。"""
+
+
+def import_board_classification(source_system: str, file_path: str) -> dict:
+    """以文件为准清空重载成分字典：事务内删除该 source_system 全部成分行后
+    按文件重载（文件含全历史变更，陈旧行不残留），重复执行幂等。
+    本期仅支持 'sw'（申万），多体系化为东财概念预留。"""
+    tool = "import_board_classification"
+    params = {"source_system": source_system, "file_path": file_path}
+    if source_system != "sw":
+        return _error(
+            tool,
+            params,
+            f"暂不支持的 source_system: {source_system!r}（本期仅 'sw'，东财概念预留）",
+        )
+    try:
+        rows = parse_sw_classification(file_path)
+    except ClassificationFileError as e:
+        return _error(tool, params, str(e))
+    conn, err = connect()
+    if err:
+        return _error(tool, params, err)
+    try:
+        try:
+            ensure_schema(conn)
+            counts = replace_board_classification(conn, source_system, rows)
+            _ingest_ledger_hook(conn, source_system, file_path, counts)
+            conn.commit()
+        except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
+            conn.rollback()
+            log.exception("成分字典导入失败")
+            return _error(tool, params, f"成分字典导入失败: {e}")
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "tool": tool,
+        "params": params,
+        "stocks": len({r["stock_code"] for r in rows}),
+        **counts,
+    }
+
+
+# ------------------------------------------------- import_sw_industry_meta（issue #74）
+
+
+def import_sw_industry_meta() -> dict:
+    """申万行业名称表（sw_industry_meta）种子导入：仓库内置 CSV 种子按
+    industry_code 幂等 upsert，重复执行行数不变。只动 meta，不碰成分
+    变更史；名称修正即改种子 CSV 后重导。"""
+    tool = "import_sw_industry_meta"
+    params: dict = {}
+    conn, err = connect()
+    if err:
+        return _error(tool, params, err)
+    try:
+        try:
+            ensure_schema(conn)
+            rows = upsert_sw_industry_meta(conn, load_sw_industry_meta_seed())
+        except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
+            # upsert_sw_industry_meta 内部自 commit；此 rollback 仅清理失败语句的
+            # 事务残余，成功路径的已提交行不受影响（空转 rollback 是有意为之）
+            conn.rollback()
+            log.exception("行业名称表种子导入失败")
+            return _error(tool, params, f"行业名称表种子导入失败: {e}")
+    finally:
+        conn.close()
+    return {"status": "ok", "tool": tool, "params": params, "rows": rows}

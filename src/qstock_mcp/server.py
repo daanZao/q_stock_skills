@@ -16,6 +16,7 @@ from . import (
     tools_init,
     tools_mx,
     tools_snapshot,
+    tools_sw_board,
 )
 
 mcp = MCPServer("qstock-mcp")
@@ -57,6 +58,44 @@ def query_daily(
 ) -> dict:
     """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间，参数同 fetch_daily。"""
     return tools_daily.query_daily(stock_code, days=days, start=start, end=end, adj=adj)
+
+
+@mcp.tool()
+def import_board_classification(source_system: str, file_path: str) -> dict:
+    """以文件为准清空重载成分字典（init 能力面）：事务内删除该 source_system 全部成分行后按文件重载（文件含全历史变更，陈旧行不残留），重复调用幂等。
+
+    source_system 本期仅支持 'sw'（申万行业；多体系化为东财概念预留）。
+    file_path 为申万分类 .xls 文件路径（表头：股票代码/计入日期/行业代码/更新日期；
+    股票代码自动补零至 6 位）。文件缺失或格式错误走统一 error 契约。
+    """
+    return tools_init.import_board_classification(source_system, file_path)
+
+
+@mcp.tool()
+def import_sw_industry_meta() -> dict:
+    """申万行业名称表种子导入（init 能力面）：仓库内置 CSV 种子按 industry_code 幂等 upsert 到 sw_industry_meta，重复调用行数不变。
+
+    只动行业名称表，不碰成分变更史（sw_industry_class）；名称修正即改种子
+    后重新调用。返回 {"status": "ok", "rows": 写入行数}。
+    """
+    return tools_init.import_sw_industry_meta()
+
+
+@mcp.tool()
+def query_sw_board_daily(
+    trade_date: str | None = None,
+    level: int = 1,
+    industry_code: str | None = None,
+) -> dict:
+    """申万板块自算行情（统一查询面，纯读不补抓）：point-in-time 成分归属（字典最新生效行）× 库内个股日线，单日截面按行业聚合。
+
+    输出成交额加权涨跌幅（停牌占位行剔除并归一）、涨/跌/平家数、成交额合计
+    （万元）、成分股数与参与计算数，每行携带 basis="sw_amount_weighted"。
+    trade_date 缺省取库内最新交易日（yyyymmdd 或 yyyy-mm-dd）；level 1=一级
+    （行业码前 2 位）/2=二级（前 4 位）；industry_code 可选过滤（2/4 位前缀或
+    6 位完整码）。空结果 count:0 非错误；非法参数走统一 error 契约。
+    """
+    return tools_sw_board.query_sw_board_daily(trade_date, level, industry_code)
 
 
 @mcp.tool()

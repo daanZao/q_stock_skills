@@ -12,6 +12,8 @@ dependencies = [
 dev = ["pytest", "mypy"]
 # 真实数据源库：适配层懒加载，未安装时对应源报明确错误
 sources = ["efinance", "akshare", "baostock"]
+# 成分字典文件导入（issue #73）：解析层懒加载，未安装时报明确错误
+classify = ["xlrd>=2"]
 
 [project.scripts]
 qstock-mcp = "qstock_mcp.server:main"
@@ -24,4 +26,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-qstock_mcp = ["sql/*.sql"]
+qstock_mcp = ["sql/*.sql", "data/*.csv"]

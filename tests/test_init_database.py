@@ -26,6 +26,8 @@ EXPECTED_TABLES = {
     "conclusions",
     "stock_list",
     "index_daily",
+    "sw_industry_class",
+    "sw_industry_meta",
 }
 
 
