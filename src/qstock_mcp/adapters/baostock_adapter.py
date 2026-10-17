@@ -15,7 +15,7 @@ from typing import NoReturn
 from ._eastmoney import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
-_FIELDS = "date,open,high,low,close,volume,amount,pctChg"
+_FIELDS = "date,open,high,low,close,volume,amount,pctChg,tradestatus"
 _ADJUSTFLAG = {"qfq": "2", "hfq": "1", "none": "3"}
 
 
@@ -96,6 +96,7 @@ def map_baostock_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
                 "change_percent": _num(r.get("pctChg")),
                 "change_amount": None,
                 "turnover_rate": None,
+                "tradestatus": _int(r.get("tradestatus")),  # 权威停牌状态（issue #80）
             }
         )
     return bars

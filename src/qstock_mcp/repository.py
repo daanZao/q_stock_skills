@@ -29,11 +29,12 @@ from .dates import add_days
 log = logging.getLogger(__name__)
 
 _UPSERT_SQL = """
-INSERT INTO stock_daily (stock_code, trade_date, {cols}, adj, source, updated_at)
+INSERT INTO stock_daily (stock_code, trade_date, {cols}, adj, source, tradestatus, updated_at)
 VALUES %s
 ON CONFLICT (stock_code, trade_date, adj) DO UPDATE SET
     {updates},
     source = EXCLUDED.source,
+    tradestatus = EXCLUDED.tradestatus,
     updated_at = CURRENT_TIMESTAMP
 """.format(
     cols=", ".join(BAR_FIELDS[1:]),
@@ -41,18 +42,21 @@ ON CONFLICT (stock_code, trade_date, adj) DO UPDATE SET
 )
 
 _SELECT_SQL = """
-SELECT {cols}, source FROM stock_daily
+SELECT {cols}, source, tradestatus FROM stock_daily
 WHERE stock_code = %s AND adj = %s AND trade_date BETWEEN %s AND %s
 ORDER BY trade_date
 """.format(cols=", ".join(BAR_FIELDS))
 
 
 def upsert_daily(conn, stock_code: str, adj: str, rows: list[dict], source: str) -> int:
-    """按业务键 upsert，返回写入行数。"""
+    """按业务键 upsert，返回写入行数。
+
+    tradestatus（权威停牌状态，issue #80）：仅 baostock 路径带值，其余源为 None。
+    """
     values = [
         [stock_code, row["trade_date"]]
         + [row.get(f) for f in BAR_FIELDS[1:]]
-        + [adj, source]
+        + [adj, source, row.get("tradestatus")]
         for row in rows
     ]
     if not values:
@@ -62,8 +66,8 @@ def upsert_daily(conn, stock_code: str, adj: str, rows: list[dict], source: str)
             cur,
             _UPSERT_SQL,
             values,
-            # 占位符数 = stock_code + trade_date + 数据列 + adj + source
-            template="(" + ", ".join(["%s"] * (len(BAR_FIELDS) + 3)) + ", CURRENT_TIMESTAMP)",
+            # 占位符数 = stock_code + trade_date + 数据列 + adj + source + tradestatus
+            template="(" + ", ".join(["%s"] * (len(BAR_FIELDS) + 4)) + ", CURRENT_TIMESTAMP)",
         )
     conn.commit()
     return len(values)
@@ -75,7 +79,7 @@ def select_daily(
     with conn.cursor() as cur:
         cur.execute(_SELECT_SQL, (stock_code, adj, start, end))
         return [
-            dict(zip(BAR_FIELDS + ("source",), row)) for row in cur.fetchall()
+            dict(zip(BAR_FIELDS + ("source", "tradestatus"), row)) for row in cur.fetchall()
         ]
 
 

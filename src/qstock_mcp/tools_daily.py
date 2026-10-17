@@ -102,6 +102,32 @@ def _data_range(rows: list[dict]) -> dict | None:
     return {"start": rows[0]["trade_date"], "end": rows[-1]["trade_date"]}
 
 
+def _mark_suspension(row: dict) -> dict:
+    """停牌标注（issue #80）：tradestatus 权威优先（0 停牌/1 正常），缺失时
+    启发式兜底（OHLC 全等且 volume/change_percent 为 null 即停牌占位行）。
+
+    停牌占位行（行存在但无成交）与数据缺失行（无行）由此在数据层可区分。
+    """
+    ts = row.get("tradestatus")
+    if ts is not None:
+        row["suspended"] = ts == 0
+        row["suspended_basis"] = "tradestatus"
+        return row
+    ohlc = (row.get("open"), row.get("high"), row.get("low"), row.get("close"))
+    if (
+        None not in ohlc
+        and ohlc[0] == ohlc[1] == ohlc[2] == ohlc[3]
+        and row.get("volume") is None
+        and row.get("change_percent") is None
+    ):
+        row["suspended"] = True
+        row["suspended_basis"] = "heuristic"
+    else:
+        row["suspended"] = False
+        row["suspended_basis"] = None
+    return row
+
+
 class _Ctx(NamedTuple):
     """_run 公共骨架的产物：参数回显、解析后区间、自愈分段、库内行、盘中禁写行。"""
 
@@ -227,6 +253,7 @@ def query_daily(
             key=lambda r: r["trade_date"],
         )
     rows = rows[-days:] if days is not None else rows
+    rows = [_mark_suspension(dict(r)) for r in rows]
     out = {
         "status": "ok",
         "tool": "query_daily",
