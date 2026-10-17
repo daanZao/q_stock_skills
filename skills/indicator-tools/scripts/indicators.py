@@ -22,6 +22,11 @@ deviation 输入为个股/基准双腿：{"status":"ok","stock":<query_daily 输
 涨跌幅，按 --windows（默认 10,30）滚动累计；--skip-leading N 剔除个股序列
 前 N 个交易日（新股上市无涨跌幅限制期不计入，调用方负责让序列从上市首日起）。
 
+停牌占位行（query_daily 输出的 suspended=true / tradestatus=0 行，或无标注的
+OHLC 全等且 volume/change_percent 为 null 的行）在 parse_cols 入口按
+"无该交易日数据"剔除，不填充不伪造；剔除后必需列校验继续严格。剔除数量
+以 excluded_suspended 字段记入响应（count + dates；无剔除时字段不出现）。
+
 退出码：0 = ok / insufficient_data（数据不足非错误）；1 = 输入/运行时错误；
 2 = 参数错误（argparse 或 --on 等取值非法）。
 """
@@ -348,12 +353,32 @@ def load_stdin() -> dict:
     return payload
 
 
-def parse_cols(rows: list) -> tuple[list, dict]:
-    """rows → (trade_dates, {列: [float]})；OHLCV/amount 缺失/非法抛 ValueError，
-    change_percent 允许 null（如区间首日无前收），其余非数值抛 ValueError。"""
+def is_suspended_row(row: dict) -> bool:
+    """停牌占位行判定：有标注以标注为准（suspended=true 或 tradestatus=0）；
+    无标注时兜底启发式——OHLC 全等且 volume/change_percent 为 null。"""
+    if "suspended" in row:
+        return row["suspended"] is True
+    if "tradestatus" in row:
+        return row["tradestatus"] == 0
+    o, h, l, c = (row.get(k) for k in ("open", "high", "low", "close"))
+    return (o is not None and o == h == l == c
+            and row.get("volume") is None
+            and row.get("change_percent") is None)
+
+
+def parse_cols(rows: list) -> tuple[list, dict, list]:
+    """rows → (trade_dates, {列: [float]}, 剔除的停牌日期列表)。
+
+    停牌占位行（is_suspended_row）按"无该交易日数据"剔除，不填充不伪造；
+    剔除后 OHLCV/amount 缺失/非法仍抛 ValueError，change_percent 允许 null
+    （如区间首日无前收），其余非数值抛 ValueError。"""
     dates = []
+    excluded = []
     cols: dict[str, list] = {c: [] for c in BASE_COLUMNS + CORR_EXTRA_COLUMNS}
     for i, row in enumerate(rows):
+        if isinstance(row, dict) and is_suspended_row(row):
+            excluded.append(row.get("trade_date"))
+            continue
         dates.append(row.get("trade_date"))
         for c in BASE_COLUMNS:
             v = row.get(c)
@@ -367,7 +392,12 @@ def parse_cols(rows: list) -> tuple[list, dict]:
             raise ValueError(f"第 {i} 行 change_percent 非数值: {cp!r}")
         else:
             cols["change_percent"].append(float(cp))
-    return dates, cols
+    return dates, cols, excluded
+
+
+def _excluded_field(excluded: list) -> dict:
+    """剔除日期的响应字段形态。"""
+    return {"count": len(excluded), "dates": excluded}
 
 
 def run_corr(args, params) -> int:
@@ -381,12 +411,15 @@ def run_corr(args, params) -> int:
                 "corr 输入须含 series 对象（至少 2 个标的："
                 '{"status":"ok","series":{代码: query_daily 输出}}）')
         per: dict[str, tuple[list, Series]] = {}
+        excluded: dict[str, list] = {}
         for code, sub in raw.items():
             rows = sub.get("rows") if isinstance(sub, dict) else None
             if not isinstance(rows, list):
                 raise ValueError(f"series[{code!r}] 缺少 rows 数组")
-            dates, cols = parse_cols(rows)
+            dates, cols, excl = parse_cols(rows)
             per[code] = (dates, resolve_base_series(cols, args.on))
+            if excl:
+                excluded[code] = excl
     except (ValueError, TypeError, AttributeError) as e:
         emit({"status": "error", "error": str(e)})
         return 1
@@ -399,11 +432,15 @@ def run_corr(args, params) -> int:
     # 交集对齐后再剔除任一侧取值为 null 的交易日（如 change_percent 区间首日）
     aligned = [d for d in first_dates if d in (common or set())
                and all(by_date[c][d] is not None for c in by_date)]
+    excluded_field = {c: _excluded_field(dates) for c, dates in excluded.items()}
     if len(aligned) < 2:
-        emit({"status": "insufficient_data", "indicator": "corr",
-              "params": {"on": args.on},
-              "required_length": 2, "available_length": len(aligned),
-              "message": f"corr 至少需要 2 个对齐交易日，当前交集仅 {len(aligned)} 个"})
+        payload = {"status": "insufficient_data", "indicator": "corr",
+                   "params": {"on": args.on},
+                   "required_length": 2, "available_length": len(aligned),
+                   "message": f"corr 至少需要 2 个对齐交易日，当前交集仅 {len(aligned)} 个"}
+        if excluded_field:
+            payload["excluded_suspended"] = excluded_field
+        emit(payload)
         return 0
 
     symbols = sorted(per)
@@ -416,13 +453,16 @@ def run_corr(args, params) -> int:
             row[b] = None if r is None else round(r, 4)
         matrix[a] = row
 
-    emit({"status": "ok", "indicator": "corr", "params": {"on": args.on},
-          "symbols": symbols,
-          "aligned_length": len(aligned),
-          "required_length": 2,
-          "data_range": {"start": aligned[0], "end": aligned[-1]},
-          "boundary_rule": "按 trade_date 交集对齐（任一侧取值为 null 的交易日剔除）；方差为 0 的标的对应矩阵位置为 null",
-          "matrix": matrix})
+    out = {"status": "ok", "indicator": "corr", "params": {"on": args.on},
+           "symbols": symbols,
+           "aligned_length": len(aligned),
+           "required_length": 2,
+           "data_range": {"start": aligned[0], "end": aligned[-1]},
+           "boundary_rule": "按 trade_date 交集对齐（任一侧取值为 null 的交易日剔除）；方差为 0 的标的对应矩阵位置为 null",
+           "matrix": matrix}
+    if excluded_field:
+        out["excluded_suspended"] = excluded_field
+    emit(out)
     return 0
 
 
@@ -437,21 +477,25 @@ def run_deviation(args, windows: list) -> int:
     try:
         payload = _read_payload()
         legs = {}
+        leg_excluded: dict[str, list] = {}
         for key in ("stock", "benchmark"):
             leg = payload.get(key)
             if not isinstance(leg, dict) or not isinstance(leg.get("rows"), list):
                 raise ValueError(f"输入缺少 {key}.rows 数组")
-            dates, cols = parse_cols(leg["rows"])
+            dates, cols, excl = parse_cols(leg["rows"])
             leg_params = leg.get("params") or {}
             code = leg_params.get("stock_code") or leg_params.get("index_code")
             legs[key] = {"dates": dates, "cp": cols["change_percent"],
                          "code": code}
+            if excl:
+                leg_excluded[key] = excl
     except (ValueError, TypeError, AttributeError) as e:
         emit({"status": "error", "error": str(e)})
         return 1
 
     stock, bench = legs["stock"], legs["benchmark"]
     excluded = stock["dates"][: args.skip_leading]
+    excluded_suspended = {k: _excluded_field(v) for k, v in leg_excluded.items()}
     bench_by_date = dict(zip(bench["dates"], bench["cp"]))
     stock_by_date = dict(zip(stock["dates"], stock["cp"]))
     aligned = [d for d in stock["dates"]
@@ -460,14 +504,17 @@ def run_deviation(args, windows: list) -> int:
 
     need = min(windows)
     if len(aligned) < need:
-        emit({"status": "insufficient_data", "indicator": "deviation",
-              "params": {"windows": windows,
-                         "skip_leading": args.skip_leading},
-              "stock_code": stock["code"], "benchmark_code": bench["code"],
-              "required_length": need, "available_length": len(aligned),
-              "excluded_leading_days": excluded,
-              "message": f"deviation 至少需要 {need} 个对齐交易日，"
-                         f"当前交集仅 {len(aligned)} 个"})
+        payload = {"status": "insufficient_data", "indicator": "deviation",
+                   "params": {"windows": windows,
+                              "skip_leading": args.skip_leading},
+                   "stock_code": stock["code"], "benchmark_code": bench["code"],
+                   "required_length": need, "available_length": len(aligned),
+                   "excluded_leading_days": excluded,
+                   "message": f"deviation 至少需要 {need} 个对齐交易日，"
+                              f"当前交集仅 {len(aligned)} 个"}
+        if excluded_suspended:
+            payload["excluded_suspended"] = excluded_suspended
+        emit(payload)
         return 0
 
     devs = [stock_by_date[d] - bench_by_date[d] for d in aligned]
@@ -482,16 +529,19 @@ def run_deviation(args, windows: list) -> int:
             point[name] = None if v is None else round(v, 4)
         points.append(point)
 
-    emit({"status": "ok", "indicator": "deviation",
-          "params": {"windows": windows, "skip_leading": args.skip_leading},
-          "stock_code": stock["code"], "benchmark_code": bench["code"],
-          "aligned_length": len(aligned),
-          "required_length": need,
-          "data_range": {"start": aligned[0], "end": aligned[-1]},
-          "excluded_leading_days": excluded,
-          "boundary_rule": "按 trade_date 交集对齐（任一侧涨跌幅为 null 的交易日剔除）；"
-                           "min_periods=窗口，各窗口序列前 窗口-1 点为 null",
-          "series": points})
+    out = {"status": "ok", "indicator": "deviation",
+           "params": {"windows": windows, "skip_leading": args.skip_leading},
+           "stock_code": stock["code"], "benchmark_code": bench["code"],
+           "aligned_length": len(aligned),
+           "required_length": need,
+           "data_range": {"start": aligned[0], "end": aligned[-1]},
+           "excluded_leading_days": excluded,
+           "boundary_rule": "按 trade_date 交集对齐（任一侧涨跌幅为 null 的交易日剔除）；"
+                            "min_periods=窗口，各窗口序列前 窗口-1 点为 null",
+           "series": points}
+    if excluded_suspended:
+        out["excluded_suspended"] = excluded_suspended
+    emit(out)
     return 0
 
 
@@ -631,7 +681,7 @@ def main() -> int:
 
     try:
         payload = load_stdin()
-        dates, cols = parse_cols(payload["rows"])
+        dates, cols, excl = parse_cols(payload["rows"])
     except (ValueError, TypeError, AttributeError) as e:
         emit({"status": "error", "error": str(e)})
         return 1
@@ -640,10 +690,13 @@ def main() -> int:
     have = len(dates)
     need = required_length(args.indicator, params)
     if have < need:
-        emit({"status": "insufficient_data", "stock_code": stock_code,
-              "indicator": args.indicator, "params": params,
-              "required_length": need, "available_length": have,
-              "message": f"计算 {args.indicator} 至少需要 {need} 根日线，输入仅 {have} 根"})
+        out = {"status": "insufficient_data", "stock_code": stock_code,
+               "indicator": args.indicator, "params": params,
+               "required_length": need, "available_length": have,
+               "message": f"计算 {args.indicator} 至少需要 {need} 根日线，输入仅 {have} 根"}
+        if excl:
+            out["excluded_suspended"] = _excluded_field(excl)
+        emit(out)
         return 0
 
     try:
@@ -664,7 +717,7 @@ def main() -> int:
                 point[name] = round(v, 4)
         points.append(point)
 
-    emit({
+    out = {
         "status": "ok",
         "stock_code": stock_code,
         "indicator": args.indicator,
@@ -674,7 +727,10 @@ def main() -> int:
         "available_length": have,
         "boundary_rule": boundary_rule(args.indicator, params),
         "series": points,
-    })
+    }
+    if excl:
+        out["excluded_suspended"] = _excluded_field(excl)
+    emit(out)
     return 0
 
 

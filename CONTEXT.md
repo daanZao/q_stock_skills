@@ -74,6 +74,10 @@ _Avoid_: 板块回补数据
 一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/三态 status/来源/行数/error_kind/起止时间），全历史保留。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败，三者表述不得混用。
 _Avoid_: 采集日志、抓取记录
 
+**停牌占位行**:
+`query_daily` 对停牌交易日输出的占位行：`tradestatus=0` 为权威标注（其余源为 null），无标注时启发式兜底（OHLC 全等且 volume/change_percent 为 null），行带 `suspended`/`suspended_basis` 字段。消费方（indicator-tools 等）按"无该交易日数据"剔除，不填充不伪造，剔除明细记 `excluded_suspended`（决策见 `docs/adr/0009`）。
+_Avoid_: 停牌零值行
+
 ### Skill 家族（继承自旧项目词汇）
 
 **Agent skill**:
