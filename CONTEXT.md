@@ -78,6 +78,12 @@ _Avoid_: 采集日志、抓取记录
 `query_daily` 对停牌交易日输出的占位行：`tradestatus=0` 为权威标注（其余源为 null），无标注时启发式兜底（OHLC 全等且 volume/change_percent 为 null），行带 `suspended`/`suspended_basis` 字段。消费方（indicator-tools 等）按"无该交易日数据"剔除，不填充不伪造，剔除明细记 `excluded_suspended`（决策见 `docs/adr/0009`）。
 _Avoid_: 停牌零值行
 
+### 调度
+
+**收盘后批**:
+`qstock-scheduler close` 执行的交易日收盘后采集：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照，直调 tools_* 核心层、不经 MCP 协议层，逐 section 独立成败并落采集台账。调度安装（launchd）为用户侧动作，见 `docs/scheduler-launchd.md`。
+_Avoid_: 定时任务（不加限定时）
+
 ### Skill 家族（继承自旧项目词汇）
 
 **Agent skill**:

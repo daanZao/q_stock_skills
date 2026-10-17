@@ -91,6 +91,7 @@ flowchart LR
 - **conclusions — `tools_conclusions.py`**：结论读写。写入校验日期与 payload 可 JSON 序列化；同业务键重复写为 upsert，`outcome` 报告 `inserted/updated`（`tools_conclusions.py:21-59`、ADR 0003）。
 - **妙想接入 — `tools_mx.py`**：三工具共享 `_mx_exchange` 骨架（配额先检、触顶不调上游、上游触达即记账、code!=0 走统一 error 契约）。`mx_query` 妙想 mx-data 透传（同 proxy 语义：不规格化、不落库、不进 fallback 链）；`mx_search` 资讯搜索并落库 `news_items`（响应内按 news_code 去重、业务键幂等 upsert，subject 缺省 `market`/`_market`）；`query_news` 库内资讯纯读（subject + 发布时间范围过滤、倒序、limit，空结果 `count:0` 非错误，不调上游不计配额）（ADR 0005、`tools_mx.py:60-116`、`tools_mx.py:142-180`、`tools_mx.py:183-230`）。
 - **采集台账 — `tools_ledger.py` + `ledger.py`（issue #77，spec #71/W4）**：一切写库路径（fetch_daily/query_daily 自愈、fetch_market_snapshot、fetch_board_snapshot 逐 section、init 各 part、成分字典/名称表导入）每次采集动作落一行 `collection_log`（trade_date/section/status(ok·empty·error)/source/rows/error_kind/detail/起止时间，append-only 全历史保留；`record_collection` 落账失败仅 log 不拖垮主流程）；区间采集（日线）记区间尾日、区间见 detail。`query_collection_log` 按日期/section/状态过滤、完成时间倒序、limit 缺省 100 上限 500（约束输出体量），空结果 `count:0` 非错误。就绪检查语义：无台账行=未采集，empty=上游确认无数据，error=采集失败。
+- **调度 CLI — `scheduler.py`（issue #82，spec #71/W5）**：`qstock-scheduler` 入口（pyproject `[project.scripts]`），直调 tools_* 核心层不经 MCP 协议层。子命令 `close [--date]`：收盘后批盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）经 `fetch_board_snapshot` 一次执行，逐 section 独立成败、台账由 tools_board 内联记录（本层不重复落账）；任一 section 失败 exit 1（明细在 stdout JSON 的 failed_sections/sections），参数错误 exit 2，异常收敛为结构化 JSON。重复执行幂等（业务键 upsert）。launchd 安装样例见 `docs/scheduler-launchd.md`（用户自行安装；非交易日触发产生 empty 台账行，属正常语义）。
 
 ### 编排与落库
 

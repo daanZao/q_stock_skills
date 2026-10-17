@@ -17,6 +17,7 @@ classify = ["xlrd>=2"]
 
 [project.scripts]
 qstock-mcp = "qstock_mcp.server:main"
+qstock-scheduler = "qstock_mcp.scheduler:main"
 
 [build-system]
 requires = ["setuptools"]
