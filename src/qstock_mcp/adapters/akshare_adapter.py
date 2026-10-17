@@ -8,7 +8,9 @@ FetchError 触发 fallback；盘中 lhb_basic 空数据归一化为空列表（�
 import logging
 
 from ._board_em import (
+    map_board_history_rows,
     map_board_rows,
+    map_cons_rows,
     map_index_rows,
     map_lhb_basic_rows,
     map_lhb_statistic_rows,
@@ -275,3 +277,36 @@ class AkshareAdapter:
         if df is None or df.empty:
             return []
         return map_lhb_yyb_most_rows(df.to_dict("records"))
+
+    # ---------------------------------------------------------------- 板块历史回补与概念成分（issue #84）
+
+    def fetch_board_history(
+        self, board_type: str, board_name: str, start: str, end: str
+    ) -> list[dict]:
+        """板块历史日 K（push2his）：stock_board_industry/concept_hist_em，
+        不复权（板块行情无复权语义）。空区间返回 []。"""
+        ak = _ak()
+        fn = (
+            ak.stock_board_industry_hist_em
+            if board_type == "industry"
+            else ak.stock_board_concept_hist_em
+        )
+        try:
+            df = fn(symbol=board_name, start_date=start, end_date=end,
+                    period="日k", adjust="")
+        except Exception as e:
+            raise FetchError(f"akshare 板块历史抓取失败（{board_name}）: {e}") from e
+        if df is None or df.empty:
+            return []
+        return map_board_history_rows(df.to_dict("records"), board_type, board_name)
+
+    def fetch_board_cons(self, board_name: str) -> list[dict]:
+        """概念板块成分（cons 接口）：stock_board_concept_cons_em 按板块名。"""
+        ak = _ak()
+        try:
+            df = ak.stock_board_concept_cons_em(symbol=board_name)
+        except Exception as e:
+            raise FetchError(f"akshare 概念成分抓取失败（{board_name}）: {e}") from e
+        if df is None or df.empty:
+            return []
+        return map_cons_rows(df.to_dict("records"))

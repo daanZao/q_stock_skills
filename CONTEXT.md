@@ -88,6 +88,10 @@ _Avoid_: 定时任务（不加限定时）
 `qstock-scheduler morning` 执行的开盘前采集（目标日恒为前一交易日）：baostock 一把抓全市场日线（含 tradestatus 权威停牌列、turn 换手率，volume 股 / amount 万元口径）+ 7 大指数尾行缺失即补，逐部分独立成败并落采集台账。baostock 当日 bar 晚间才就绪，次晨批不用于当日。
 _Avoid_: 早盘补抓
 
+**板块回补**:
+`qstock-scheduler backfill` 执行的板块历史补数：东财 push2his 板块 K 线同口径回补行业+概念板块入 `market_boards`（默认窗口 = 前一交易日前推约 3 个月），回补行带 `source='push2his'` 标注与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。收盘后批东财健康时附带概念成分积累入成分字典 'em' 体系（随 close 执行，独立成败不拖垮主批）。
+_Avoid_: 回填、补数据（不加限定时）
+
 ### Skill 家族（继承自旧项目词汇）
 
 **Agent skill**:

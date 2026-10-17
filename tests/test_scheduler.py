@@ -30,8 +30,9 @@ def pg_ready(pg_test):
     return pg_test
 
 
-def _run(capsys, argv, adapters=None):
-    rc = scheduler.main(argv, adapters=adapters)
+def _run(capsys, argv, adapters=None, cons_adapters=()):
+    # cons_adapters 缺省空链：概念成分积累（#84）直接失败、不触网
+    rc = scheduler.main(argv, adapters=adapters, cons_adapters=cons_adapters)
     out = json.loads(capsys.readouterr().out)
     return rc, out
 
@@ -65,7 +66,8 @@ class TestCloseHappyPath:
 
     def test_ledger_records_all_sections(self, pg_ready, capsys):
         _run(capsys, ["close"], adapters=[FakeBoardAdapter("fake")])
-        rows = _ledger_rows(pg_ready)
+        rows = [r for r in _ledger_rows(pg_ready)
+                if r[1] in ("indices", "boards", "zt_pool", "strong_stocks", "lhb")]
         sections = {r[1] for r in rows}
         assert sections == {"indices", "boards", "zt_pool", "strong_stocks", "lhb"}
         assert all(r[0] == TODAY for r in rows)
@@ -77,7 +79,8 @@ class TestCloseHappyPath:
         """重复执行幂等：业务键 upsert，台账 append-only 追加。"""
         _run(capsys, ["close"], adapters=[FakeBoardAdapter("fake")])
         _run(capsys, ["close"], adapters=[FakeBoardAdapter("fake")])
-        rows = _ledger_rows(pg_ready)
+        rows = [r for r in _ledger_rows(pg_ready)
+                if r[1] in ("indices", "boards", "zt_pool", "strong_stocks", "lhb")]
         assert len(rows) == 10  # 两轮各 5 行台账
         conn = psycopg2.connect(pg_ready)
         try:

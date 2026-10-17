@@ -260,3 +260,42 @@ def fetch_index_daily_with_fallback(
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
+
+
+def fetch_board_history_with_fallback(
+    adapters,
+    board_type: str,
+    board_name: str,
+    start: str,
+    end: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """板块历史 K 线抓取（issue #84 回补），成功返回 {rows, source, attempted_sources}。"""
+    r = _with_fallback(
+        adapters,
+        lambda a: a.fetch_board_history(board_type, board_name, start, end),
+        max_retries,
+    )
+    return {
+        "rows": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_board_cons_with_fallback(
+    adapters,
+    board_name: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """概念板块成分抓取（issue #84），成功返回 {rows, source, attempted_sources}。"""
+    r = _with_fallback(
+        adapters,
+        lambda a: a.fetch_board_cons(board_name),
+        max_retries,
+    )
+    return {
+        "rows": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }

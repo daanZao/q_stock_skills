@@ -217,3 +217,49 @@ def map_lhb_yyb_most_rows(records: list[dict]) -> list[dict]:
             }
         )
     return rows
+
+
+def map_board_history_rows(
+    records: list[dict], board_type: str, board_name: str
+) -> list[dict]:
+    """板块历史 K 线（push2his 回补，issue #84）：东财中文列 → market_boards 行。
+
+    trade_date 逐行自带；board_type/board_name 由调用方盖戳。快照无来源的列
+    （pre_close/volume_ratio/stock_count/leading_*）置 None 不伪造；
+    成交量手→股（ADR 0008）、成交额元→万元（ADR 0006）。
+    """
+    rows = []
+    for r in records:
+        rows.append(
+            {
+                "trade_date": _yyyymmdd(r.get("日期")),
+                "board_type": board_type,
+                "board_name": board_name,
+                "latest_price": _num(r.get("收盘")),
+                "change_percent": _num(r.get("涨跌幅")),
+                "change_amount": _num(r.get("涨跌额")),
+                "volume": _gu(r.get("成交量")),  # 手 → 股（ADR 0008）
+                "amount": _wan(r.get("成交额")),
+                "amplitude": _num(r.get("振幅")),
+                "high": _num(r.get("最高")),
+                "low": _num(r.get("最低")),
+                "open": _num(r.get("开盘")),
+                "pre_close": None,
+                "volume_ratio": None,
+                "stock_count": None,
+                "leading_stock": None,
+                "leading_change": None,
+            }
+        )
+    return rows
+
+
+def map_cons_rows(records: list[dict]) -> list[dict]:
+    """概念板块成分（cons 接口，issue #84）：提取 stock_code（补零 6 位）。"""
+    rows = []
+    for r in records:
+        code = _text(r.get("代码"))
+        if code is None:
+            continue
+        rows.append({"stock_code": code.zfill(6)})
+    return rows

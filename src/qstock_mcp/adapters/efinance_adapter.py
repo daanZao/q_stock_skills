@@ -118,3 +118,11 @@ class EfinanceAdapter:
 
     def fetch_lhb(self, trade_date: str) -> dict:
         self._unsupported("lhb")
+
+    def fetch_board_history(
+        self, board_type: str, board_name: str, start: str, end: str
+    ) -> list[dict]:
+        self._unsupported("board_history")
+
+    def fetch_board_cons(self, board_name: str) -> list[dict]:
+        self._unsupported("board_cons")

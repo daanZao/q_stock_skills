@@ -7,6 +7,7 @@
 import pytest
 
 from qstock_mcp.adapters._eastmoney import _money_cn, map_eastmoney_rows, map_spot_rows, spot_trade_date
+from qstock_mcp.adapters._board_em import map_board_history_rows, map_cons_rows
 from qstock_mcp.adapters.baostock_adapter import (
     BaostockAdapter,
     map_astock_daily_rows,
@@ -317,6 +318,42 @@ def test_board_mapping():
         "leading_stock": "贵州茅台",
         "leading_change": 2.0,
     }
+
+
+def test_board_history_mapping():
+    """板块历史 K 线映射（issue #84）：trade_date 逐行自带，量纲换算，无来源列置 None。"""
+    record = {
+        "日期": "2026-10-15", "开盘": "1980.0", "收盘": "2000.0",
+        "最高": "2010.0", "最低": "1970.0", "涨跌幅": "1.5",
+        "涨跌额": "30.0", "成交量": "12345", "成交额": "250000000",
+        "振幅": "2.0", "换手率": "1.1",
+    }
+    (row,) = map_board_history_rows([record], "industry", "酿酒行业")
+    assert row == {
+        "trade_date": "20261015",
+        "board_type": "industry",
+        "board_name": "酿酒行业",
+        "latest_price": 2000.0,
+        "change_percent": 1.5,
+        "change_amount": 30.0,
+        "volume": 1234500,  # 手 → 股（ADR 0008）
+        "amount": 25000.0,  # 元 → 万元（ADR 0006）
+        "amplitude": 2.0,
+        "high": 2010.0,
+        "low": 1970.0,
+        "open": 1980.0,
+        "pre_close": None,
+        "volume_ratio": None,
+        "stock_count": None,
+        "leading_stock": None,
+        "leading_change": None,
+    }
+
+
+def test_cons_mapping():
+    rows = map_cons_rows([{"代码": "60519", "名称": "贵州茅台"},
+                          {"代码": "-"}, {"代码": "000858"}])
+    assert rows == [{"stock_code": "060519"}, {"stock_code": "000858"}]
 
 
 def test_zt_pool_mapping_per_pool_type():

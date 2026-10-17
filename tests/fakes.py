@@ -261,6 +261,62 @@ _BOARD_DEFAULTS = {
 }
 
 
+def _board_history_row(d, close=2000.0):
+    """板块历史 K 线（push2his 回补）的已映射行（trade_date 自带，逐日行）。"""
+    return {
+        "trade_date": d,
+        "latest_price": close,
+        "change_percent": 1.5,
+        "change_amount": 30.0,
+        "volume": 1234500,
+        "amount": 100.0,
+        "amplitude": 2.0,
+        "high": close + 10.0,
+        "low": close - 10.0,
+        "open": close - 5.0,
+        "pre_close": None,
+        "volume_ratio": None,
+        "stock_count": None,
+        "leading_stock": None,
+        "leading_change": None,
+    }
+
+
+class FakeBoardHistoryAdapter:
+    """板块历史回补（push2his）与概念成分（cons）的 fake 源（issue #84）。
+
+    history: {(board_type, board_name): [逐日行]}，缺省回退 default_history；
+    cons: {board_name: [{"stock_code": ...}]}，缺省回退 default_cons；
+    fail_history/fail_cons: 指定板块名抓取即抛 FetchError。
+    """
+
+    def __init__(self, name="akshare", *, history=None, cons=None,
+                 fail_history=(), fail_cons=()):
+        self.name = name
+        self._history = history or {}
+        self._cons = cons or {}
+        self._fail_history = set(fail_history)
+        self._fail_cons = set(fail_cons)
+        self.history_calls = []
+        self.cons_calls = []
+
+    def fetch_board_history(self, board_type, board_name, start, end):
+        self.history_calls.append((board_type, board_name, start, end))
+        if board_name in self._fail_history:
+            raise FetchError(f"{self.name} history {board_name} boom")
+        rows = self._history.get((board_type, board_name))
+        if rows is None:
+            rows = [_board_history_row(end)]
+        return [dict(r, board_type=board_type, board_name=board_name)
+                for r in rows]
+
+    def fetch_board_cons(self, board_name):
+        self.cons_calls.append(board_name)
+        if board_name in self._fail_cons:
+            raise FetchError(f"{self.name} cons {board_name} boom")
+        return list(self._cons.get(board_name, [{"stock_code": "600519"}]))
+
+
 class FakeBoardAdapter:
     """记录调用、按脚本成败的 fake 盘面数据源。
 

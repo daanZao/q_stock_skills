@@ -403,8 +403,9 @@ def select_index_daily(
 # ---------------------------------------------------------------- 盘面快照（issue #5）
 
 # section → [(表名, 日期列, 业务键(除日期列), 数据列)]；表结构见 sql/003-007。
-# 盘面表均无 source 列：盘面 section 基本为 akshare 单源，来源在工具结果中
-# 报告即可，不值得占用 schema 列（本项目 DDL 决策，非继承旧库）。
+# 盘面表基本无 source 列（盘面 section 为东财系单源，来源在工具结果中报告）；
+# 例外：market_boards 有 source 列（issue #84，区分实时采集 NULL 与回补
+# 'push2his'，sql/015）。
 BOARD_SECTION_TABLES: dict[str, list[tuple[str, str, tuple, tuple]]] = {
     "indices": [("market_indices", "trade_date", ("index_code",), INDEX_FIELDS)],
     "boards": [
@@ -467,6 +468,85 @@ def upsert_board_rows(
         )
     conn.commit()
     return len(values)
+
+
+_BOARD_HISTORY_COLS = ("trade_date",) + BOARD_FIELDS
+
+_BOARD_HISTORY_UPSERT_SQL = """
+INSERT INTO market_boards ({cols}, source)
+VALUES %s
+ON CONFLICT (trade_date, board_type, board_name) DO UPDATE SET
+    {updates},
+    source = EXCLUDED.source
+""".format(
+    cols=", ".join(_BOARD_HISTORY_COLS),
+    updates=", ".join(
+        f"{c} = EXCLUDED.{c}"
+        for c in BOARD_FIELDS
+        if c not in ("board_type", "board_name")
+    ),
+)
+
+
+def upsert_board_history(conn, rows: list[dict], source: str) -> int:
+    """板块历史回补落库（issue #84）：行自带 trade_date/board_type/board_name，
+    按业务键幂等 upsert 并写 source 标注（'push2his'，与实时采集行的 NULL 区分）。
+    """
+    values = [[row.get(c) for c in _BOARD_HISTORY_COLS] + [source] for row in rows]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            _BOARD_HISTORY_UPSERT_SQL,
+            values,
+            template="(" + ", ".join(["%s"] * (len(_BOARD_HISTORY_COLS) + 1)) + ")",
+        )
+    conn.commit()
+    return len(values)
+
+
+def select_distinct_boards(conn, trade_date: str | None = None) -> list[dict]:
+    """market_boards 去重板块清单（board_type/board_code/board_name），
+    供回补与成分积累确定目标集；trade_date 给定时只取当日出现过的板块。"""
+    sql = "SELECT DISTINCT board_type, board_code, board_name FROM market_boards"
+    args: tuple = ()
+    if trade_date is not None:
+        sql += " WHERE trade_date = %s"
+        args = (trade_date,)
+    with conn.cursor() as cur:
+        cur.execute(sql + " ORDER BY board_type, board_name", args)
+        return [
+            {"board_type": t, "board_code": c, "board_name": n}
+            for t, c, n in cur.fetchall()
+        ]
+
+
+def upsert_em_cons(conn, rows: list[dict], effective_date: str) -> int:
+    """概念成分积累入成分字典（issue #84）：source_system='em'，
+    ON CONFLICT DO NOTHING（point-in-time 行已存在则不动），返回新插入行数。
+
+    rows 元素：{"stock_code": ..., "board_code": ...}；effective_date 为
+    yyyy-mm-dd（PG date 列）。
+    """
+    values = [
+        ("em", row["stock_code"], row["board_code"], effective_date)
+        for row in rows
+    ]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            "INSERT INTO sw_industry_class"
+            " (source_system, stock_code, board_code, effective_date)"
+            " VALUES %s ON CONFLICT DO NOTHING",
+            values,
+            template="(%s, %s, %s, %s)",
+        )
+        inserted = cur.rowcount
+    conn.commit()
+    return inserted
 
 
 # 可查询的盘面表 → (日期列, 代码列)；表名/列名为内部常量。lhb_stock_detail 无业务
