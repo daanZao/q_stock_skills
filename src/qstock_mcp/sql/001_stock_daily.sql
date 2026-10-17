@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS stock_daily (
     low             real,
     close           real,
     volume          bigint,
-    amount          double precision,  -- 成交额（元）
+    amount          double precision,  -- 成交额（万元，ADR 0006）；volume 单位为股（ADR 0008）
     amplitude       real,
     change_percent  real,
     change_amount   real,

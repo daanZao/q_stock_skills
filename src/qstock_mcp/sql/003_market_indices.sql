@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS market_indices (
     latest_price    real,
     change_percent  real,
     change_amount   real,
-    volume          bigint,
-    amount          real,
+    volume          bigint,          -- 股（ADR 0008）
+    amount          real,              -- 万元（ADR 0006）
     amplitude       real,
     high            real,
     low             real,

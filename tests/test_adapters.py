@@ -38,7 +38,7 @@ def test_eastmoney_mapping_full_row():
         "high": 10.5,
         "low": 9.8,
         "close": 10.2,
-        "volume": 12345,
+        "volume": 1234500,  # 手 → 股 ×100（ADR 0008）
         "amount": 12.50005,  # 元 → 万元（ADR 0006）
         "amplitude": 7.0,
         "change_percent": 2.0,
@@ -128,7 +128,7 @@ def test_spot_mapping_akshare_columns():
         "turnover_rate": 0.5,
         "pe_ratio": 25.0,
         "pb_ratio": 8.0,
-        "volume": 12345,
+        "volume": 1234500,  # 手 → 股 ×100（ADR 0008）
         "amount": 12.50005,  # 万元
         "market_cap": 2.1e8,  # 万元
         "float_cap": 2.1e8,  # 万元
@@ -228,6 +228,7 @@ def test_index_mapping_akshare_columns():
     assert row["index_name"] == "上证指数"
     assert row["amplitude"] == 1.0
     assert row["pre_close"] == 2985.0
+    assert row["volume"] == 10000  # 手 → 股 ×100（ADR 0008）
     assert row["trade_date"] is None  # akshare 无"最新交易日"列，由工具层回退
 
 

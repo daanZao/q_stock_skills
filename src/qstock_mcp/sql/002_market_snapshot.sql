@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS market_snapshot (
     turnover_rate   real,
     pe_ratio        real,
     pb_ratio        real,
-    volume          bigint,
-    amount          double precision,
+    volume          bigint,          -- 股（ADR 0008）
+    amount          double precision,  -- 万元（ADR 0006）
     market_cap      double precision,
     float_cap       double precision,
     source          text,

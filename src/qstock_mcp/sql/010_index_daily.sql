@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS index_daily (
     high            real,
     low             real,
     close           real,
-    volume          bigint,
-    amount          double precision,  -- 成交额（元）
+    volume          bigint,          -- 股（ADR 0008）
+    amount          double precision,  -- 成交额（万元，ADR 0006）
     amplitude       real,
     change_percent  real,
     change_amount   real,

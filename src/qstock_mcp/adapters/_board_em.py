@@ -9,7 +9,7 @@
 字符串（"X亿"/"X万"/无单位纯数字按万元）经 _money_cn 解析。
 """
 
-from ._eastmoney import _first, _int, _money_cn, _num, _wan
+from ._eastmoney import _first, _gu, _int, _money_cn, _num, _wan
 
 
 def _text(v):
@@ -38,7 +38,7 @@ def map_index_rows(records: list[dict]) -> list[dict]:
                 "latest_price": _num(r.get("最新价")),
                 "change_percent": _num(r.get("涨跌幅")),
                 "change_amount": _num(r.get("涨跌额")),
-                "volume": _int(r.get("成交量")),
+                "volume": _gu(r.get("成交量")),  # 手 → 股（ADR 0008）
                 "amount": _wan(r.get("成交额")),
                 "amplitude": _num(r.get("振幅")),  # efinance 无此列 → None
                 "high": _num(r.get("最高")),

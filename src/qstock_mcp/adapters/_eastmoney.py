@@ -4,6 +4,8 @@
 
 金额单位：全库金额统一规约为万元（ADR 0006）——东财原始列为元，经 _wan 换算；
 中文金额字符串（"X亿"/"X万"/无单位）经 _money_cn 解析为万元。
+成交量单位：全库 volume 统一规约为股（ADR 0008）——东财原始列为手，经 _gu
+×100 换算；baostock 原生为股，透传不换算。
 
 全市场快照（issue #4）：efinance(get_realtime_quotes) 与 akshare(stock_zh_a_spot_em)
 列名略有差异（昨收/昨日收盘、市盈率-动态/动态市盈率），map_spot_rows 兼容两种；
@@ -30,6 +32,12 @@ def _wan(v):
     """金额元 → 万元（全库金额统一规约到万元，ADR 0006）。"""
     n = _num(v)
     return None if n is None else n / 1e4
+
+
+def _gu(v):
+    """成交量手 → 股（全库 volume 统一规约到股，ADR 0008；东财原始列为手）。"""
+    n = _int(v)
+    return None if n is None else n * 100
 
 
 def _money_cn(v):
@@ -64,7 +72,7 @@ def map_eastmoney_rows(records: list[dict]) -> list[dict]:
                 "high": _num(r.get("最高")),
                 "low": _num(r.get("最低")),
                 "close": _num(r.get("收盘")),
-                "volume": _int(r.get("成交量")),
+                "volume": _gu(r.get("成交量")),
                 "amount": _wan(r.get("成交额")),
                 "amplitude": _num(r.get("振幅")),
                 "change_percent": _num(r.get("涨跌幅")),
@@ -96,7 +104,7 @@ def map_spot_rows(records: list[dict]) -> list[dict]:
                 "turnover_rate": _num(r.get("换手率")),
                 "pe_ratio": _num(_first(r, "市盈率-动态", "动态市盈率", "市盈率(动态)")),
                 "pb_ratio": _num(r.get("市净率")),
-                "volume": _int(r.get("成交量")),
+                "volume": _gu(r.get("成交量")),
                 "amount": _wan(r.get("成交额")),
                 "market_cap": _wan(r.get("总市值")),
                 "float_cap": _wan(r.get("流通市值")),
