@@ -48,7 +48,11 @@ def record_collection(
     detail: str | None = None,
     started_at: datetime | None = None,
 ) -> None:
-    """落一条采集台账；失败仅 log，绝不抛给调用方（台账不拖垮主流程）。"""
+    """落一条采集台账。
+
+    status 取词表外值属编程错误，fail-fast 抛 ValueError（不落账、不吞没）；
+    台账写入本身的 IO 失败仅 log，绝不抛给调用方（台账不拖垮主流程）。
+    """
     if status not in LEDGER_STATUSES:
         raise ValueError(f"未知台账状态: {status!r}（可选: {', '.join(LEDGER_STATUSES)}）")
     try:
@@ -83,6 +87,9 @@ _LOG_COLS = (
 # 单次返回行数上限：约束输出体量（query_collection_log 契约 ≤50KB）
 DEFAULT_LOG_LIMIT = 100
 MAX_LOG_LIMIT = 500
+
+# 返回体量硬上限（query_collection_log 契约）：超限从最旧行起截断
+MAX_LOG_BYTES = 50 * 1024
 
 
 def select_collection_log(

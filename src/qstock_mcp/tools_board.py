@@ -26,15 +26,16 @@ fetch_failed / 全源口径不含该指数 no_data_for_date）。
 服务端防线（issue #78，ADR 0007 补记）：boards/indices 为实时语义 section
 （REALTIME_SECTIONS），对历史日期调用返回 section 级 unsupported
 （detail=realtime_section_no_backfill）零落库；indices 段落库前校验行级日期
-==请求日期（不符 detail=date_mismatch 零落库）。
+==请求日期（不符 detail=date_mismatch 零落库）。防线拒收同样落采集台账
+（issue #77：被拒的污染尝试最值得审计）。
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, default_adapters
-from .dates import normalize_date
+from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
     UPSTREAM_RETRY_ADVICE,
@@ -149,7 +150,7 @@ def fetch_board_snapshot(
     tool = "fetch_board_snapshot"
     params = {"trade_date": trade_date, "sections": sections}
     if trade_date is None:
-        effective = date.today().strftime("%Y%m%d")
+        effective = today_str()
     else:
         try:
             effective = normalize_date(trade_date)
@@ -166,11 +167,21 @@ def fetch_board_snapshot(
         return _error(tool, params, err)
     results = {}
     try:
-        today = date.today().strftime("%Y%m%d")
+        today = today_str()
         for name in selected:
             started = datetime.now(timezone.utc)
             if effective < today and name in REALTIME_SECTIONS:
                 # 服务端防线（issue #78）：实时语义 section 不可回补历史日期，零落库
+                # 拒收也落账（issue #77）：被拒绝的历史回补尝试最值得审计
+                record_collection(
+                    conn,
+                    trade_date=effective,
+                    section=name,
+                    status="error",
+                    error_kind="unsupported",
+                    detail=f"guard_reject: {name} 为实时语义 section，拒绝历史日期回补",
+                    started_at=started,
+                )
                 results[name] = {
                     "rows": 0,
                     "status": "error",
@@ -217,6 +228,16 @@ def fetch_board_snapshot(
                     }
                 )
                 if mismatched:
+                    # 拒收也落账（issue #77）：被拒绝的污染尝试最值得审计
+                    record_collection(
+                        conn,
+                        trade_date=effective,
+                        section=name,
+                        status="error",
+                        error_kind="date_mismatch",
+                        detail=f"guard_reject: indices 行级日期 {mismatched} != {effective}",
+                        started_at=started,
+                    )
                     results[name] = {
                         "rows": 0,
                         "status": "error",

@@ -42,7 +42,7 @@ flowchart LR
         BS["baostock（第 3 位兜底）"]
     end
 
-    subgraph pg["PostgreSQL 独立新库（sql/001-014，18 张表）"]
+    subgraph pg["PostgreSQL 独立新库（sql/001-015，18 张表）"]
         T1["stock_daily / index_daily / stock_list"]
         T2["market_snapshot"]
         T3["盘面表：market_indices / market_boards /<br/>zt_pool / strong_stocks / lhb_*×5"]
@@ -90,7 +90,7 @@ flowchart LR
 - **proxy — `tools_fundamentals.py`**：基本面透传，`{section: 原始记录}` 键名保留上游、仅 JSON 安全化，不规格化、不连数据库、不落库；全失败 `status:"error"` 绝不伪造（`tools_fundamentals.py:1-8`）。
 - **conclusions — `tools_conclusions.py`**：结论读写。写入校验日期与 payload 可 JSON 序列化；同业务键重复写为 upsert，`outcome` 报告 `inserted/updated`（`tools_conclusions.py:21-59`、ADR 0003）。
 - **妙想接入 — `tools_mx.py`**：三工具共享 `_mx_exchange` 骨架（配额先检、触顶不调上游、上游触达即记账、code!=0 走统一 error 契约）。`mx_query` 妙想 mx-data 透传（同 proxy 语义：不规格化、不落库、不进 fallback 链）；`mx_search` 资讯搜索并落库 `news_items`（响应内按 news_code 去重、业务键幂等 upsert，subject 缺省 `market`/`_market`）；`query_news` 库内资讯纯读（subject + 发布时间范围过滤、倒序、limit，空结果 `count:0` 非错误，不调上游不计配额）（ADR 0005、`tools_mx.py:60-116`、`tools_mx.py:142-180`、`tools_mx.py:183-230`）。
-- **采集台账 — `tools_ledger.py` + `ledger.py`（issue #77，spec #71/W4）**：一切写库路径（fetch_daily/query_daily 自愈、fetch_market_snapshot、fetch_board_snapshot 逐 section、init 各 part、成分字典/名称表导入）每次采集动作落一行 `collection_log`（trade_date/section/status(ok·empty·error)/source/rows/error_kind/detail/起止时间，append-only 全历史保留；`record_collection` 落账失败仅 log 不拖垮主流程）；区间采集（日线）记区间尾日、区间见 detail。`query_collection_log` 按日期/section/状态过滤、完成时间倒序、limit 缺省 100 上限 500（约束输出体量），空结果 `count:0` 非错误。就绪检查语义：无台账行=未采集，empty=上游确认无数据，error=采集失败。
+- **采集台账 — `tools_ledger.py` + `ledger.py`（issue #77，spec #71/W4）**：一切写库路径（fetch_daily/query_daily 自愈、fetch_market_snapshot、fetch_board_snapshot 逐 section、init 各 part、成分字典/名称表导入）每次采集动作落一行 `collection_log`（trade_date/section/status(ok·empty·error)/source/rows/error_kind/detail/起止时间，append-only 全历史保留；`record_collection` 落账失败仅 log 不拖垮主流程）；区间采集（日线）记区间尾日、区间见 detail。`query_collection_log` 按日期/section/状态过滤、完成时间倒序、limit 缺省 100 上限 500、返回体量 50KB 硬上限（超限从最旧行起截断并带 `truncated` 标记），空结果 `count:0` 非错误。就绪检查语义：无台账行=未采集，empty=上游确认无数据，error=采集失败。
 - **调度 CLI — `scheduler.py`（issue #82/#83，spec #71/W5）**：`qstock-scheduler` 入口（pyproject `[project.scripts]`），直调 tools_* 核心层不经 MCP 协议层。子命令 `close [--date]`：收盘后批盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）经 `fetch_board_snapshot` 一次执行，逐 section 独立成败、台账由 tools_board 内联记录（本层不重复落账）；子命令 `morning [--date]`：次晨批（`tools_morning.fetch_morning_batch`，不注册 MCP 工具）——baostock `query_daily_history_k_AStock` 一把抓前一交易日全市场日线（单源不走 fallback 链，失败按三态契约分类落台账；映射 `map_astock_daily_rows`：turn→turnover_rate、adjustflag→adj、volume 股透传、amount→万元、tradestatus 权威列），按业务键 `(stock_code, trade_date, adj)` 幂等落库与头尾自愈不冲突；7 大指数白名单尾行缺失即补（尾行次日~目标日经 fetch_index_daily fallback 链，全量缺者从 1990 起点；尾行已到目标日零请求）；显式 --date 当日且盘中时被防线拒（零落库）。子命令 `backfill [--start --end]`（issue #84，`tools_backfill.fetch_boards_backfill`）：push2his 板块 K 线回补 market_boards（默认窗口 = 前一交易日前推 90 自然日；板块清单取 market_boards 去重板块集；回补行 source='push2his' 与实时采集 NULL 行区分；业务键幂等；逐板块独立成败+落台账；CLI 专用路径不经历史日期防线，仅保留盘中禁写）。close 批附概念成分积累（`tools_backfill.accumulate_em_concepts`）：boards 成功时概念板块 cons 成分入成分字典 'em' 体系（effective_date=当日，ON CONFLICT DO NOTHING），失败不拖垮主批（不影响退出码，独立落台账）。任一部分/section 失败 exit 1（明细在 stdout JSON），参数错误 exit 2，异常收敛为结构化 JSON。重复执行幂等（业务键 upsert）。launchd 安装样例见 `docs/scheduler-launchd.md`（用户自行安装；非交易日触发产生 empty 台账行，属正常语义）。
 
 ### 编排与落库
@@ -106,7 +106,7 @@ flowchart LR
 - **`_eastmoney.py` / `_board_em.py`**：东财中文列→落库行 dict 的纯函数映射，不 import 第三方库，测试无需触网；`-`/空/nan 统一映射为 None（`_eastmoney.py:1-6`、`_board_em.py:1-8`）。金额统一规约为万元：元值经 `_wan`、中文金额串（"X亿"/"X万"/无单位按万元）经 `_money_cn`（ADR 0006）。
 - **妙想不经适配层**：`mx_client.py` 是独立 HTTP 客户端（懒加载、`MX_APIKEY` 缺失报明确 `MXError`、query/search 两方法各对一个 endpoint，`mx_client.py:20-56`）；`mx_quota.py` 是本地 JSON 配额 ledger（skill×日期计数、默认 20 次/日、环境变量 `MX_DAILY_LIMIT*`/`MX_QUOTA_FILE` 覆盖、时钟与路径可注入，`mx_quota.py:15-54`）。两者只服务 `tools_mx`，不进 fallback 链（ADR 0005）。
 
-### PostgreSQL 表（`sql/001-012`，独立新库，ADR 0002）
+### PostgreSQL 表（`sql/001-015`，独立新库，ADR 0002）
 
 - 日线类：`stock_daily`（带 `adj` 与 `source` 列；`tradestatus` 权威停牌列——baostock 路径写入，东财系为 null，issue #80）、`index_daily`（指数与个股分表——`000001` 代码冲突，指数无复权）、`stock_list`（主键 `stock_code`，全量回溯标的来源）（`sql/001`、`sql/010`、`sql/009`、`sql/014`、ADR 0004）。
 - 快照类：`market_snapshot`（`sql/002`）。

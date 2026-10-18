@@ -118,8 +118,11 @@ class TestClosePartialFailure:
         assert set(out["failed_sections"]) == {"indices", "boards"}
         assert out["sections"]["indices"]["error_kind"] == "unsupported"
         assert out["sections"]["zt_pool"]["status"] == "ok"
-        # 拒收 section 零落账（未尝试采集）
-        assert _ledger_rows(pg_ready, section="indices") == []
+        # 拒收也落账（issue #77）：guard_reject 行留审计痕迹，业务零落库
+        rows = _ledger_rows(pg_ready, section="indices")
+        assert len(rows) == 1
+        assert rows[0][2] == "error"
+        assert rows[0][5] == "unsupported"
         assert len(_ledger_rows(pg_ready, section="zt_pool")) == 1
 
 

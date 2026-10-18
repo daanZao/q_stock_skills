@@ -19,12 +19,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import IndexDailyAdapter, default_adapters
+from .adapters import AStockDailyAdapter, IndexDailyAdapter, default_adapters
 from .adapters.base import FetchError, fetch_failure_kind
 from .dates import add_days, is_trading_time, normalize_date, prev_trading_day, today_str
 from .db import connect
 from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_index_daily_with_fallback
 from .ledger import record_collection
+from .output import aggregate_batch_status
 from .output import error as _error
 from .repository import select_index_daily, upsert_daily_rows, upsert_index_daily
 from .tools_init import MAJOR_INDICES
@@ -92,12 +93,7 @@ def _index_daily_part(conn, adapters: Sequence[IndexDailyAdapter], target: str) 
         })
     failed = [f for f in filled if f["status"] != "ok"]
     total_rows = sum(f.get("rows", 0) for f in filled)
-    if failed and len(failed) == len(filled):
-        status = "error"
-    elif failed:
-        status = "partial_error"
-    else:
-        status = "ok"
+    status = aggregate_batch_status(len(filled), len(failed))
     record_collection(
         conn, trade_date=target, section="index_daily",
         status="ok" if status != "error" else "error",
@@ -110,7 +106,7 @@ def _index_daily_part(conn, adapters: Sequence[IndexDailyAdapter], target: str) 
 
 def fetch_morning_batch(
     trade_date: str | None = None,
-    adapter=None,
+    adapter: AStockDailyAdapter | None = None,
     adapters: Sequence[IndexDailyAdapter] | None = None,
     now=None,
 ) -> dict:
@@ -148,12 +144,7 @@ def fetch_morning_batch(
     finally:
         conn.close()
     failed = [k for k, v in parts.items() if v["status"] == "error"]
-    if len(failed) == len(parts):
-        status = "error"
-    elif failed:
-        status = "partial_error"
-    else:
-        status = "ok"
+    status = aggregate_batch_status(len(parts), len(failed))
     out = {"status": status, "tool": tool, "params": params,
            "trade_date": target, "parts": parts}
     if failed:

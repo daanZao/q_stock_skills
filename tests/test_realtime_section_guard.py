@@ -49,6 +49,21 @@ def _count(pg_test, table: str, where: str = "") -> int:
     return n
 
 
+def _guard_ledger(pg_test, section: str) -> list[dict]:
+    """某 section 的台账行（按写入顺序）：拒收落账断言用。"""
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT trade_date, section, status, error_kind, detail"
+            " FROM collection_log WHERE section = %s ORDER BY id",
+            (section,),
+        )
+        cols = ["trade_date", "section", "status", "error_kind", "detail"]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
 # ---------------------------------------------------------------- 实时 section 历史日期拒绝
 
 
@@ -67,6 +82,13 @@ def test_realtime_section_historical_date_rejected(pg_test):
         assert sec["detail"] == "realtime_section_no_backfill"
     assert _count(pg_test, "market_boards") == 0
     assert _count(pg_test, "market_indices") == 0
+    # 拒收落账（issue #77）：被拒绝的历史回补尝试留审计痕迹
+    for name in ("boards", "indices"):
+        rows = _guard_ledger(pg_test, name)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "error"
+        assert rows[0]["error_kind"] == "unsupported"
+        assert rows[0]["detail"].startswith("guard_reject")
 
 
 def test_mixed_sections_historical_date_partial(pg_test):
@@ -107,6 +129,11 @@ def test_indices_row_date_mismatch_rejected(pg_test):
     assert sec["status"] == "error"
     assert sec["detail"] == "date_mismatch"
     assert _count(pg_test, "market_indices") == 0
+    # 拒收落账（issue #77）
+    rows = _guard_ledger(pg_test, "indices")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "error"
+    assert rows[0]["error_kind"] == "date_mismatch"
 
 
 def test_indices_row_date_match_ok(pg_test):
@@ -133,6 +160,12 @@ def test_snapshot_api_date_mismatch_rejected(pg_test):
     assert result["status"] == "error"
     assert result["detail"] == "date_mismatch"
     assert _count(pg_test, "market_snapshot") == 0
+    # 拒收落账（issue #77）：台账按请求日期记被拒的污染尝试
+    rows = _guard_ledger(pg_test, "market_snapshot")
+    assert len(rows) == 1
+    assert rows[0]["trade_date"] == "20261014"
+    assert rows[0]["status"] == "error"
+    assert rows[0]["error_kind"] == "date_mismatch"
 
 
 def test_snapshot_api_date_none_with_passed_date_rejected(pg_test):

@@ -19,9 +19,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import default_adapters
+from .adapters import BoardConsAdapter, BoardHistoryAdapter, default_adapters
 from .dates import (
     add_days,
+    dash_date,
     is_trading_time,
     normalize_date,
     prev_trading_day,
@@ -35,6 +36,7 @@ from .fetch_chain import (
     fetch_board_history_with_fallback,
 )
 from .ledger import record_collection, summarize_attempted
+from .output import aggregate_batch_status
 from .output import error as _error
 from .repository import (
     select_distinct_boards,
@@ -51,7 +53,7 @@ DEFAULT_BACKFILL_DAYS = 90  # 约 3 个月（自然日）
 def fetch_boards_backfill(
     start: str | None = None,
     end: str | None = None,
-    adapters: Sequence | None = None,
+    adapters: Sequence[BoardHistoryAdapter] | None = None,
     boards: list[dict] | None = None,
     now=None,
 ) -> dict:
@@ -124,12 +126,7 @@ def fetch_boards_backfill(
     finally:
         conn.close()
     failed = [b["board_name"] for b in results if b["status"] == "error"]
-    if len(failed) == len(results):
-        status = "error"
-    elif failed:
-        status = "partial_error"
-    else:
-        status = "ok"
+    status = aggregate_batch_status(len(results), len(failed))
     return {
         "status": status,
         "tool": tool,
@@ -142,7 +139,7 @@ def fetch_boards_backfill(
 
 def accumulate_em_concepts(
     trade_date: str | None = None,
-    adapters: Sequence | None = None,
+    adapters: Sequence[BoardConsAdapter] | None = None,
     now=None,
 ) -> dict:
     """概念成分积累：当日 market_boards 概念板块逐板抓成分，入成分字典
@@ -155,7 +152,7 @@ def accumulate_em_concepts(
         return _error(tool, params, str(e))
     if adapters is None:
         adapters = default_adapters()
-    effective = f"{target[:4]}-{target[4:6]}-{target[6:]}"  # date 列
+    effective = dash_date(target)  # date 列
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -180,12 +177,7 @@ def accumulate_em_concepts(
                  for m in r["rows"]],
                 effective,
             )
-        if failed and len(failed) == len(boards):
-            status = "error"
-        elif failed:
-            status = "partial_error"
-        else:
-            status = "ok"
+        status = aggregate_batch_status(len(boards), len(failed))
         record_collection(
             conn, trade_date=target, section="sw_industry_class",
             status="error" if status == "error" else "ok",

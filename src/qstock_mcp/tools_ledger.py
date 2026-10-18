@@ -2,14 +2,18 @@
 
 工具函数层（server.py）只做薄包装；本层是测试接缝（真实 PG 测试库，见
 tests/test_collection_log.py）。台账为 append-only 审计表（sql/013），
-查询按日期/section/状态过滤，空结果 count:0 非错误，行数上限约束输出体量。
+查询按日期/section/状态过滤，空结果 count:0 非错误；行数上限 + 50KB 体量
+硬上限双重约束输出（超限从最旧行起截断并带 truncated 标记）。
 """
+
+import json
 
 from .dates import normalize_date
 from .db import connect
 from .ledger import (
     DEFAULT_LOG_LIMIT,
     LEDGER_STATUSES,
+    MAX_LOG_BYTES,
     MAX_LOG_LIMIT,
     select_collection_log,
 )
@@ -25,7 +29,8 @@ def query_collection_log(
     """采集台账查询：按日期/section/状态过滤，按完成时间倒序返回。
 
     trade_date: yyyymmdd 或 yyyy-mm-dd；status: ok/empty/error（ADR 0007
-    三态同词汇）；limit 缺省 100、上限 500（超出截断而非报错，约束输出体量）。
+    三态同词汇）；limit 缺省 100、上限 500（超出截断而非报错）；返回体量
+    50KB 硬上限，超限从最旧行起截断并带 truncated 标记。
     空结果 count:0 非错误。
     """
     tool = "query_collection_log"
@@ -54,10 +59,19 @@ def query_collection_log(
         rows = select_collection_log(conn, trade_date, section, status, limit)
     finally:
         conn.close()
-    return {
+    # 契约 ≤50KB：超限从最旧行起截断（列表按完成时间倒序，尾部最旧）
+    truncated = False
+    while rows and len(json.dumps(rows, ensure_ascii=False).encode()) > MAX_LOG_BYTES:
+        rows.pop()
+        truncated = True
+    out = {
         "status": "ok",
         "tool": tool,
         "params": params,
         "count": len(rows),
         "rows": rows,
     }
+    if truncated:
+        out["truncated"] = True
+        out["note"] = "返回体量超 50KB，已从最旧行起截断；请用 trade_date/section 过滤缩小范围"
+    return out

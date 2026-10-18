@@ -12,6 +12,7 @@ import io
 from datetime import date
 from typing import NoReturn
 
+from ..dates import dash_date
 from ._eastmoney import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
@@ -184,9 +185,7 @@ class BaostockAdapter:
         bs = _login()
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                rs = bs.query_daily_history_k_AStock(
-                    date=f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-                )
+                rs = bs.query_daily_history_k_AStock(date=dash_date(trade_date))
             if rs.error_code != "0":
                 raise FetchError(f"baostock 查询失败: {rs.error_msg}")
             rows = []

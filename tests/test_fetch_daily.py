@@ -126,17 +126,10 @@ def test_fetch_with_days_param(pg_test):
 
 
 def _pin_today(monkeypatch, ymd: str):
-    """固定 dates 模块的"今天"（先例：test_fetch_snapshot 的 _FakeDate）。"""
+    """固定 dates 模块的"今天"（today_str 为东八区当日口径）。"""
     from qstock_mcp import dates
 
-    real_date = dates.date
-
-    class _FakeDate:
-        @staticmethod
-        def today():
-            return real_date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]))
-
-    monkeypatch.setattr(dates, "date", _FakeDate)
+    monkeypatch.setattr(dates, "today_str", lambda now=None: ymd)
 
 
 def test_fetch_with_days_empty_db_start_aligned(pg_test, monkeypatch):

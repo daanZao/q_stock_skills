@@ -12,6 +12,7 @@ no_data_for_date（status ok + empty_kind + note），语义正常非失败。
 服务端防线（issue #78，ADR 0007 补记）：传入日期与 API 生效日期不符（含 API
 未报告日期）即 status error + detail=date_mismatch 零落库，防止把执行日数据
 静默写成历史日期（#45 型污染）；"API 日期优先于传入日期"的旧契约仅限不传参。
+防线拒收同样落采集台账（issue #77：被拒的污染尝试最值得审计）。
 query_snapshot 服务端聚合与排序取前 N（issue #48）：aggregate=breadth,amount
 返回涨跌家数（含沪/深/北分市场；最新价或昨收为 NULL 的停牌行计入 no_price
 桶，up+down+flat+no_price = 过滤后总行数）与成交额合计（万元）；order_by +
@@ -20,11 +21,11 @@ limit 排序取前 N，行字段不裁剪；order_by 必须配 limit（排序后
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import SnapshotAdapter, default_adapters
-from .dates import normalize_date
+from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
     UPSTREAM_RETRY_ADVICE,
@@ -71,7 +72,7 @@ def fetch_market_snapshot(
             kind = aggregate_error_kind(e.attempted)
             record_collection(
                 conn,
-                trade_date=passed or date.today().strftime("%Y%m%d"),
+                trade_date=passed or today_str(),
                 section="market_snapshot",
                 status="error",
                 error_kind=kind,
@@ -97,6 +98,17 @@ def fetch_market_snapshot(
         if passed is not None and result["trade_date"] != passed:
             # 服务端防线（issue #78）：API 生效日期与请求日期不符即显式报错零落库，
             # 防止把执行日数据静默写成历史日期（#45 型污染）
+            # 拒收也落账（issue #77）：被拒绝的落库尝试最值得审计
+            record_collection(
+                conn,
+                trade_date=passed,
+                section="market_snapshot",
+                status="error",
+                error_kind="date_mismatch",
+                detail=f"guard_reject: API 生效日期({result['trade_date'] or '未报告'})"
+                       f" != 请求日期({passed})",
+                started_at=started,
+            )
             return _error(
                 tool,
                 params,
@@ -109,7 +121,7 @@ def fetch_market_snapshot(
         elif passed is not None:
             effective, origin = passed, "param"
         else:
-            effective, origin = date.today().strftime("%Y%m%d"), "today"
+            effective, origin = today_str(), "today"
         n = upsert_snapshot(conn, effective, result["rows"], result["source"])
         record_collection(
             conn,

@@ -77,15 +77,8 @@ def test_fetch_api_silent_with_passed_date_is_rejected(pg_test):
 
 def test_fetch_falls_back_to_today_when_api_silent_and_no_param(pg_test, monkeypatch):
     _init(pg_test)
-    # 固定"今天"使测试确定性
-    real_date = ts.date
-
-    class _FakeDate:
-        @staticmethod
-        def today():
-            return real_date(2024, 1, 5)
-
-    monkeypatch.setattr(ts, "date", _FakeDate)
+    # 固定"今天"使测试确定性（today_str 为东八区当日口径）
+    monkeypatch.setattr(ts, "today_str", lambda: "20240105")
     ef = FakeSnapshotAdapter("efinance", trade_date=None)
     result = fetch_market_snapshot(adapters=[ef])
     assert result["status"] == "ok"

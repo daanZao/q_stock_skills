@@ -314,6 +314,44 @@ class IndexDailyAdapter(Protocol):
     ) -> list[dict]: ...
 
 
+class BoardHistoryAdapter(Protocol):
+    """板块历史 K 线（issue #84 回补）协议：start/end 为 yyyymmdd 闭区间。
+
+    不复权（板块行情无复权语义）；空区间返回 [] 而非错误；by-design 不支持
+    该能力的源抛 FetchError(kind="unsupported")（不参与 fallback 故障判定）。
+    """
+
+    name: str
+
+    def fetch_board_history(
+        self, board_type: str, board_name: str, start: str, end: str
+    ) -> list[dict]: ...
+
+
+class BoardConsAdapter(Protocol):
+    """板块成分（issue #84 概念成分积累）协议：按板块名取成分股列表。
+
+    返回行至少含 stock_code；空列表表示该板块无成分，不是错误；不支持的源
+    抛 FetchError(kind="unsupported")。
+    """
+
+    name: str
+
+    def fetch_board_cons(self, board_name: str) -> list[dict]: ...
+
+
+class AStockDailyAdapter(Protocol):
+    """全市场单日 A 股日线一把抓（issue #83 次晨批）协议：trade_date 为 yyyymmdd。
+
+    单次调用返回当日全市场日线行（映射见 map_astock_daily_rows），adj='none'
+    不复权口径；当日无数据返回 []。单源接口，不走 fallback 链。
+    """
+
+    name: str
+
+    def fetch_astock_daily(self, trade_date: str) -> list[dict]: ...
+
+
 class DataAdapter(
     DailyAdapter,
     SnapshotAdapter,
@@ -321,10 +359,12 @@ class DataAdapter(
     FundamentalsAdapter,
     ListAdapter,
     IndexDailyAdapter,
+    BoardHistoryAdapter,
+    BoardConsAdapter,
     Protocol,
 ):
-    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单与指数日线的
-    适配器（fallback 链元素类型）。"""
+    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单、指数日线与
+    板块历史/成分的适配器（fallback 链元素类型）。"""
 
 
 def is_bse_code(stock_code: str) -> bool:

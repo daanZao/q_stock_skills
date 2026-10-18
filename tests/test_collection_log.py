@@ -233,3 +233,36 @@ def test_query_collection_log_param_validation(pg_test):
     assert bad_limit["status"] == "error"
     capped = query_collection_log(limit=99999)
     assert capped["status"] == "ok"  # 上限内截断而非报错
+
+
+def test_query_collection_log_size_cap(pg_test):
+    """契约 ≤50KB（spec #71/W4）：行大体量时从最旧行起截断并带 truncated 标记。"""
+    import json
+
+    _init(pg_test)
+    conn = psycopg2.connect(pg_test)
+    for i in range(150):
+        record_collection(
+            conn,
+            trade_date="20261014",
+            section="boards",
+            status="error",
+            error_kind="fetch_failed",
+            detail="x" * 480 + f"#{i}",
+        )
+    conn.close()
+
+    out = query_collection_log(trade_date="20261014", limit=500)
+    assert out["status"] == "ok"
+    assert out["truncated"] is True
+    assert "note" in out
+    assert out["count"] < 150
+    payload = json.dumps(out["rows"], ensure_ascii=False).encode()
+    assert len(payload) <= 50 * 1024
+    # 按完成时间倒序：保留最新行（尾部 #149），丢弃最旧行（#0 必被截掉）
+    details = [r["detail"] for r in out["rows"]]
+    assert details[0].endswith("#149")
+    assert not any(d.endswith("#0") for d in details)
+
+    small = query_collection_log(trade_date="20261014", section="zt_pool")
+    assert "truncated" not in small  # 未超限不带标记

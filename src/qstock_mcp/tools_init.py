@@ -20,7 +20,7 @@ import_sw_industry_meta（issue #74）：申万行业名称表（sw_industry_met
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Sequence
 
 from ._sw_classify import (
@@ -68,7 +68,7 @@ FULL_HISTORY_START = "19900101"  # 全量回溯/指数日线起点，各源自�
 
 
 def _init_stock_list(conn, adapters: Sequence[DataAdapter]) -> dict:
-    today = date.today().strftime("%Y%m%d")
+    today = today_str()
     started = datetime.now(timezone.utc)
     try:
         r = fetch_stock_list_with_fallback(adapters)
@@ -93,7 +93,7 @@ def _init_stock_list(conn, adapters: Sequence[DataAdapter]) -> dict:
 
 
 def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
-    today = date.today().strftime("%Y%m%d")
+    today = today_str()
     started = datetime.now(timezone.utc)
     try:
         r = fetch_snapshot_with_fallback(adapters)
@@ -179,7 +179,7 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
 
 def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
     """全市场个股历史日线回溯：复用日线头尾自愈，单股失败不中断。"""
-    today = date.today().strftime("%Y%m%d")
+    today = today_str()
     started = datetime.now(timezone.utc)
     codes = select_stock_codes(conn)
     if not codes:
@@ -369,7 +369,7 @@ def _ingest_ledger_hook(
     """采集台账（issue #77）：成分字典导入批次落账（source=file，行数=重载后插入数）。"""
     record_collection(
         conn,
-        trade_date=date.today().strftime("%Y%m%d"),
+        trade_date=today_str(),
         section="sw_industry_class",
         status="ok",
         source=source_system,
@@ -407,7 +407,7 @@ def import_board_classification(source_system: str, file_path: str) -> dict:
             conn.rollback()
             record_collection(
                 conn,
-                trade_date=date.today().strftime("%Y%m%d"),
+                trade_date=today_str(),
                 section="sw_industry_class",
                 status="error",
                 source=source_system,
@@ -444,7 +444,7 @@ def import_sw_industry_meta() -> dict:
             rows = upsert_sw_industry_meta(conn, load_sw_industry_meta_seed())
             record_collection(
                 conn,
-                trade_date=date.today().strftime("%Y%m%d"),
+                trade_date=today_str(),
                 section="sw_industry_meta",
                 status="ok",
                 source="seed_csv",
@@ -456,7 +456,7 @@ def import_sw_industry_meta() -> dict:
             conn.rollback()
             record_collection(
                 conn,
-                trade_date=date.today().strftime("%Y%m%d"),
+                trade_date=today_str(),
                 section="sw_industry_meta",
                 status="error",
                 detail=str(e)[:200],

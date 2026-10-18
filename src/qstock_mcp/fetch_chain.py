@@ -1,7 +1,8 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
 只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section> /
-fetch_fundamentals），不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖
+fetch_fundamentals / fetch_index_daily / fetch_board_history / fetch_board_cons），
+不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖
 fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
@@ -13,6 +14,8 @@ from typing import Callable, Sequence
 
 from .adapters.base import (
     BoardAdapter,
+    BoardConsAdapter,
+    BoardHistoryAdapter,
     DailyAdapter,
     FundamentalsAdapter,
     IndexDailyAdapter,
@@ -263,7 +266,7 @@ def fetch_index_daily_with_fallback(
 
 
 def fetch_board_history_with_fallback(
-    adapters,
+    adapters: Sequence[BoardHistoryAdapter],
     board_type: str,
     board_name: str,
     start: str,
@@ -284,7 +287,7 @@ def fetch_board_history_with_fallback(
 
 
 def fetch_board_cons_with_fallback(
-    adapters,
+    adapters: Sequence[BoardConsAdapter],
     board_name: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:

@@ -7,7 +7,7 @@ days 参数按"交易日 ≈ 自然日 7/5"加 buffer 换算成 start/end：
 """
 
 import math
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 _TZ8 = timezone(timedelta(hours=8))  # A 股语境东八区（无夏令时）
 
@@ -54,6 +54,11 @@ def normalize_date(s: str) -> str:
         raise ValueError(f"无法识别的日期: {s!r}（支持 yyyymmdd 或 yyyy-mm-dd）")
     datetime.strptime(s, "%Y%m%d")  # 校验是真实日期
     return s
+
+
+def dash_date(yyyymmdd: str) -> str:
+    """yyyymmdd → yyyy-mm-dd（上游 API 要求横线格式时的口径转换）。"""
+    return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
 
 
 def add_days(yyyymmdd: str, n: int) -> str:
@@ -107,7 +112,7 @@ def resolve_range(
     today: str | None = None,
 ) -> tuple[str, str]:
     """把 days 或 start/end 参数解析为闭区间 [start, end]（yyyymmdd）。"""
-    today = today or date.today().strftime("%Y%m%d")
+    today = today or today_str()
     if days is not None:
         if start is not None or end is not None:
             raise ValueError("days 与 start/end 不可同时使用")
