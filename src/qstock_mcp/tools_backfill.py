@@ -56,12 +56,18 @@ PROGRESS_LOG_INTERVAL_S = 60  # 距上条进度日志超过 N 秒也报（issue 
 CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 10  # 连续全源失败熔断阈值（issue #90）
 
 
+def _backfill_detail_prefix(board_type: str, board_name: str,
+                            start: str, end: str) -> str:
+    """backfill 台账 detail 前缀的单一事实来源（写入与断点续跑查询共用）。"""
+    return f"backfill {board_type}/{board_name} {start}~{end}"
+
+
 def _has_ok_backfill_ledger(conn, board_type: str, board_name: str,
                             start: str, end: str) -> bool:
     """断点续跑跳过判据（issue #91，spec #86）：同板块同窗口存在 status=ok 的
-    backfill 台账行（detail 前缀匹配，格式与本模块写入处一致，需同步维护）。
+    backfill 台账行（detail 前缀匹配）。
     empty 不算（上游当时无数据，窗口覆盖未确认）。"""
-    prefix = f"backfill {board_type}/{board_name} {start}~{end}"
+    prefix = _backfill_detail_prefix(board_type, board_name, start, end)
     pattern = (
         prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     )
@@ -150,6 +156,7 @@ def fetch_boards_backfill(
                     adapters, btype, bname, start_d, end_d)
             except AllSourcesFailed as e:
                 kind = aggregate_error_kind(e.attempted)
+                log.warning("板块历史回补失败 %s/%s: %s", btype, bname, e)
                 results.append({
                     "board_type": btype, "board_name": bname,
                     "status": "error", "rows": 0,
@@ -158,8 +165,8 @@ def fetch_boards_backfill(
                 record_collection(
                     conn, trade_date=end_d, section="market_boards",
                     status="error", error_kind=kind,
-                    detail=f"backfill {btype}/{bname} {start_d}~{end_d}: "
-                           f"{summarize_attempted(e.attempted)}",
+                    detail=_backfill_detail_prefix(btype, bname, start_d, end_d)
+                    + f": {summarize_attempted(e.attempted)}",
                     started_at=started,
                 )
                 consecutive_failures += 1
@@ -174,8 +181,8 @@ def fetch_boards_backfill(
                     conn, trade_date=end_d, section="market_boards",
                     status="ok" if n > 0 else "empty",
                     source=BACKFILL_SOURCE, rows=n,
-                    detail=f"backfill {btype}/{bname} {start_d}~{end_d}"
-                           f" fetch_source={r['source']}",
+                    detail=_backfill_detail_prefix(btype, bname, start_d, end_d)
+                    + f" fetch_source={r['source']}",
                     started_at=started,
                 )
                 consecutive_failures = 0  # ok/empty 都说明上游健康，重置计数

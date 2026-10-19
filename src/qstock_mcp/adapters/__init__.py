@@ -6,7 +6,9 @@ import socket
 # requests/urllib3 在 timeout=None 时回落到 socket 默认值；不设则上游连接
 # 挂死可无限阻塞（2026-10-19 实测 backfill 进程 99 分钟仅 3.5s CPU）。
 # 60s 不误伤 PG（本地毫秒级）与 baostock 一把抓（实测 ~20s）。
-socket.setdefaulttimeout(60)
+SOCKET_TIMEOUT_S = 60
+
+socket.setdefaulttimeout(SOCKET_TIMEOUT_S)
 
 from .base import (
     BAR_FIELDS,
