@@ -17,6 +17,7 @@ import pytest
 from qstock_mcp import scheduler
 from qstock_mcp.adapters.base import FetchError
 from qstock_mcp.db import ensure_schema
+from qstock_mcp.ledger import record_collection
 from qstock_mcp.repository import BOARD_SECTION_TABLES, upsert_board_rows
 from qstock_mcp.tools_backfill import accumulate_em_concepts, fetch_boards_backfill
 from fakes import FakeBoardAdapter, FakeBoardHistoryAdapter, _board_history_row
@@ -96,6 +97,19 @@ def _ledger(dsn, section):
                 (section,),
             )
             return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def _record_backfill_ledger(dsn, btype, bname, start, end, status="ok"):
+    """预置一条 backfill 台账行（detail 格式与 tools_backfill 写入一致）。"""
+    conn = psycopg2.connect(dsn)
+    try:
+        record_collection(
+            conn, trade_date=end, section="market_boards", status=status,
+            source="push2his", rows=3,
+            detail=f"backfill {btype}/{bname} {start}~{end} fetch_source=fake",
+        )
     finally:
         conn.close()
 
@@ -260,6 +274,53 @@ class TestBackfill:
         by_name = {b["board_name"]: b["status"] for b in out["boards"]}
         assert by_name["板块005"] == "empty"
         assert by_name["板块011"] == "ok"
+
+    def test_skip_board_with_ok_ledger_same_window(self, pg_ready):
+        """断点续跑（issue #91，spec #86）：同板块同窗口台账 ok → 跳过不抓。"""
+        _seed_realtime_boards(pg_ready)
+        _record_backfill_ledger(pg_ready, "industry", "酿酒行业",
+                                "20261013", "20261015")
+        fake = FakeBoardHistoryAdapter(history=_hist())
+        out = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake], now=NOW)
+        assert out["skipped_boards"] == ["酿酒行业"]
+        assert [c[1] for c in fake.history_calls] == ["白酒概念"]
+
+    def test_empty_ledger_not_skipped(self, pg_ready):
+        """empty（上游当时无数据，覆盖未确认）不构成跳过依据。"""
+        _seed_realtime_boards(pg_ready)
+        _record_backfill_ledger(pg_ready, "industry", "酿酒行业",
+                                "20261013", "20261015", status="empty")
+        fake = FakeBoardHistoryAdapter(history=_hist())
+        out = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake], now=NOW)
+        assert out["skipped_boards"] == []
+        assert len(fake.history_calls) == 2
+
+    def test_different_window_not_skipped(self, pg_ready):
+        """窗口不同（即便同板块已 ok）不跳过。"""
+        _seed_realtime_boards(pg_ready)
+        _record_backfill_ledger(pg_ready, "industry", "酿酒行业",
+                                "20260901", "20261012")
+        fake = FakeBoardHistoryAdapter(history=_hist())
+        out = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake], now=NOW)
+        assert out["skipped_boards"] == []
+        assert len(fake.history_calls) == 2
+
+    def test_rerun_after_success_skips_all(self, pg_ready):
+        """成功跑完后同窗口重跑：全部跳过、零抓取，幂等。"""
+        _seed_realtime_boards(pg_ready)
+        fake = FakeBoardHistoryAdapter(history=_hist())
+        out1 = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake], now=NOW)
+        assert out1["status"] == "ok"
+        fake2 = FakeBoardHistoryAdapter(history=_hist())
+        out2 = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake2], now=NOW)
+        assert fake2.history_calls == []
+        assert out2["status"] == "ok"
+        assert sorted(out2["skipped_boards"]) == sorted(["酿酒行业", "白酒概念"])
 
 
 class TestConsAccumulation:

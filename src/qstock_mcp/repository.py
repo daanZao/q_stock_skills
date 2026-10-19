@@ -508,14 +508,22 @@ def upsert_board_history(conn, rows: list[dict], source: str) -> int:
 
 def select_distinct_boards(conn, trade_date: str | None = None) -> list[dict]:
     """market_boards 去重板块清单（board_type/board_code/board_name），
-    供回补与成分积累确定目标集；trade_date 给定时只取当日出现过的板块。"""
-    sql = "SELECT DISTINCT board_type, board_code, board_name FROM market_boards"
+    供回补与成分积累确定目标集；trade_date 给定时只取当日出现过的板块。
+
+    去重键为 (board_type, board_name)：backfill 回补行无 board_code（push2his
+    K 线不带板块代码），与同板块实时行（有 code）并存，按 (type, name) 去重
+    并优先取有 code 的行（issue #91）。"""
+    sql = (
+        "SELECT DISTINCT ON (board_type, board_name)"
+        " board_type, board_code, board_name FROM market_boards"
+    )
     args: tuple = ()
     if trade_date is not None:
         sql += " WHERE trade_date = %s"
         args = (trade_date,)
+    sql += " ORDER BY board_type, board_name, board_code NULLS LAST"
     with conn.cursor() as cur:
-        cur.execute(sql + " ORDER BY board_type, board_name", args)
+        cur.execute(sql, args)
         return [
             {"board_type": t, "board_code": c, "board_name": n}
             for t, c, n in cur.fetchall()

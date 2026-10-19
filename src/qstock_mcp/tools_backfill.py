@@ -7,7 +7,9 @@ CLI 专用路径（qstock-scheduler backfill / close 的 cons 部分），不经
   market_boards，回补行带 source='push2his' 标注（实时采集行为 NULL），
   业务键 (trade_date, board_type, board_name) 幂等可重跑；默认窗口 =
   前一交易日前推约 3 个月（90 自然日）。板块清单缺省取 market_boards 去重
-  板块集。盘中禁写延伸：显式 end=当日且交易时段内报错零落库。
+  板块集；逐板先查台账断点续跑（同板块同窗口已有 ok 台账行则跳过，
+  issue #91）；连续 CIRCUIT_BREAKER_CONSECUTIVE_FAILURES 板全源失败即熔断
+  中止（issue #90）。盘中禁写延伸：显式 end=当日且交易时段内报错零落库。
 - accumulate_em_concepts：东财健康时（由调用方按 boards section 成败门控）
   概念板块成分（cons 接口）积累入成分字典 sw_industry_class
   （source_system='em'，effective_date=当日，ON CONFLICT DO NOTHING）。
@@ -52,6 +54,24 @@ DEFAULT_BACKFILL_DAYS = 90  # 约 3 个月（自然日）
 PROGRESS_LOG_EVERY = 50  # 长循环每处理 N 个板块向 stderr 报一次进度
 PROGRESS_LOG_INTERVAL_S = 60  # 距上条进度日志超过 N 秒也报（issue #89：慢路径可观测）
 CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 10  # 连续全源失败熔断阈值（issue #90）
+
+
+def _has_ok_backfill_ledger(conn, board_type: str, board_name: str,
+                            start: str, end: str) -> bool:
+    """断点续跑跳过判据（issue #91，spec #86）：同板块同窗口存在 status=ok 的
+    backfill 台账行（detail 前缀匹配，格式与本模块写入处一致，需同步维护）。
+    empty 不算（上游当时无数据，窗口覆盖未确认）。"""
+    prefix = f"backfill {board_type}/{board_name} {start}~{end}"
+    pattern = (
+        prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM collection_log WHERE section = 'market_boards'"
+            " AND status = 'ok' AND detail LIKE %s ESCAPE '\\' LIMIT 1",
+            (pattern,),
+        )
+        return cur.fetchone() is not None
 
 
 def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
@@ -101,6 +121,21 @@ def fetch_boards_backfill(
                 "板块清单为空（market_boards 无任何历史行）："
                 "请先执行收盘后批采集当日板块快照，再回补历史",
             )
+        # 断点续跑（issue #91，spec #86）：同板块同窗口台账已 ok 的板块跳过，
+        # 熔断/中断后的重跑只补缺口，不全量重抓
+        skipped = [
+            b for b in boards
+            if _has_ok_backfill_ledger(
+                conn, b["board_type"], b["board_name"], start_d, end_d)
+        ]
+        if skipped:
+            skip_keys = {(b["board_type"], b["board_name"]) for b in skipped}
+            boards = [
+                b for b in boards
+                if (b["board_type"], b["board_name"]) not in skip_keys
+            ]
+            log.info("backfill 跳过 %d 个板块（台账同窗口已 ok），待抓 %d",
+                     len(skipped), len(boards))
         results = []
         log.info("backfill 开始：%d 个板块，窗口 %s~%s",
                  len(boards), start_d, end_d)
@@ -180,6 +215,7 @@ def fetch_boards_backfill(
         "window": {"start": start_d, "end": end_d},
         "boards": results,
         "failed_boards": failed,
+        "skipped_boards": [b["board_name"] for b in skipped],
     }
     if abort_reason:
         out["aborted"] = True
