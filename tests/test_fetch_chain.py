@@ -68,3 +68,30 @@ def test_empty_rows_is_success_not_fallback():
     assert result["source"] == "efinance"
     assert result["rows"] == []
     assert ak.calls == []
+
+
+def test_retry_backoff_sleeps_increasing_with_jitter(monkeypatch):
+    """同源重试间退避（issue #87）：0.5s/1s 基数 ±25% 抖动（区间互不重叠）。"""
+    sleeps = []
+    monkeypatch.setattr("qstock_mcp.fetch_chain.sleep", sleeps.append)
+    ef = _fake("efinance", fail_times=3)  # 3 次尝试全败 → 2 次退避
+    ak = _fake("akshare")
+    result = fetch_with_fallback([ef, ak], "600519", "20240101", "20240131")
+    assert result["source"] == "akshare"
+    assert len(sleeps) == 2
+    assert 0.375 <= sleeps[0] <= 0.625
+    assert 0.75 <= sleeps[1] <= 1.25
+
+
+def test_unsupported_source_not_retried():
+    """by-design 不支持的源单次即弃（issue #87），记录 attempts=1 并正常 fallback。"""
+    from qstock_mcp.adapters import FetchError
+
+    ef = _fake("efinance", fail_times=99,
+               exc=FetchError("efinance 不支持该能力", kind="unsupported"))
+    ak = _fake("akshare")
+    result = fetch_with_fallback([ef, ak], "600519", "20240101", "20240131")
+    assert result["source"] == "akshare"
+    assert len(ef.calls) == 1
+    assert result["attempted_sources"][0]["attempts"] == 1
+    assert result["attempted_sources"][0]["failure_kind"] == "unsupported"

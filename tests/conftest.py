@@ -39,6 +39,13 @@ def reset_test_db(dsn: str) -> None:
     conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep(monkeypatch):
+    """重试退避 sleep 全局置空（issue #87）：测试不真的等待；退避专项测试
+    在本夹具生效后自行覆盖为记录器。"""
+    monkeypatch.setattr("qstock_mcp.fetch_chain.sleep", lambda _s: None)
+
+
 @pytest.fixture
 def pg_test(monkeypatch):
     """提供一个干净的测试库 DSN 并注入 PG_DSN；库内所有表在测试前清空。"""

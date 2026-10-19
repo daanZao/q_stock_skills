@@ -55,18 +55,24 @@ class FakeAdapter:
     rows 为 None 时按 rows_fn（默认工作日行）返回请求分段的行；否则固定返回
     rows（可为 []）。rows_fn=trading_rows 时按真实交易日生成，可复现非交易日
     区间返回空行的场景（issue #51）。
+    exc 非 None 时失败即抛该异常实例（模拟连接级故障/不支持等特定失败，
+    issue #87 退避与 unsupported 单试测试）。
     """
 
-    def __init__(self, name, *, fail_times=0, rows=None, rows_fn=weekday_rows):
+    def __init__(self, name, *, fail_times=0, rows=None, rows_fn=weekday_rows,
+                 exc=None):
         self.name = name
         self._fail_times = fail_times
         self._rows = rows
         self._rows_fn = rows_fn
+        self._exc = exc
         self.calls = []
 
     def fetch_daily(self, stock_code, start, end, adj="qfq"):
         self.calls.append({"start": start, "end": end, "adj": adj})
         if len(self.calls) <= self._fail_times:
+            if self._exc is not None:
+                raise self._exc
             raise FetchError(f"{self.name} boom")
         return self._rows if self._rows is not None else self._rows_fn(start, end)
 

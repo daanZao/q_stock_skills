@@ -8,8 +8,14 @@ fallback 顺序、重试次数、全失败报错。
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数、错误与
 failure_kind 故障分类——三态契约 ADR 0007）。
+
+重试韧性（issue #87，spec #86）：同源重试间按 RETRY_BACKOFF_S 指数退避
+（±25% 抖动），避免对故障源立即重打；failure_kind=unsupported 的源为
+by-design 不支持，单次即弃不重试。
 """
 
+import random
+from time import sleep
 from typing import Callable, Sequence
 
 from .adapters.base import (
@@ -25,6 +31,10 @@ from .adapters.base import (
 )
 
 DEFAULT_MAX_RETRIES = 2
+
+# 同源重试退避基数（秒，issue #87）：第 i 次重试前睡 RETRY_BACKOFF_S[i-1]
+# × ±25% 抖动；超出序列长度时沿用末值
+RETRY_BACKOFF_S = (0.5, 1.0, 2.0)
 
 UPSTREAM_RETRY_ADVICE = (
     "连接级故障通常为临时性，建议稍后重试；"
@@ -78,12 +88,20 @@ def aggregate_patch_error_kind(attempted: list[dict]) -> str:
 
 
 def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
-    """按顺序尝试各数据源，成功返回 {result, source, attempted_sources}。"""
+    """按顺序尝试各数据源，成功返回 {result, source, attempted_sources}。
+
+    同源重试间按 RETRY_BACKOFF_S 退避（±25% 抖动）；failure_kind=unsupported
+    的源单次即弃（by-design 不支持，重试无意义，issue #87）。"""
     attempted: list[dict] = []
     for adapter in adapters:
         error = None
         kind = None
-        for _ in range(max_retries + 1):
+        attempts = 0
+        for attempt in range(max_retries + 1):
+            if attempt:
+                base = RETRY_BACKOFF_S[min(attempt - 1, len(RETRY_BACKOFF_S) - 1)]
+                sleep(base * random.uniform(0.75, 1.25))
+            attempts += 1
             try:
                 result = call(adapter)
                 return {
@@ -94,10 +112,12 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
             except Exception as e:  # noqa: BLE001 - 适配器任何失败都收敛为"该源失败"
                 error = str(e)
                 kind = fetch_failure_kind(e)
+                if kind == "unsupported":
+                    break
         attempted.append(
             {
                 "source": adapter.name,
-                "attempts": max_retries + 1,
+                "attempts": attempts,
                 "error": error,
                 "failure_kind": kind,
             }
