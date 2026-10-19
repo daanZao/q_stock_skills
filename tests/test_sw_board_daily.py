@@ -92,6 +92,20 @@ def _seed(pg_test):
     conn.close()
 
 
+def _seed_daily_rows(pg_test, rows):
+    """追加显式 adj 的日线行：(stock_code, trade_date, adj, change_percent, amount)。"""
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            "INSERT INTO stock_daily"
+            " (stock_code, trade_date, adj, change_percent, amount) VALUES %s",
+            rows,
+        )
+    conn.commit()
+    conn.close()
+
+
 def _by_code(result):
     return {r["industry_code"]: r for r in result["rows"]}
 
@@ -199,6 +213,109 @@ def test_empty_date_count0(pg_test):
     assert result["status"] == "ok"
     assert result["count"] == 0
     assert result["rows"] == []
+
+
+# ------------------------------------------------- adj 动态选择（issue #92）
+
+# adj 选择测试的最小成分字典：三只股同属一个二级行业
+_ADJ_CLASS = [
+    ("000001", "240101", "2020-01-01", "sw"),
+    ("000002", "240101", "2020-01-01", "sw"),
+    ("000003", "240101", "2020-01-01", "sw"),
+]
+
+
+def _seed_class(pg_test, rows):
+    conn = psycopg2.connect(pg_test)
+    ensure_schema(conn)
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            "INSERT INTO sw_industry_class"
+            " (stock_code, board_code, effective_date, source_system) VALUES %s",
+            rows,
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_adj_dominant_none(pg_test):
+    """none 行数多于 qfq 的日子选 none（morning 批场景）：聚合只用 none 行。"""
+    _seed_class(pg_test, _ADJ_CLASS)
+    _seed_daily_rows(pg_test, [
+        ("000001", "20240102", "qfq", 9.0, 999.0),
+        ("000001", "20240102", "none", 1.0, 100.0),
+        ("000002", "20240102", "none", 3.0, 200.0),
+        ("000003", "20240102", "none", -1.0, 100.0),
+    ])
+    result = tools_sw_board.query_sw_board_daily(trade_date="20240102", level=2)
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert result["adj"] == "none"  # 顶层透明标注本次口径
+    row = result["rows"][0]
+    assert row["adj"] == "none"
+    # 只聚合 none 行：(1*100 + 3*200 - 1*100) / (100+200+100)
+    assert row["change_pct"] == pytest.approx(1.5)
+    assert row["amount"] == pytest.approx(400.0)
+    assert (row["up_count"], row["down_count"], row["flat_count"]) == (2, 1, 0)
+
+
+def test_adj_dominant_qfq(pg_test):
+    """qfq 行数多于 none 的日子选 qfq：聚合只用 qfq 行。"""
+    _seed_class(pg_test, _ADJ_CLASS)
+    _seed_daily_rows(pg_test, [
+        ("000001", "20240102", "qfq", 2.0, 100.0),
+        ("000002", "20240102", "qfq", 4.0, 300.0),
+        ("000003", "20240102", "qfq", 0.0, 100.0),
+        ("000001", "20240102", "none", 9.0, 999.0),
+    ])
+    result = tools_sw_board.query_sw_board_daily(trade_date="20240102", level=2)
+    assert result["status"] == "ok"
+    row = result["rows"][0]
+    assert row["adj"] == "qfq"
+    # (2*100 + 4*300 + 0*100) / 500
+    assert row["change_pct"] == pytest.approx(2.8)
+    assert row["amount"] == pytest.approx(500.0)
+
+
+def test_adj_tie_prefers_qfq(pg_test):
+    """各 adj 行数持平（且 qfq 在列）时取 qfq。"""
+    _seed_class(pg_test, _ADJ_CLASS)
+    _seed_daily_rows(pg_test, [
+        ("000001", "20240102", "qfq", 2.0, 100.0),
+        ("000002", "20240102", "qfq", 4.0, 100.0),
+        ("000001", "20240102", "none", 9.0, 100.0),
+        ("000003", "20240102", "none", 9.0, 100.0),
+    ])
+    result = tools_sw_board.query_sw_board_daily(trade_date="20240102", level=2)
+    assert result["status"] == "ok"
+    row = result["rows"][0]
+    assert row["adj"] == "qfq"
+    assert row["change_pct"] == pytest.approx(3.0)
+
+
+def test_dict_as_of(pg_test):
+    """顶层 dict_as_of = sw 成分字典 max effective_date（yyyymmdd）。"""
+    _seed(pg_test)
+    result = tools_sw_board.query_sw_board_daily(trade_date="20240102")
+    assert result["status"] == "ok"
+    assert result["dict_as_of"] == "20240101"  # CLASS 最大 effective_date
+
+
+def test_default_trade_date_none_only_latest(pg_test):
+    """库内最新交易日只有 none 行时（东财故障、morning 批兜底），
+    trade_date 缺省不被跳过且选中 none。"""
+    _seed(pg_test)
+    _seed_daily_rows(pg_test, [
+        ("000001", "20240103", "none", 1.0, 100.0),
+        ("000002", "20240103", "none", 2.0, 200.0),
+    ])
+    result = tools_sw_board.query_sw_board_daily()
+    assert result["status"] == "ok"
+    assert result["trade_date"] == "20240103"
+    assert result["count"] == 1
+    assert result["rows"][0]["adj"] == "none"
+    assert result["rows"][0]["change_pct"] == 1.6667  # 保留 4 位小数
 
 
 # ------------------------------------------------- industry_code 过滤

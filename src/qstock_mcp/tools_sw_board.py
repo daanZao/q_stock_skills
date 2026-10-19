@@ -1,18 +1,20 @@
 """统一查询面：query_sw_board_daily 申万板块自算行情（issue #75，spec #70）。
 
 point-in-time 成分归属（字典中 source_system='sw' 且 effective_date ≤ trade_date
-的最新行）× 库内 stock_daily（固定 adj='qfq'，与 query_daily 缺省口径一致；
-板块截面用 change_percent/amount，与复权方式无关，固定 adj 是为避免一股多行
-重复计入）。单日截面聚合下推 SQL：level=1 按行业码前 2 位补 '0000'、level=2
-按前 4 位补 '00' 聚合，聚合码形态与 sw_industry_meta 的 XX0000/XXXX00 一致，
-可直接 join 名称（缺失时 industry_name 为 None 不报错）。change_pct 为成交额
-加权（停牌占位行 change_percent/amount 为 null 时从权重剔除并归一；涨/跌/平
-家数与加权同一口径，双非 null 才计家数），amount 为成交额合计（万元，库内
-已是万元口径，ADR 0006），stock_count 为 point-in-time 归属该行业的成分股
-总数（当日无日线行的成分也计入），counted_count 为参与加权计算数，差即停牌/
-无当日行情数；全行业当日无任何日线行时该行业不出现。字典未覆盖的股票（含
-非 sw 体系成分）不参与聚合，不报错。每行携带 basis: "sw_amount_weighted"
-口径标注。
+的最新行）× 库内 stock_daily（横截面 adj 动态选择，issue #92：当日各 adj 行数
+多者胜、平局取 qfq；单一 adj 防一股多行重复计入；板块截面用
+change_percent/amount，与复权方式无关，选择逻辑在
+repository.select_dominant_adj）。单日截面聚合下推 SQL：level=1 按行业码前 2
+位补 '0000'、level=2 按前 4 位补 '00' 聚合，聚合码形态与 sw_industry_meta 的
+XX0000/XXXX00 一致，可直接 join 名称（缺失时 industry_name 为 None 不报错）。
+change_pct 为成交额加权（停牌占位行 change_percent/amount 为 null 时从权重
+剔除并归一；涨/跌/平家数与加权同一口径，双非 null 才计家数），amount 为
+成交额合计（万元，库内已是万元口径，ADR 0006），stock_count 为 point-in-time
+归属该行业的成分股总数（当日无日线行的成分也计入），counted_count 为参与
+加权计算数，差即停牌/无当日行情数；全行业当日无任何日线行时该行业不出现。
+字典未覆盖的股票（含非 sw 体系成分）不参与聚合，不报错。每行携带
+basis: "sw_amount_weighted" 口径标注与实际使用的 adj；输出顶层带 adj 与
+dict_as_of（成分字典 max effective_date，yyyymmdd，供复盘侧发现字典陈旧）。
 """
 
 import logging
@@ -20,7 +22,12 @@ import logging
 from .dates import normalize_date
 from .db import connect, ensure_schema
 from .output import error as _error
-from .repository import select_latest_daily_date, select_sw_board_daily
+from .repository import (
+    select_dominant_adj,
+    select_latest_daily_date,
+    select_sw_board_daily,
+    select_sw_dict_as_of,
+)
 
 log = logging.getLogger(__name__)
 
@@ -76,11 +83,13 @@ def query_sw_board_daily(
             ensure_schema(conn)
             if trade_date is None:
                 trade_date = select_latest_daily_date(conn)
-            rows = (
-                select_sw_board_daily(conn, trade_date, level, prefix)
-                if trade_date is not None
-                else []
-            )
+            adj = None
+            rows: list[dict] = []
+            if trade_date is not None:
+                adj = select_dominant_adj(conn, trade_date)
+                if adj is not None:
+                    rows = select_sw_board_daily(conn, trade_date, level, prefix, adj)
+            dict_as_of = select_sw_dict_as_of(conn)
         except Exception as e:  # noqa: BLE001 - 工具层把异常收敛为自描述错误
             log.exception("申万板块行情查询失败")
             return _error(tool, params, f"申万板块行情查询失败: {e}")
@@ -91,6 +100,8 @@ def query_sw_board_daily(
         "tool": tool,
         "params": params,
         "trade_date": trade_date,
+        "adj": adj,
+        "dict_as_of": dict_as_of,
         "count": len(rows),
         "rows": rows,
     }

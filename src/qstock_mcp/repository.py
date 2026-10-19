@@ -906,10 +906,40 @@ def upsert_sw_industry_meta(conn, rows: list[dict]) -> int:
 
 
 def select_latest_daily_date(conn) -> str | None:
-    """stock_daily 库内最新交易日（qfq 口径，与板块聚合行口径一致）。"""
+    """stock_daily 库内最新交易日（不限 adj，issue #92：none-only 的交易日不跳过）。"""
     with conn.cursor() as cur:
-        cur.execute("SELECT max(trade_date) FROM stock_daily WHERE adj = 'qfq'")
+        cur.execute("SELECT max(trade_date) FROM stock_daily")
         return cur.fetchone()[0]
+
+
+def select_dominant_adj(conn, trade_date: str) -> str | None:
+    """当日横截面口径 adj：各 adj 行数多者胜、平局取 qfq（issue #92）。
+
+    单一 adj 防一股双行重复计入；截面指标 change_pct/amount 与复权方式无关。
+    当日无任何日线行返回 None。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT adj FROM stock_daily WHERE trade_date = %s"
+            " GROUP BY adj"
+            " ORDER BY COUNT(*) DESC,"
+            " CASE WHEN adj = 'qfq' THEN 0 ELSE 1 END, adj"
+            " LIMIT 1",
+            (trade_date,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def select_sw_dict_as_of(conn) -> str | None:
+    """sw 成分字典 max effective_date（yyyymmdd）；无行返回 None。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT max(effective_date) FROM sw_industry_class"
+            " WHERE source_system = 'sw'"
+        )
+        d = cur.fetchone()[0]
+        return d.strftime("%Y%m%d") if d is not None else None
 
 
 _SW_BOARD_AGG_SQL = """
@@ -939,7 +969,7 @@ agg AS (
                AS counted_count
     FROM pit p
     LEFT JOIN stock_daily d
-      ON d.stock_code = p.stock_code AND d.trade_date = %s AND d.adj = 'qfq'
+      ON d.stock_code = p.stock_code AND d.trade_date = %s AND d.adj = %s
     {where}
     GROUP BY 1
     HAVING COUNT(d.stock_code) > 0
@@ -954,10 +984,12 @@ ORDER BY a.industry_code
 
 
 def select_sw_board_daily(
-    conn, trade_date: str, level: int, prefix: str | None = None
+    conn, trade_date: str, level: int, prefix: str | None = None, adj: str = "qfq"
 ) -> list[dict]:
-    """单日截面：point-in-time 成分 × stock_daily(qfq) 按行业聚合（下推 SQL）。
+    """单日截面：point-in-time 成分 × stock_daily(adj 由调用方选定) 按行业聚合
+    （下推 SQL）。
 
+    adj 为当日横截面口径（select_dominant_adj 选定，issue #92），每行回带。
     聚合码形态与 sw_industry_meta 一致（一级前2位补 0000、二级前4位补 00），
     名称 join 缺失时 industry_name 为 None。change_pct 为成交额加权
     （change_percent 或 amount 为 null 的停牌占位行从权重剔除并归一，spec #70）；
@@ -967,7 +999,7 @@ def select_sw_board_daily(
     全行业当日无任何日线行时该行业不出现（HAVING），空日期 count:0。
     amount 单位万元（库内已是万元口径，ADR 0006）。每行携带 basis 口径标注。
     """
-    where, args = "", [trade_date, level, trade_date]
+    where, args = "", [trade_date, level, trade_date, adj]
     if prefix is not None:
         where = "WHERE p.board_code LIKE %s"
         args.append(prefix + "%")
@@ -984,6 +1016,7 @@ def select_sw_board_daily(
                 "amount": round(float(amt), 2) if amt is not None else None,
                 "stock_count": stocks,
                 "counted_count": counted,
+                "adj": adj,
                 "basis": "sw_amount_weighted",
             }
             for code, name, pct, up, down, flat, amt, stocks, counted
