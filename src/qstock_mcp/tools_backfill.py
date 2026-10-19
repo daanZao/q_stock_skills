@@ -17,6 +17,7 @@ CLI 专用路径（qstock-scheduler backfill / close 的 cons 部分），不经
 
 import logging
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Sequence
 
 from .adapters import BoardConsAdapter, BoardHistoryAdapter, default_adapters
@@ -49,6 +50,17 @@ log = logging.getLogger(__name__)
 BACKFILL_SOURCE = "push2his"
 DEFAULT_BACKFILL_DAYS = 90  # 约 3 个月（自然日）
 PROGRESS_LOG_EVERY = 50  # 长循环每处理 N 个板块向 stderr 报一次进度
+PROGRESS_LOG_INTERVAL_S = 60  # 距上条进度日志超过 N 秒也报（issue #89：慢路径可观测）
+
+
+def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
+    """双阈值进度判定（issue #89，spec #86）：计数每 PROGRESS_LOG_EVERY 板或
+    距上次报告 ≥PROGRESS_LOG_INTERVAL_S 秒，先到先打；收尾必打。"""
+    return (
+        i % PROGRESS_LOG_EVERY == 0
+        or i == total
+        or now_m - last_logged >= PROGRESS_LOG_INTERVAL_S
+    )
 
 
 def fetch_boards_backfill(
@@ -91,6 +103,7 @@ def fetch_boards_backfill(
         results = []
         log.info("backfill 开始：%d 个板块，窗口 %s~%s",
                  len(boards), start_d, end_d)
+        last_logged = monotonic()
         for i, b in enumerate(boards, 1):
             btype, bname = b["board_type"], b["board_name"]
             started = datetime.now(timezone.utc)
@@ -126,7 +139,9 @@ def fetch_boards_backfill(
                            f" fetch_source={r['source']}",
                     started_at=started,
                 )
-            if i % PROGRESS_LOG_EVERY == 0 or i == len(boards):
+            now_m = monotonic()
+            if _progress_due(i, len(boards), last_logged, now_m):
+                last_logged = now_m
                 done_ok = sum(1 for x in results if x["status"] != "error")
                 log.info(
                     "backfill 进度 %d/%d：成功 %d、失败 %d、累计落库 %d 行",
@@ -174,6 +189,7 @@ def accumulate_em_concepts(
         inserted = 0
         failed: list[str] = []
         log.info("cons 开始：%d 个概念板块", len(boards))
+        last_logged = monotonic()
         for i, b in enumerate(boards, 1):
             try:
                 r = fetch_board_cons_with_fallback(adapters, b["board_name"])
@@ -187,7 +203,9 @@ def accumulate_em_concepts(
                      for m in r["rows"]],
                     effective,
                 )
-            if i % PROGRESS_LOG_EVERY == 0 or i == len(boards):
+            now_m = monotonic()
+            if _progress_due(i, len(boards), last_logged, now_m):
+                last_logged = now_m
                 log.info("cons 进度 %d/%d：失败 %d、累计写入 %d 行",
                          i, len(boards), len(failed), inserted)
         status = aggregate_batch_status(len(boards), len(failed))

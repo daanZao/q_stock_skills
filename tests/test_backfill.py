@@ -195,6 +195,22 @@ class TestBackfill:
         assert any("backfill 进度 2/2" in m and "累计落库 6 行" in m
                    for m in msgs)
 
+    def test_progress_time_threshold(self, pg_ready, caplog, monkeypatch):
+        """时间阈值（issue #89，spec #86）：距上条进度 ≥60s 即打，不等计数阈值。"""
+        import qstock_mcp.tools_backfill as tb
+
+        monkeypatch.setattr(tb, "PROGRESS_LOG_EVERY", 1000)  # 计数阈值不触发
+        clock = iter([0, 100, 200, 300])  # 开始 t=0；第 1 板处理完已 100s
+        monkeypatch.setattr(tb, "monotonic", lambda: next(clock))
+        _seed_realtime_boards(pg_ready)
+        with caplog.at_level(logging.INFO, logger="qstock_mcp.tools_backfill"):
+            fetch_boards_backfill(
+                start="20261013", end="20261015",
+                adapters=[FakeBoardHistoryAdapter(history=_hist())], now=NOW)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("backfill 进度 1/2" in m for m in msgs)  # 时间阈值触发
+        assert any("backfill 进度 2/2" in m for m in msgs)  # 收尾必打
+
 
 class TestConsAccumulation:
     def test_cons_rows_land(self, pg_ready):
@@ -228,6 +244,19 @@ class TestConsAccumulation:
         assert _cons_rows(pg_ready) == []
         ledger = _ledger(pg_ready, "sw_industry_class")
         assert ledger[0][1] == "error"
+
+    def test_cons_progress_logged(self, pg_ready, caplog, monkeypatch):
+        """cons 循环与 backfill 同套进度语义（issue #89）：计数阈值触发。"""
+        import qstock_mcp.tools_backfill as tb
+
+        monkeypatch.setattr(tb, "PROGRESS_LOG_EVERY", 1)
+        _seed_realtime_boards(pg_ready)
+        with caplog.at_level(logging.INFO, logger="qstock_mcp.tools_backfill"):
+            accumulate_em_concepts(
+                trade_date=END, adapters=[FakeBoardHistoryAdapter()], now=NOW)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("cons 开始：1 个概念板块" in m for m in msgs)
+        assert any("cons 进度 1/1" in m for m in msgs)
 
 
 class TestSchedulerIntegration:
