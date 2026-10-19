@@ -4,7 +4,11 @@
 （amplitude/turnover 等）置 null；缺失值不伪造。
 """
 
+import socket
+
 import pytest
+
+import qstock_mcp.adapters  # noqa: F401 - 导入即装配全局 socket 超时（issue #88）
 
 from qstock_mcp.adapters._eastmoney import _money_cn, map_eastmoney_rows, map_spot_rows, spot_trade_date
 from qstock_mcp.adapters._board_em import map_board_history_rows, map_cons_rows
@@ -30,6 +34,13 @@ EASTMONEY_RECORD = {
     "涨跌额": "0.2",
     "换手率": "1.5",
 }
+
+
+def test_default_socket_timeout_assembled():
+    """全局 socket 超时装配（issue #88，spec #86）：efinance/akshare 不透传
+    timeout，requests/urllib3 在 timeout=None 时回落到 socket 默认值；
+    导入 adapters 包即生效，连接挂死从无限阻塞变为 60s 有界失败。"""
+    assert socket.getdefaulttimeout() == 60
 
 
 def test_eastmoney_mapping_full_row():

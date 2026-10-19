@@ -1,5 +1,13 @@
 """数据源适配层：真实适配器与测试 fake 共用同一协议（见 base.py）。"""
 
+import socket
+
+# 全局 socket 超时（issue #88，spec #86）：efinance/akshare 不透传 timeout，
+# requests/urllib3 在 timeout=None 时回落到 socket 默认值；不设则上游连接
+# 挂死可无限阻塞（2026-10-19 实测 backfill 进程 99 分钟仅 3.5s CPU）。
+# 60s 不误伤 PG（本地毫秒级）与 baostock 一把抓（实测 ~20s）。
+socket.setdefaulttimeout(60)
+
 from .base import (
     BAR_FIELDS,
     SNAPSHOT_FIELDS,
