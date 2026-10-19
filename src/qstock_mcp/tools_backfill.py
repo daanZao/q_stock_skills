@@ -51,6 +51,7 @@ BACKFILL_SOURCE = "push2his"
 DEFAULT_BACKFILL_DAYS = 90  # 约 3 个月（自然日）
 PROGRESS_LOG_EVERY = 50  # 长循环每处理 N 个板块向 stderr 报一次进度
 PROGRESS_LOG_INTERVAL_S = 60  # 距上条进度日志超过 N 秒也报（issue #89：慢路径可观测）
+CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 10  # 连续全源失败熔断阈值（issue #90）
 
 
 def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
@@ -104,6 +105,8 @@ def fetch_boards_backfill(
         log.info("backfill 开始：%d 个板块，窗口 %s~%s",
                  len(boards), start_d, end_d)
         last_logged = monotonic()
+        consecutive_failures = 0
+        abort_reason = None
         for i, b in enumerate(boards, 1):
             btype, bname = b["board_type"], b["board_name"]
             started = datetime.now(timezone.utc)
@@ -124,6 +127,7 @@ def fetch_boards_backfill(
                            f"{summarize_attempted(e.attempted)}",
                     started_at=started,
                 )
+                consecutive_failures += 1
             else:
                 n = upsert_board_history(conn, r["rows"], BACKFILL_SOURCE)
                 results.append({
@@ -139,6 +143,23 @@ def fetch_boards_backfill(
                            f" fetch_source={r['source']}",
                     started_at=started,
                 )
+                consecutive_failures = 0  # ok/empty 都说明上游健康，重置计数
+            # 熔断（issue #90，spec #86）：连续全源失败即中止——不区分
+            # failure_kind（故障上游常 connection 级与 5xx 混合出现），避免在
+            # 故障上游上空磨全部板块；已落库数据与逐板台账保留，幂等可续跑
+            if consecutive_failures >= CIRCUIT_BREAKER_CONSECUTIVE_FAILURES:
+                abort_reason = (
+                    f"连续 {consecutive_failures} 个板块全源失败，"
+                    f"熔断于第 {i}/{len(boards)} 板（{bname}）：上游疑似故障"
+                )
+                log.warning("backfill aborted：%s", abort_reason)
+                record_collection(
+                    conn, trade_date=end_d, section="market_boards",
+                    status="error", error_kind=kind,
+                    detail=f"backfill aborted：{abort_reason}",
+                    started_at=started,
+                )
+                break
             now_m = monotonic()
             if _progress_due(i, len(boards), last_logged, now_m):
                 last_logged = now_m
@@ -150,8 +171,9 @@ def fetch_boards_backfill(
     finally:
         conn.close()
     failed = [b["board_name"] for b in results if b["status"] == "error"]
-    status = aggregate_batch_status(len(results), len(failed))
-    return {
+    status = ("error" if abort_reason
+              else aggregate_batch_status(len(results), len(failed)))
+    out: dict = {
         "status": status,
         "tool": tool,
         "params": params,
@@ -159,6 +181,10 @@ def fetch_boards_backfill(
         "boards": results,
         "failed_boards": failed,
     }
+    if abort_reason:
+        out["aborted"] = True
+        out["abort_reason"] = abort_reason
+    return out
 
 
 def accumulate_em_concepts(

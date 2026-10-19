@@ -53,6 +53,25 @@ def _seed_realtime_boards(dsn, trade_date=END):
         conn.close()
 
 
+def _seed_many_boards(dsn, n, trade_date=END):
+    """种子 n 个概念板块（板块000..板块{n-1}），驱动熔断阈值测试（issue #90）。
+
+    select_distinct_boards 按 (board_type, board_name) 排序：同 type 同前缀下
+    数字后缀保证处理顺序 = 编号顺序。
+    """
+    table, date_col, key_cols, fields = BOARD_SECTION_TABLES["boards"][0]
+    conn = psycopg2.connect(dsn)
+    try:
+        upsert_board_rows(
+            conn, table, date_col, key_cols, fields, trade_date,
+            [{"board_type": "concept", "board_code": f"BK{i:04d}",
+              "board_name": f"板块{i:03d}", "latest_price": 1.0,
+              "change_percent": 1.0} for i in range(n)],
+        )
+    finally:
+        conn.close()
+
+
 def _board_rows(dsn, trade_date):
     conn = psycopg2.connect(dsn)
     try:
@@ -211,6 +230,37 @@ class TestBackfill:
         assert any("backfill 进度 1/2" in m for m in msgs)  # 时间阈值触发
         assert any("backfill 进度 2/2" in m for m in msgs)  # 收尾必打
 
+    def test_circuit_breaker_aborts_after_consecutive_failures(self, pg_ready):
+        """连续 10 板全源失败即熔断（issue #90，spec #86）：中止，不磨完全部。"""
+        _seed_many_boards(pg_ready, 12)
+        fake = FakeBoardHistoryAdapter(
+            fail_history=tuple(f"板块{i:03d}" for i in range(12)))
+        out = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake], now=NOW)
+        assert out["status"] == "error"
+        assert out["aborted"] is True
+        assert "熔断" in out["abort_reason"]
+        assert len(out["boards"]) == 10  # 第 10 板熔断，剩余 2 板未处理
+        ledger = _ledger(pg_ready, "market_boards")
+        assert len(ledger) == 11  # 10 条逐板 error + 1 条整体 aborted
+        assert "aborted" in ledger[-1][5]
+
+    def test_circuit_breaker_reset_by_ok_and_empty(self, pg_ready):
+        """成功与 empty（上游健康无数据）都重置连续计数，间歇失败不熔断。"""
+        _seed_many_boards(pg_ready, 12)
+        fake = FakeBoardHistoryAdapter(
+            history={("concept", "板块005"): []},  # empty 区间
+            fail_history=tuple(
+                f"板块{i:03d}" for i in (0, 1, 2, 3, 4, 6, 7, 8, 9, 10)))
+        out = fetch_boards_backfill(
+            start="20261013", end="20261015", adapters=[fake], now=NOW)
+        assert "aborted" not in out
+        assert out["status"] == "partial_error"
+        assert len(out["boards"]) == 12
+        by_name = {b["board_name"]: b["status"] for b in out["boards"]}
+        assert by_name["板块005"] == "empty"
+        assert by_name["板块011"] == "ok"
+
 
 class TestConsAccumulation:
     def test_cons_rows_land(self, pg_ready):
@@ -276,6 +326,18 @@ class TestSchedulerIntegration:
             lambda **kw: {"status": "partial_error", "failed_boards": ["白酒概念"]})
         rc = scheduler.main(["backfill", "--start", "20261014"])
         assert rc == 1
+
+    def test_backfill_aborted_exit_1(self, pg_ready, capsys, monkeypatch):
+        """熔断中止（issue #90）：exit 1 且 aborted/abort_reason 透传到 stdout JSON。"""
+        monkeypatch.setattr(
+            scheduler, "fetch_boards_backfill",
+            lambda **kw: {"status": "error", "aborted": True,
+                          "abort_reason": "连续 10 个板块全源失败",
+                          "boards": [], "failed_boards": []})
+        rc = scheduler.main(["backfill"])
+        out = json.loads(capsys.readouterr().out)
+        assert rc == 1
+        assert out["aborted"] is True
 
     def test_close_runs_cons_when_boards_ok(self, pg_ready, capsys):
         rc = scheduler.main(
