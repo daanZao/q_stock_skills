@@ -23,6 +23,7 @@ section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数
 
 import argparse
 import json
+import logging
 import sys
 from typing import Sequence
 
@@ -114,6 +115,9 @@ def main(argv: list[str] | None = None,
     p_backfill.add_argument("--end", default=None,
                             help="回补终点 yyyymmdd，缺省前一交易日")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
+    # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
+    # stderr"同契约）
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     try:
         if args.command == "close":

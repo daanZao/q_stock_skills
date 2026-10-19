@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 
 BACKFILL_SOURCE = "push2his"
 DEFAULT_BACKFILL_DAYS = 90  # 约 3 个月（自然日）
+PROGRESS_LOG_EVERY = 50  # 长循环每处理 N 个板块向 stderr 报一次进度
 
 
 def fetch_boards_backfill(
@@ -88,7 +89,9 @@ def fetch_boards_backfill(
                 "请先执行收盘后批采集当日板块快照，再回补历史",
             )
         results = []
-        for b in boards:
+        log.info("backfill 开始：%d 个板块，窗口 %s~%s",
+                 len(boards), start_d, end_d)
+        for i, b in enumerate(boards, 1):
             btype, bname = b["board_type"], b["board_name"]
             started = datetime.now(timezone.utc)
             try:
@@ -108,21 +111,27 @@ def fetch_boards_backfill(
                            f"{summarize_attempted(e.attempted)}",
                     started_at=started,
                 )
-                continue
-            n = upsert_board_history(conn, r["rows"], BACKFILL_SOURCE)
-            results.append({
-                "board_type": btype, "board_name": bname,
-                "status": "ok" if n > 0 else "empty",
-                "rows": n, "source": r["source"],
-            })
-            record_collection(
-                conn, trade_date=end_d, section="market_boards",
-                status="ok" if n > 0 else "empty",
-                source=BACKFILL_SOURCE, rows=n,
-                detail=f"backfill {btype}/{bname} {start_d}~{end_d}"
-                       f" fetch_source={r['source']}",
-                started_at=started,
-            )
+            else:
+                n = upsert_board_history(conn, r["rows"], BACKFILL_SOURCE)
+                results.append({
+                    "board_type": btype, "board_name": bname,
+                    "status": "ok" if n > 0 else "empty",
+                    "rows": n, "source": r["source"],
+                })
+                record_collection(
+                    conn, trade_date=end_d, section="market_boards",
+                    status="ok" if n > 0 else "empty",
+                    source=BACKFILL_SOURCE, rows=n,
+                    detail=f"backfill {btype}/{bname} {start_d}~{end_d}"
+                           f" fetch_source={r['source']}",
+                    started_at=started,
+                )
+            if i % PROGRESS_LOG_EVERY == 0 or i == len(boards):
+                done_ok = sum(1 for x in results if x["status"] != "error")
+                log.info(
+                    "backfill 进度 %d/%d：成功 %d、失败 %d、累计落库 %d 行",
+                    i, len(boards), done_ok, i - done_ok,
+                    sum(x["rows"] for x in results))
     finally:
         conn.close()
     failed = [b["board_name"] for b in results if b["status"] == "error"]
@@ -164,19 +173,23 @@ def accumulate_em_concepts(
         ]
         inserted = 0
         failed: list[str] = []
-        for b in boards:
+        log.info("cons 开始：%d 个概念板块", len(boards))
+        for i, b in enumerate(boards, 1):
             try:
                 r = fetch_board_cons_with_fallback(adapters, b["board_name"])
             except AllSourcesFailed as e:
                 log.warning("概念成分抓取失败 %s: %s", b["board_name"], e)
                 failed.append(b["board_name"])
-                continue
-            inserted += upsert_em_cons(
-                conn,
-                [{"stock_code": m["stock_code"], "board_code": b["board_code"]}
-                 for m in r["rows"]],
-                effective,
-            )
+            else:
+                inserted += upsert_em_cons(
+                    conn,
+                    [{"stock_code": m["stock_code"], "board_code": b["board_code"]}
+                     for m in r["rows"]],
+                    effective,
+                )
+            if i % PROGRESS_LOG_EVERY == 0 or i == len(boards):
+                log.info("cons 进度 %d/%d：失败 %d、累计写入 %d 行",
+                         i, len(boards), len(failed), inserted)
         status = aggregate_batch_status(len(boards), len(failed))
         record_collection(
             conn, trade_date=target, section="sw_industry_class",

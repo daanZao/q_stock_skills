@@ -8,6 +8,7 @@ backfill：push2his 板块 K 线同口径回补行业+概念板块历史入 mark
 """
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -177,6 +178,22 @@ class TestBackfill:
         assert all(r[0] == "20261015" and r[1] == "ok" and r[3] == 3 for r in ledger)
         assert all(r[2] == "push2his" for r in ledger)  # 落库口径源；抓取源在 detail
         assert "20261013~20261015" in ledger[0][5]
+
+    def test_progress_logged(self, pg_ready, caplog, monkeypatch):
+        """长循环定期向 stderr 报进度（PROGRESS_LOG_EVERY 可覆盖）。"""
+        import qstock_mcp.tools_backfill as tb
+
+        monkeypatch.setattr(tb, "PROGRESS_LOG_EVERY", 1)
+        _seed_realtime_boards(pg_ready)
+        with caplog.at_level(logging.INFO, logger="qstock_mcp.tools_backfill"):
+            fetch_boards_backfill(
+                start="20261013", end="20261015",
+                adapters=[FakeBoardHistoryAdapter(history=_hist())], now=NOW)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("backfill 开始：2 个板块" in m for m in msgs)
+        assert any("backfill 进度 1/2" in m for m in msgs)
+        assert any("backfill 进度 2/2" in m and "累计落库 6 行" in m
+                   for m in msgs)
 
 
 class TestConsAccumulation:

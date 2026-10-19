@@ -58,6 +58,8 @@ pip install -e ".[sources,dev]"   # sources = efinance/akshare/baostock 真实�
 
 想脱离项目目录全局可用，就装进常驻环境（如 `pipx install .` 或用户级 pip），让 `qstock-mcp` 落在 PATH 上；否则一律写绝对路径。
 
+同一次安装还会注册调度 CLI `qstock-scheduler`（见下节「定时采集与历史补录」）。
+
 环境变量一律放进 MCP client 配置的 `env` 块里——GUI 类 client 不一定继承你 shell 里 `export` 的变量。完整清单：
 
 | 变量 | 必填 | 说明 |
@@ -98,6 +100,35 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 Ctrl+C 退出。握手本身不触库；若要手动实测工具调用，先在当前 shell 里 `export PG_DSN`（以及可选的 `MX_APIKEY`）。注意：手动启动走的是前台 stdio 通道，不是常驻后台服务；要让 agent 长期使用，仍应配进 MCP client 由它管理生命周期。
 
+## 定时采集与历史补录（CLI）
+
+MCP server 只提供工具，**自己不会按点采集**。日常数据靠独立的调度 CLI `qstock-scheduler`（与 `qstock-mcp` 同一次 `pip install` 注册），它直调 tools_* 核心层、不经 MCP 协议层：
+
+| 子命令 | 用途 | 建议执行时机 |
+| --- | --- | --- |
+| `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集 | 交易日 15:30 之后 |
+| `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
+| `backfill [--start D] [--end D]` | 板块历史回补：push2his 板块 K 线回补 `market_boards`（重操作，回补行带 `source='push2his'` 标注） | 手动/灾难恢复，非定时任务 |
+
+耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求）；`close` 数分钟到十几分钟（cons 成分积累逐概念板块抓取）；`backfill` 取决于板块数 × 窗口，全量（约千板块）默认 3 个月窗口通常几十分钟。
+
+重复执行幂等（各业务键 upsert），每次执行落采集台账（可用 MCP 工具 `query_collection_log` 查询）；退出码 0=全部成功，1=任一部分失败（明细在 stdout JSON），2=参数错误。长时间运行的批（backfill 全量约千个板块、cons 概念成分逐板块）每 50 个板块向 **stderr** 打一条进度（已处理/成功/失败/累计落库行数），stdout 始终只留给最终结构化 JSON。
+
+**漏采补录示例**：某天定时任务没跑、复盘发现缺数时，按数据类型选路径——
+
+```bash
+# 补 10-15、10-16 的全市场个股日线与指数日线（index_daily/stock_daily）
+qstock-scheduler morning --date 20261015
+qstock-scheduler morning --date 20261016
+
+# 补 10-14~10-16 的板块行情（market_boards；约 1000 个板块 × 3 日，重操作）
+qstock-scheduler backfill --start 20261014 --end 20261016
+```
+
+注意可补性边界：`zt_pool`/`strong_stocks`/`lhb` 也可直接走 MCP `fetch_board_snapshot` 补历史日期；但 `indices`/`boards` 属实时语义 section，**MCP 路径对历史日期硬拒绝**（issue #78，防"把最新数据写成历史日期"），板块只能经上面的 `backfill` CLI 补；`market_snapshot`（涨跌家数/两市成交额）没有历史 API，漏采即永久缺失。因此定时任务的当日告警比事后补录更重要。
+
+launchd/cron 安装样例见 [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)（用户自行安装；非交易日触发产生 empty 台账行，属正常语义）。
+
 ## 输出契约
 
 所有工具与 skill 脚本输出自描述 JSON：成功 `status:"ok"` + 参数回显 + 实际数据源；数据不足 `status:"insufficient_data"`（非错误）；失败 `status:"error"` + 已尝试数据源与原因。抓取类工具的错误另带机器可读三态分类（`error_kind`：`upstream_unreachable` 上游连接级故障、可稍后重试 / `no_data_for_date` 当日无数据 / `empty_ok` 正常空结果，语义见 ADR 0007）。日志只走 stderr，不进数据通道。
@@ -115,4 +146,5 @@ pytest tests/ skills/
 - [`docs/knowledge-graph.md`](docs/knowledge-graph.md)：项目知识图谱——总览图、实体清单、关键流程、「想改 X 先看哪里」
 - [`CONTEXT.md`](CONTEXT.md)：领域词汇表
 - [`docs/adr/`](docs/adr/)：设计决策（MCP 边界 / PG 选型 / 通用结论表 / init 设计 / 妙想接入 / 金额单位万元 / 抓取三态错误契约）
+- [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)：`qstock-scheduler` 定时采集的 launchd 安装样例
 - [`docs/agents/`](docs/agents/)：agent 协作约定（issue 流程、triage 标签）
