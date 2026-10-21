@@ -8,20 +8,16 @@ attempted_sources，绝不返回过期/伪造数据。
 盘中禁写（issue #78）：交易时段内（交易日 09:30–15:00 东八区）当日行不落库
 （未收盘数据非最终值），fetch/query 正常返回数据并带 note；盘后行为不变。
 
-三源对拍（issue #112）：compare_daily_sources 逐源直取同一交易日 bar 做字段级
-比对，不落库——固定 CLI `qstock-scheduler daily --check` 的入口。
+三源对拍（issue #112）在独立模块 `daily_parity.py`：逐源直取同一交易日 bar 做
+字段级比对、不落库——固定 CLI `qstock-scheduler daily --check` 的入口。
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import NamedTuple, Sequence
 
-from .adapters import (
-    DailyAdapter,
-    default_daily_adapters,
-    fetch_failure_kind,
-)
-from .dates import is_trading_time, normalize_date, resolve_range, today_str
+from .adapters import DailyAdapter, default_daily_adapters
+from .dates import is_trading_time, resolve_range, today_str
 from .db import connect
 from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_with_fallback
 from .gaps import head_tail_gaps
@@ -274,130 +270,3 @@ def query_daily(
     if ctx.deferred_rows:
         out["note"] = _INTRADAY_NOTE + "；响应中当日行为盘中未收盘数据"
     return out
-
-
-# ---------------------------------------------------------------- 三源对拍（issue #112）
-
-# 字段比对容差：(类型, 值)。价格用绝对差（qfq 两位小数口径）；成交量用绝对差
-# （腾讯手→股按整数手四舍五入，单行误差 < 1 手 = 100 股）；成交额用相对差
-# （不同源的复权/流通股口径末位差异）；换手率用绝对差（腾讯百分数两位小数）。
-_PARITY_TOLERANCES: dict[str, tuple[str, float]] = {
-    "open": ("abs", 0.011),
-    "high": ("abs", 0.011),
-    "low": ("abs", 0.011),
-    "close": ("abs", 0.011),
-    "change_percent": ("abs", 0.05),
-    "volume": ("abs", 100.0),
-    "amount": ("rel", 0.005),
-    "turnover_rate": ("abs", 0.02),
-}
-
-
-def _within_tolerance(reference: float, value: float, kind: str, tol: float) -> bool:
-    if kind == "abs":
-        return abs(value - reference) <= tol
-    if reference == 0:
-        return abs(value) <= tol
-    return abs(value - reference) / abs(reference) <= tol
-
-
-def _parity_bar(bar: dict) -> dict:
-    return {field: bar.get(field) for field in _PARITY_TOLERANCES}
-
-
-def _compare_code(
-    code: str, trade_date: str, adj: str, adapters: Sequence[DailyAdapter]
-) -> dict:
-    """单 code 逐源直取并对拍；适配器顺序即参考源优先级。"""
-    result: dict = {"stock_code": code, "status": "ok", "sources": {}, "diffs": []}
-    for adapter in adapters:
-        try:
-            rows = adapter.fetch_daily(code, trade_date, trade_date, adj)
-        except Exception as e:  # noqa: BLE001 - 单源失败只记该源，不中断对拍
-            kind = fetch_failure_kind(e)
-            result["sources"][adapter.name] = {
-                "status": "unsupported" if kind == "unsupported" else "error",
-                "error": str(e),
-            }
-            continue
-        bar = next((r for r in rows if r["trade_date"] == trade_date), None)
-        result["sources"][adapter.name] = (
-            {"status": "ok", "bar": _parity_bar(bar)}
-            if bar is not None
-            else {"status": "no_data"}
-        )
-    available = [name for name, v in result["sources"].items() if v["status"] == "ok"]
-    if not available:
-        result["status"] = "no_data"
-        return result
-    if len(available) == 1:
-        result["status"] = "single_source"
-        return result
-    reference_name = available[0]
-    reference = result["sources"][reference_name]["bar"]
-    for name in available[1:]:
-        other = result["sources"][name]["bar"]
-        for field, (kind, tol) in _PARITY_TOLERANCES.items():
-            ref_val, val = reference.get(field), other.get(field)
-            if ref_val is None or val is None:
-                continue
-            if not _within_tolerance(ref_val, val, kind, tol):
-                result["diffs"].append(
-                    {
-                        "field": field,
-                        "reference": {"source": reference_name, "value": ref_val},
-                        "other": {"source": name, "value": val},
-                        "tolerance": {"kind": kind, "value": tol},
-                    }
-                )
-    if result["diffs"]:
-        result["status"] = "mismatch"
-    return result
-
-
-def compare_daily_sources(
-    codes: Sequence[str],
-    trade_date: str,
-    adj: str = "qfq",
-    adapters: Sequence[DailyAdapter] | None = None,
-) -> dict:
-    """三源对拍：逐源直取同一交易日个股日线并做字段级比对（不落库）。
-
-    与 fallback 不同，每个源都被独立调用：失败/无数据只记入该源
-    （by-design 不支持记 unsupported，如 baostock 对北交所），不算对拍失败；
-    仅一个源有值时记 single_source 警告。两源以上有值时按适配器顺序取参考源，
-    字段容差见 _PARITY_TOLERANCES。固定 CLI 入口：
-    `qstock-scheduler daily --check`。
-    """
-    tool = "compare_daily_sources"
-    params = {"codes": list(codes), "trade_date": trade_date, "adj": adj}
-    try:
-        trade_date = normalize_date(trade_date)
-    except ValueError as e:
-        return _error(tool, params, str(e))
-    if adj not in ("qfq", "hfq", "none"):
-        return _error(tool, params, f"无法识别的复权口径: {adj!r}")
-    codes = [c for c in codes if c]
-    if not codes:
-        return _error(tool, params, "股票代码列表为空")
-    if adapters is None:
-        adapters = default_daily_adapters()
-    results = [_compare_code(c, trade_date, adj, adapters) for c in codes]
-    mismatched = [r for r in results if r["status"] == "mismatch"]
-    no_data = [r for r in results if r["status"] == "no_data"]
-    params["trade_date"] = trade_date
-    return {
-        "status": (
-            "mismatch"
-            if mismatched
-            else ("error" if len(no_data) == len(results) else "ok")
-        ),
-        "tool": tool,
-        "params": params,
-        "results": results,
-        "mismatch_count": len(mismatched),
-        "no_data_count": len(no_data),
-        "single_source_count": sum(
-            1 for r in results if r["status"] == "single_source"
-        ),
-    }

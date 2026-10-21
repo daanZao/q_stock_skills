@@ -17,12 +17,12 @@ import logging
 
 from ..dates import add_days
 from ._bse_codes import to_market_code
+from ._daily_common import ADJUST_PARAMS, derive_change_fields
 from ._eastmoney import _int, _num
 from .base import FetchError
 
 log = logging.getLogger(__name__)
 
-_ADJUST = {"qfq": "qfq", "hfq": "hfq", "none": ""}
 _PRE_CLOSE_LOOKBACK_DAYS = 7  # 覆盖长假，保证区间首日前收可取
 
 
@@ -32,11 +32,6 @@ def _ak():
     except ImportError as e:
         raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
     return ak
-
-
-def to_sina_code(stock_code: str) -> str:
-    """600519 → sh600519；430047/920047 → bj920047（旧码归一化）。"""
-    return to_market_code(stock_code)
 
 
 def map_sina_rows(records: list[dict]) -> list[dict]:
@@ -57,18 +52,8 @@ def map_sina_rows(records: list[dict]) -> list[dict]:
         low = _num(r.get("low"))
         amount = _num(r.get("amount"))
         turnover = _num(r.get("turnover"))
-        change_amount: float | None = (
-            close - prev_close if close is not None and prev_close else None
-        )
-        change_percent: float | None = (
-            change_amount / prev_close * 100
-            if change_amount is not None and prev_close
-            else None
-        )
-        amplitude: float | None = (
-            (high - low) / prev_close * 100
-            if high is not None and low is not None and prev_close
-            else None
+        change_amount, change_percent, amplitude = derive_change_fields(
+            close, high, low, prev_close
         )
         bars.append(
             {
@@ -98,17 +83,17 @@ class SinaAdapter:
     def fetch_daily(
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
     ) -> list[dict]:
-        if adj not in _ADJUST:
+        if adj not in ADJUST_PARAMS:
             raise FetchError(f"新浪不支持复权口径: {adj}", kind="unsupported")
         ak = _ak()
-        symbol = to_sina_code(stock_code)
+        symbol = to_market_code(stock_code)
         fetch_start = add_days(start, -_PRE_CLOSE_LOOKBACK_DAYS)
         try:
             df = ak.stock_zh_a_daily(
                 symbol=symbol,
                 start_date=fetch_start,
                 end_date=end,
-                adjust=_ADJUST[adj],
+                adjust=ADJUST_PARAMS[adj],
             )
         except Exception as e:  # noqa: BLE001 - 上游任何失败都收敛为该源失败
             raise FetchError(f"新浪日线抓取失败（{symbol}）: {e}") from e

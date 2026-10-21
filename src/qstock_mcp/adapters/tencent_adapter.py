@@ -11,8 +11,12 @@ akshare `stock_zh_a_hist_tx` / `stock_zh_index_daily_tx`：实测封装层把第
 
 响应为 JS 赋值 `kline_dayqfq={...}`；data[symbol] 下按复权口径取
 qfqday/hfqday/day 键。单次最多返回 640 根，且上游忽略 start 参数（返回 end
-之前最近 count 根），因此本层逐段向前回溯并本地裁剪请求区间。请求的复权键
-缺失时（如北交所部分标的无复权事件）上游只给 `day`，数值与不复权一致。
+之前最近 640 根），因此本层逐段向前回溯并本地裁剪请求区间；多段回溯间留
+0.3s 间隔（实测连发 5–6 个请求触发 TLS 断连）。
+
+请求的复权键缺失时（如北交所部分标的无复权事件）上游只给 `day`，数值与
+不复权一致；响应无法区分"无复权事件"与"上游不提供调整序列"，本层按无复权
+事件处理并返回 day 数据（实测 920047 三口径数值一致），不臆造调整序列。
 
 原始行列位（按索引解析，兼容 10/11 列两种形态）：
 
@@ -34,8 +38,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
+from time import sleep
 
 from ._bse_codes import to_market_code
+from ._daily_common import ADJUST_PARAMS, derive_change_fields
 from ._eastmoney import _int, _num
 from .base import FetchError
 
@@ -45,7 +51,7 @@ KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 TIMEOUT_SEC = 20
 MAX_BARS = 640  # 上游单次返回上限（实测 count>640 仍然只给 640）
 MAX_CHUNKS = 64  # 640 × 64 ≈ 4 万根，覆盖 A 股全历史
-_ADJUST = {"qfq": "qfq", "hfq": "hfq", "none": ""}
+CHUNK_PAUSE_S = 0.3  # 多段回溯时对腾讯限速（实测连发 5–6 个请求触发 TLS 断连）
 
 
 def _response_key(adjust: str) -> tuple[str, ...]:
@@ -89,18 +95,16 @@ def parse_kline_response(text: str, symbol: str, adjust: str) -> list[list]:
     return []
 
 
-def fetch_kline_rows(
-    symbol: str, end_date: str, adjust: str, count: int = MAX_BARS
-) -> list[list]:
-    """请求 `end_date`（yyyymmdd）之前最近 `count` 根 K 线（可能含 start 之前行）。
+def fetch_kline_rows(symbol: str, end_date: str, adjust: str) -> list[list]:
+    """请求 `end_date`（yyyymmdd）之前最近 MAX_BARS 根 K 线（可能含 start 之前行）。
 
     `symbol` 为带市场前缀的腾讯代码（sh600519/sz000001/bj920001）。
     """
     params = urllib.parse.urlencode(
         {
             "_var": f"kline_day{adjust or 'none'}",
-            # start 留空：上游忽略 start，只按 end 向前取 count 根
-            "param": f"{symbol},day,,{_dash(end_date)},{count},{adjust}",
+            # start 留空：上游忽略 start，只按 end 向前取 MAX_BARS 根
+            "param": f"{symbol},day,,{_dash(end_date)},{MAX_BARS},{adjust}",
             "r": "0.8205512681390605",
         }
     )
@@ -153,18 +157,8 @@ def map_tencent_rows(tx_code: str, rows: list[list]) -> list[dict]:
         volume = _int(_row_at(row, 5))
         if volume is not None and not star:
             volume *= 100
-        change_amount: float | None = (
-            close - prev_close if close is not None and prev_close else None
-        )
-        change_percent: float | None = (
-            change_amount / prev_close * 100
-            if change_amount is not None and prev_close
-            else None
-        )
-        amplitude: float | None = (
-            (high - low) / prev_close * 100
-            if high is not None and low is not None and prev_close
-            else None
+        change_amount, change_percent, amplitude = derive_change_fields(
+            close, high, low, prev_close
         )
         bars.append(
             {
@@ -199,13 +193,16 @@ class TencentAdapter:
         区间首日前收随分段回溯一并取得（>= start 的前一行），用于首行涨跌幅/
         振幅；本地按 [start, end] 裁剪。空区间返回 []（停牌/非交易日，非错误）。
         """
-        if adj not in _ADJUST:
+        if adj not in ADJUST_PARAMS:
             raise FetchError(f"腾讯不支持复权口径: {adj}", kind="unsupported")
         tx_code = to_market_code(stock_code)
-        adjust = _ADJUST[adj]
+        adjust = ADJUST_PARAMS[adj]
         collected: dict[str, list] = {}
         cursor = end
-        for _ in range(MAX_CHUNKS):
+        for chunk in range(MAX_CHUNKS):
+            if chunk:
+                # 全历史回溯逐段连续请求，按实测限速留出间隔
+                sleep(CHUNK_PAUSE_S)
             rows = fetch_kline_rows(tx_code, cursor, adjust)
             if not rows:
                 break

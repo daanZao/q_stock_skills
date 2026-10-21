@@ -3,7 +3,8 @@
 约束（issue #3）：北交所代码（4/8/9 开头）明确拒绝；baostock 无振幅/涨跌额列，
 对应字段置 null（不伪造）。日期参数为 yyyy-mm-dd，adjustflag: 1 后复权/2 前复权/3 不复权。
 issue #112：`_FIELDS` 补 turn 列恢复换手率（个股与指数接口实测均可用，
-百分数口径直接入 turnover_rate）；全市场一把抓 map_astock_daily_rows 早已映射 turn。
+百分数口径直接入 turnover_rate）；`fetch_index_daily` 共用 `_FIELDS`，因此
+`index_daily.turnover_rate` 同步恢复为 baostock 实测值（此前置 null）。
 baostock 无全市场快照接口，fetch_market_snapshot 明确拒绝（issue #4）。
 init 轻量初始化（issue #8）：支持股票清单（query_stock_basic 过滤 A 股前缀）
 与指数日线（指数不复权，adjustflag=3）。

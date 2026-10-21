@@ -8,7 +8,7 @@ from datetime import date
 import pytest
 
 from qstock_mcp.adapters.base import FetchError
-from qstock_mcp.adapters.sina_adapter import SinaAdapter, map_sina_rows, to_sina_code
+from qstock_mcp.adapters.sina_adapter import SinaAdapter, map_sina_rows
 
 SINA_RECORDS = [
     {
@@ -36,11 +36,23 @@ SINA_RECORDS = [
 ]
 
 
-def test_sina_code_normalization():
-    assert to_sina_code("600519") == "sh600519"
-    assert to_sina_code("000001") == "sz000001"
-    assert to_sina_code("920001") == "bj920001"
-    assert to_sina_code("430047") == "bj920047"  # 北交所旧码归一化
+def test_sina_adapter_requests_extra_days_and_filters(monkeypatch):
+    stub = _StubAk(_StubFrame(SINA_RECORDS))
+    monkeypatch.setattr("qstock_mcp.adapters.sina_adapter._ak", lambda: stub)
+    bars = SinaAdapter().fetch_daily("600519", "20261020", "20261020")
+    assert [b["trade_date"] for b in bars] == ["20261020"]
+    call = stub.calls[0]
+    assert call["symbol"] == "sh600519"
+    assert call["adjust"] == "qfq"
+    assert call["start_date"] == "20261013"  # start 前推 7 个自然日取前收
+    assert call["end_date"] == "20261020"
+
+
+def test_sina_adapter_normalizes_bse_old_code(monkeypatch):
+    stub = _StubAk(_StubFrame(SINA_RECORDS))
+    monkeypatch.setattr("qstock_mcp.adapters.sina_adapter._ak", lambda: stub)
+    SinaAdapter().fetch_daily("430047", "20261020", "20261020")
+    assert stub.calls[0]["symbol"] == "bj920047"
 
 
 def test_map_sina_rows_units_and_derived_fields():

@@ -231,3 +231,14 @@ def test_daily_input_conflicts_exit_1(capsys):
     assert rc == 1 and "互斥" in out["error"]
     rc, out = _daily_run(capsys, ["daily"], [])
     assert rc == 1 and "--codes" in out["error"]
+
+
+def test_daily_fetch_rerun_reports_zero_gap(pg_ready, capsys):
+    """已补过的区间重跑零抓取：source 为 null 并带 zero-gap note（幂等）。"""
+    argv = ["daily", "--codes", "600519", "--date", "20261020"]
+    _daily_run(capsys, argv, [FakeAdapter("tencent")])
+    rc, out = _daily_run(capsys, argv, [FakeAdapter("tencent")])
+    assert rc == 0
+    assert out["results"][0]["source"] is None
+    assert out["results"][0]["rows_upserted"] == 0
+    assert "零抓取" in out["results"][0]["note"]

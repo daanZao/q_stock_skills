@@ -373,7 +373,11 @@ class DataAdapter(
 
 
 def is_bse_code(stock_code: str) -> bool:
-    """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。"""
+    """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。
+
+    baostock 适配器的粗粒度拒绝守卫；精确 A 股市场路由见
+    `adapters/_bse_codes.market_of`（900xxx 沪 B 股不属北交所，ADR 0007 补记）。
+    """
     return stock_code[:1] in ("4", "8", "9")
 
 

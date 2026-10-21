@@ -35,13 +35,14 @@ import time
 from typing import Sequence
 
 from .adapters import BoardAdapter
+from .daily_parity import compare_daily_sources
 from .dates import normalize_date, today_str
 from .db import connect
 from .output import aggregate_batch_status
 from .repository import select_stock_codes
 from .tools_backfill import accumulate_em_concepts, fetch_boards_backfill
 from .tools_board import fetch_board_snapshot
-from .tools_daily import compare_daily_sources, fetch_daily
+from .tools_daily import fetch_daily
 from .tools_morning import fetch_morning_batch
 
 CLOSE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
@@ -205,12 +206,17 @@ def cmd_daily(
         )
         entry: dict = {"stock_code": code, "status": raw.get("status")}
         if raw.get("status") == "ok":
-            entry["source"] = ",".join(
-                sorted({s["source"] for s in raw.get("segments", [])})
+            segments = raw.get("segments", [])
+            entry["source"] = (
+                ",".join(sorted({s["source"] for s in segments}))
+                if segments
+                else None
             )
             entry["rows_upserted"] = raw.get("rows_upserted", 0)
             entry["data_range"] = raw.get("data_range")
-            if raw.get("note"):
+            if not segments:
+                entry["note"] = "区间内无缺口，零抓取"
+            elif raw.get("note"):
                 entry["note"] = raw["note"]
         else:
             entry["error"] = raw.get("error")

@@ -93,6 +93,14 @@ _Avoid_: 早盘补抓
 
 **板块回补**:
 `qstock-scheduler backfill` 执行的板块历史补数：东财 push2his 板块 K 线同口径回补行业+概念板块入 `market_boards`（默认窗口 = 前一交易日前推约 3 个月），回补行带 `source='push2his'` 标注与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。收盘后批东财健康时附带概念成分积累入成分字典 'em' 体系（随 close 执行，独立成败不拖垮主批）。
+
+**个股日线入口**:
+`qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
+_Avoid_: 日线脚本、补数脚本
+
+**对拍**:
+换源/迁移后的数据质量验证动作：逐源直取同一交易日数据并做字段级比较，不落库；`daily --check` 入口。后复权（hfq）基准因源而异，只比成交量/成交额/换手率。
+_Avoid_: 校验、比对（不加限定时）
 _Avoid_: 回填、补数据（不加限定时）
 
 ### Skill 家族（继承自旧项目词汇）

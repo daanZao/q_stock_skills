@@ -11,6 +11,10 @@
 
 市场前缀口径与 repository 分市场统计一致：6→sh、0/3→sz、4/8/920→bj；
 9 开头非 920（900xxx 沪 B 股）与 2 开头（200xxx 深 B 股）明确拒绝。
+
+与 `base.is_bse_code` 的分工：后者是 baostock 的粗粒度拒绝守卫（4/8/9 一律
+不接，含 900xxx 沪 B 股）；本模块是 A 股市场路由，920xxx 与 4/8 旧码才归 bj。
+新增数据源接北交所时以本模块为准（ADR 0007 补记）。
 """
 
 import csv
@@ -67,8 +71,3 @@ def to_market_code(stock_code: str) -> str:
     """600519 → sh600519；000001 → sz000001；430047/920047 → bj920047。"""
     code = normalize_stock_code(stock_code)
     return f"{market_of(code)}{code}"
-
-
-def is_bse_stock(stock_code: str) -> bool:
-    """北交所个股（含旧码），供 CLI/工具层区分对拍源可用性。"""
-    return market_of(stock_code) == "bj"

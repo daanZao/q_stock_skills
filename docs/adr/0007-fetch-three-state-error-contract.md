@@ -28,6 +28,24 @@
 
 关联防线（同属 #78，细节不在本 ADR 展开）：`indices` 段落库前校验行级日期==请求日期（不符即 `detail:"date_mismatch"` 零落库）；`fetch_market_snapshot` 传入日期与 API 生效日期不符（含 API 未报告）即 `status:"error"` + `detail:"date_mismatch"` 零落库；交易时段内（交易日 09:30–15:00 东八区）`stock_daily`/`index_daily` 写路径跳过当日行落库（盘中禁写，响应带 `note`，盘中 fetch/query 正常返回数据）。当日正常路径行为不变。
 
+## 补记（2026-10-21，issue #112，spec #111）：北交所不再整体 unsupported；日线源代码归一化
+
+个股日线 fallback 链改为 腾讯 → 新浪 → baostock 后，北交所 920xxx 由腾讯/新浪
+承载（三复权口径实测可取），因此"北交所 = by-design unsupported"只对 **baostock**
+成立，不再是全链的结论：`BaostockAdapter` 继续以 `is_bse_code`（4/8/9 前缀）
+拒绝北交所并抛 `FetchError(kind="unsupported")`；腾讯/新浪适配器则通过
+`adapters/_bse_codes.py` 把 920xxx 路由到 bj，旧码 43x/83x/87x 按北交所官方
+248 条对照表归一化到 920 新码后再请求。
+
+`base.is_bse_code` 与 `_bse_codes.market_of` 的差异是刻意的：前者是 baostock
+的粗粒度拒绝守卫（9 开头一律不接，含 900xxx 沪 B 股），后者是 A 股市场路由
+（仅 920xxx 与 4/8 旧码归 bj；900xxx/200xxx 等非 A 股明确 unsupported）。新增
+数据源接北交所时以 `_bse_codes` 为准，不得复用 `is_bse_code` 当市场判定。
+
+对拍（`daily_parity.compare_daily_sources`）的逐源失败沿用本契约分类：输出
+`sources.<name>.failure_kind`（unsupported/connection/other）与 `status`
+（unsupported/error/no_data），不另造分类。
+
 ## Consequences
 
 - `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类（补漏路径的 `empty` 是本 ADR 补记明定的唯一例外，边界见上节）。

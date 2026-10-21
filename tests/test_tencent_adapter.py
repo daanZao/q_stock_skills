@@ -25,6 +25,14 @@ from qstock_mcp.adapters.tencent_adapter import (
 FIXTURES = Path(__file__).parent / "fixtures" / "tencent"
 
 
+@pytest.fixture(autouse=True)
+def _no_chunk_pause(monkeypatch):
+    """分段限速在测试里置零，避免多段回溯用例真实等待。"""
+    monkeypatch.setattr(
+        "qstock_mcp.adapters.tencent_adapter.CHUNK_PAUSE_S", 0.0
+    )
+
+
 def _parse(name: str, symbol: str, adjust: str = "qfq") -> list[list]:
     return parse_kline_response(
         (FIXTURES / name).read_text(encoding="utf-8"), symbol, adjust
@@ -246,3 +254,21 @@ def test_urllib_connection_errors_classified_as_connection():
         )
     except FetchError as e:
         assert fetch_failure_kind(e) == "other"
+
+def test_parse_all_adjust_modes_for_bse():
+    """北交所 920xxx 三复权口径均可取（issue #112 验收）。"""
+    qfq = _parse("bj920001_qfq.js", "bj920001", "qfq")
+    hfq = _parse("bj920001_hfq.js", "bj920001", "hfq")
+    none = _parse("bj920001_none.js", "bj920001", "none")
+    assert [r[2] for r in qfq[-1:]] == ["10.430"]
+    assert hfq[-1][2] == "10.930"
+    assert none[-1][2] == "10.43"
+    # 三口径成交量/成交额一致（量额本身不受复权影响）
+    assert {r[5] for r in (qfq[-1], hfq[-1], none[-1])} == {"19103.00"}
+
+
+def test_parse_hfq_and_none_for_main_board():
+    hfq = _parse("sh600519_hfq.js", "sh600519", "hfq")
+    none = _parse("sh600519_none.js", "sh600519", "none")
+    assert hfq[-1][2] == "9298.83"
+    assert none[-1][2] == "1331.88"

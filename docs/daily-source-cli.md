@@ -13,7 +13,7 @@ issue #112（spec #111）：个股日线 fallback 链重排为 **腾讯 → 新�
 | 迁移/换源后验证数据质量 | `daily --codes ... --date <交易日> --check`（不写库） |
 | 全市场刷新（重操作） | `daily --all --limit N` 冒烟后再全量；缺省 1 秒/只节流 |
 | 北交所个股 | 新码 `920xxx` 直接传；旧码 `43x/83x/87x` 自动归一化到 920 新码 |
-| 三复权口径核对 | `--adj qfq` / `--adj hfq` / `--adj none` 分别执行（业务键含 adj，互不覆盖） |
+| 三复权口径**取数** | `--adj qfq` / `--adj hfq` / `--adj none` 分别执行（业务键含 adj，互不覆盖）；三源**对拍**时 hfq 只比量/额/换手率（见下） |
 
 ## 前置条件
 
@@ -50,10 +50,16 @@ qstock-scheduler daily --all --date 20261020 --throttle 1
   逐段补齐，空结果（停牌/非交易日）不是失败。
 - `--adj`：`qfq`（缺省）/ `hfq` / `none`，写入 `stock_daily.adj`。
 - `--check`：逐源直取**结束日**的 bar 比对（区间模式取 `--end`），不落库；
-  沪/深/北各源可比值见下。
+  沪/深/北各源可比值见下。**`--adj hfq` 时只比成交量/成交额/换手率**——各源
+  后复权基准不同（实测 600519 腾讯 9298.83 / 新浪 11830.44 / baostock
+  10214.53），价格类字段直接比会误报；输出带 `note` 与每只股票的
+  `compared_fields`。`qfq`/`none` 全字段比对。
 - `--throttle`：逐 code 间隔秒；`--all` 缺省 1.0，显式 `--codes` 缺省 0。
   腾讯公开端点实测连发 5–6 个请求会触发 TLS 层断连（间隔 8s 恢复），批量
   抓取务必保留节流。
+- 全量回溯（`init_database(backfill_history=True)`）也走本链：腾讯单请求
+  640 根，逐股约 19 次请求；适配器在分段回溯之间留 0.3s 间隔，但整批仍建议
+  放在非交易时段执行。日常全市场 T+1 补数优先用 `morning`（baostock 一把抓）。
 
 ## 输出与退出码
 
@@ -67,7 +73,9 @@ stdout 只输出一份 JSON（日志走 stderr）：
 ```
 
 - `mode="fetch"`：`status` 为 `ok` / `partial_error` / `error`（全失败）；
-  每只股票带实际命中源 `source`（`tencent`/`sina`/`baostock`）。
+  每只股票带实际命中源 `source`（`tencent`/`sina`/`baostock`）。已补过的区间
+  重跑为零抓取：`source` 为 null、`rows_upserted` 0、`note` 为「区间内无缺口，
+  零抓取」，状态仍为 ok（幂等）。
 - `mode="check"`：`status` 为 `ok` / `mismatch` / `error`；每只股票带
   `sources.{tencent,sina,baostock}` 的逐源状态（`ok`/`no_data`/`error`/
   `unsupported`）与 `diffs` 字段级差异；`single_source` 只算警告（如北交所
@@ -97,25 +105,31 @@ stdout 只输出一份 JSON（日志走 stderr）：
 ## 回滚与还原
 
 CLI 只写 `stock_daily`（业务键 upsert）与 append-only 台账；无 schema 变更。
+**upsert 会把被覆盖行的 `source` 改成本次命中源**，所以不能仅凭 `source`
+判断"这行原来是谁写的"。写库前（尤其 `--all` 覆盖既有行时）先备份：
+
+```bash
+pg_dump -t stock_daily <db> > stock_daily_before_$(date +%Y%m%d%H%M).sql
+```
+
+回滚分两类：
 
 ```sql
--- 回滚某日某批股票中由本次 CLI 写入/覆盖的行（按 source 圈定）
+-- 1) 清理本次**新增**的行（未发生过 upsert 覆盖：created_at = updated_at）
 DELETE FROM stock_daily
  WHERE trade_date = '20261020' AND adj = 'qfq'
    AND source IN ('tencent', 'sina')
+   AND created_at = updated_at
    AND stock_code IN ('600519', '000001', '920001');
 
--- 区间回滚
-DELETE FROM stock_daily
- WHERE trade_date BETWEEN '20261001' AND '20261020'
-   AND adj = 'qfq' AND source IN ('tencent', 'sina')
-   AND stock_code IN (...);
+-- 区间版同理：trade_date BETWEEN '20261001' AND '20261020'
 ```
 
-- 覆盖前如需留存原值，先 `pg_dump -t stock_daily <db> > stock_daily_before.sql`；
-- 台账 `collection_log` 为审计表，append-only，不回滚；
-- 只想换回旧源数据时，可用目标源重跑（upsert 直接覆盖）或按业务键删除后
-  由 `query_daily` 自愈补回。
+- 本次**覆盖**的旧行无法从库内反推原值：从 `pg_dump` 备份恢复到临时表后按
+  `(stock_code, trade_date, adj)` 回写，或用目标源重跑覆盖（upsert 幂等）。
+- 台账 `collection_log` 为审计表，append-only，不回滚。
+- 只想换回旧源数据时，按业务键删除后由 `query_daily` 自愈补回，或用目标源
+  重跑。
 
 ## 定时任务示例（launchd）
 

@@ -9,8 +9,8 @@ import pytest
 from fakes import FakeAdapter
 from qstock_mcp.adapters import FetchError, default_daily_adapters
 from qstock_mcp.adapters.akshare_adapter import AkshareAdapter
+from qstock_mcp.daily_parity import compare_daily_sources
 from qstock_mcp.fetch_chain import fetch_with_fallback
-from qstock_mcp.tools_daily import compare_daily_sources
 
 TRADE_DATE = "20261020"
 
@@ -146,3 +146,43 @@ def test_compare_rejects_bad_input():
     assert compare_daily_sources(
         ["600519"], TRADE_DATE, adj="xx"
     )["status"] == "error"
+
+
+def test_compare_hfq_skips_price_fields():
+    """后复权基准因源而异：hfq 只比量/额/换手率，价格差不算 mismatch。"""
+    tencent = dict(BAR, open=9237.65, high=9316.38, low=9210.25,
+                   close=9298.83, change_percent=0.42)
+    sina = dict(BAR, open=11830.44, high=11900.00, low=11700.00,
+                close=11830.44, change_percent=0.52)
+    result = compare_daily_sources(
+        ["600519"], TRADE_DATE, adj="hfq",
+        adapters=[_source("tencent", tencent), _source("sina", sina)],
+    )
+    assert result["status"] == "ok"
+    assert "价格类字段不参与对拍" in result["note"]
+    assert set(result["results"][0]["compared_fields"]) == {
+        "volume", "amount", "turnover_rate"
+    }
+
+
+def test_compare_hfq_still_flags_volume_mismatch():
+    sina = dict(BAR, volume=BAR["volume"] + 5000)
+    result = compare_daily_sources(
+        ["600519"], TRADE_DATE, adj="hfq",
+        adapters=[_source("tencent"), _source("sina", sina)],
+    )
+    assert result["status"] == "mismatch"
+    assert [d["field"] for d in result["results"][0]["diffs"]] == ["volume"]
+
+
+def test_compare_source_error_includes_failure_kind():
+    result = compare_daily_sources(
+        ["600519"], TRADE_DATE,
+        adapters=[
+            _source("tencent"),
+            FakeAdapter("sina", fail_times=99, exc=FetchError("parse boom")),
+        ],
+    )
+    src = result["results"][0]["sources"]["sina"]
+    assert src["status"] == "error"
+    assert src["failure_kind"] == "other"
