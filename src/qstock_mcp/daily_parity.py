@@ -10,6 +10,9 @@
   价格类字段（OHLC/涨跌幅）不可直接比，只比对成交量/成交额/换手率，并在
   输出带 `note` 说明。
 
+复权回落可见化：源缺复权键按 day 返回时（适配器 `adjust_fallback` 标记），
+该源条目带 `note` 标注。
+
 容差：价格绝对差（qfq 两位小数口径）；成交量绝对差（腾讯手→股按整数手
 四舍五入，单行误差 < 1 手 = 100 股）；成交额相对差；换手率绝对差（腾讯
 百分数两位小数）。
@@ -35,6 +38,9 @@ _PARITY_TOLERANCES: dict[str, tuple[str, float]] = {
 # 后复权基准因源而异，价格类字段不参与 hfq 对拍
 _HFQ_SKIP_FIELDS = ("open", "high", "low", "close", "change_percent")
 _HFQ_NOTE = "后复权基准因源而异，价格类字段不参与对拍（只比量/额/换手率）"
+
+# 复权回落可见化（issue #112）：源缺复权键按 day 返回时在该源条目上标注
+_ADJUST_FALLBACK_NOTE = "上游缺复权键，本次取数为不复权（day）回落"
 
 
 def _parity_fields(adj: str) -> dict[str, tuple[str, float]]:
@@ -80,11 +86,14 @@ def _compare_code(
             }
             continue
         bar = next((r for r in rows if r["trade_date"] == trade_date), None)
-        result["sources"][adapter.name] = (
+        entry = (
             {"status": "ok", "bar": _parity_bar(bar)}
             if bar is not None
             else {"status": "no_data"}
         )
+        if getattr(adapter, "adjust_fallback", False):
+            entry["note"] = _ADJUST_FALLBACK_NOTE
+        result["sources"][adapter.name] = entry
     available = [name for name, v in result["sources"].items() if v["status"] == "ok"]
     if not available:
         result["status"] = "no_data"

@@ -59,6 +59,16 @@ def test_chain_falls_through_tencent_to_sina():
     assert [a["source"] for a in result["attempted_sources"]] == ["tencent"]
 
 
+def test_chain_propagates_adjust_fallback_flag():
+    """获胜源带 adjust_fallback 标记（腾讯复权回落）时结果透传该标记。"""
+    tencent = _source("tencent")
+    tencent.adjust_fallback = True
+    result = fetch_with_fallback([tencent], "920047", "20261020", "20261020")
+    assert result["adjust_fallback"] is True
+    plain = fetch_with_fallback([_source("tencent")], "600519", "20261020", "20261020")
+    assert "adjust_fallback" not in plain
+
+
 # ---------------------------------------------------------------- 三源对拍
 
 
@@ -186,3 +196,17 @@ def test_compare_source_error_includes_failure_kind():
     src = result["results"][0]["sources"]["sina"]
     assert src["status"] == "error"
     assert src["failure_kind"] == "other"
+
+
+def test_compare_marks_adjust_fallback_source():
+    """源复权回落（adjust_fallback 标记）时该源条目带 note，不影响判定。"""
+    tencent = _source("tencent")
+    tencent.adjust_fallback = True
+    result = compare_daily_sources(
+        ["920047"], TRADE_DATE, adj="hfq",
+        adapters=[tencent, _source("sina")],
+    )
+    assert result["status"] == "ok"
+    src = result["results"][0]["sources"]["tencent"]
+    assert "回落" in src["note"]
+    assert "note" not in result["results"][0]["sources"]["sina"]

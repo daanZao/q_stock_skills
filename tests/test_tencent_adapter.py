@@ -34,9 +34,10 @@ def _no_chunk_pause(monkeypatch):
 
 
 def _parse(name: str, symbol: str, adjust: str = "qfq") -> list[list]:
-    return parse_kline_response(
+    rows, _used_key = parse_kline_response(
         (FIXTURES / name).read_text(encoding="utf-8"), symbol, adjust
     )
+    return rows
 
 
 # ---------------------------------------------------------------- 北交所代码归一化
@@ -186,7 +187,7 @@ def test_fetch_daily_chunks_backwards_and_filters(monkeypatch):
         eligible = [
             r for r in rows_all if r[0].replace("-", "") <= end_date
         ]
-        return eligible[-3:]  # 模拟小窗口，每次只回溯 3 根
+        return eligible[-3:], False  # 模拟小窗口，每次只回溯 3 根
 
     monkeypatch.setattr(
         "qstock_mcp.adapters.tencent_adapter.fetch_kline_rows", fake_rows
@@ -207,7 +208,7 @@ def test_fetch_daily_single_request_when_window_fits(monkeypatch):
 
     def fake_rows(symbol, end_date, adjust, count=640):
         calls.append(end_date)
-        return [r for r in rows_all if r[0].replace("-", "") <= end_date]
+        return [r for r in rows_all if r[0].replace("-", "") <= end_date], False
 
     monkeypatch.setattr(
         "qstock_mcp.adapters.tencent_adapter.fetch_kline_rows", fake_rows
@@ -231,7 +232,7 @@ def test_parse_and_map_skip_malformed_rows():
         '["2026-10-20","1.00","1.10","1.20","0.90","100.00",{},"1.00","100.00",""]'
         "]}}}"
     )
-    rows = parse_kline_response(text, "sh600519", "qfq")
+    rows, _used_key = parse_kline_response(text, "sh600519", "qfq")
     assert len(rows) == 2  # 字符串行被过滤，空列表保留由映射层跳过
     bars = map_tencent_rows("sh600519", rows)
     assert len(bars) == 1
@@ -272,3 +273,51 @@ def test_parse_hfq_and_none_for_main_board():
     none = _parse("sh600519_none.js", "sh600519", "none")
     assert hfq[-1][2] == "9298.83"
     assert none[-1][2] == "1331.88"
+
+
+# ---------------------------------------------------------------- 复权回落可见化（issue #112 Q2）
+
+
+def test_parse_reports_used_response_key():
+    """实际响应键随解析结果返回：正常取复权键，无复权事件时上游回落 day。"""
+    _, key = parse_kline_response(
+        (FIXTURES / "sh600519_qfq.js").read_text(encoding="utf-8"),
+        "sh600519",
+        "qfq",
+    )
+    assert key == "qfqday"
+    _, key = parse_kline_response(
+        (FIXTURES / "bj920047_qfq.js").read_text(encoding="utf-8"),
+        "bj920047",
+        "qfq",
+    )
+    assert key == "day"  # 回落
+
+
+def test_fetch_daily_marks_adjust_fallback(monkeypatch, caplog):
+    """上游缺复权键回落 day：adjust_fallback 置 True 并记 WARNING（不静默）。"""
+    adapter = TencentAdapter()
+    assert adapter.adjust_fallback is False
+    monkeypatch.setattr(
+        "qstock_mcp.adapters.tencent_adapter.fetch_kline_rows",
+        lambda symbol, end_date, adjust: (
+            [_raw_row("2026-10-20", 10.0)], True
+        ),
+    )
+    with caplog.at_level("WARNING", logger="qstock_mcp.adapters.tencent_adapter"):
+        bars = adapter.fetch_daily("920047", "20261020", "20261020")
+    assert adapter.adjust_fallback is True
+    assert [b["trade_date"] for b in bars] == ["20261020"]
+    assert any("回落" in r.message for r in caplog.records)
+
+
+def test_fetch_daily_no_fallback_flag_stays_false(monkeypatch):
+    adapter = TencentAdapter()
+    monkeypatch.setattr(
+        "qstock_mcp.adapters.tencent_adapter.fetch_kline_rows",
+        lambda symbol, end_date, adjust: (
+            [_raw_row("2026-10-20", 10.0)], False
+        ),
+    )
+    adapter.fetch_daily("600519", "20261020", "20261020")
+    assert adapter.adjust_fallback is False

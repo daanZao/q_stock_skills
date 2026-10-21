@@ -42,6 +42,9 @@
   请求，`stock_daily.stock_code` 仍记录调用方传入的代码。
 - **复权键缺失的语义**：请求 qfq/hfq 但上游只给 `day` 时，按"无复权事件"
   处理并返回 day 数据（实测 920047 三口径数值一致）；不臆造调整序列。
+  **回落可见化**（2026-10-21 双轴评审后补）：发生时置适配器
+  `adjust_fallback` 标记并记 WARNING 日志，fetch/query 响应 note、采集
+  台账 detail、`daily --check` 源条目 note 三处同步标注，不静默落库。
 - **三源对拍**：`daily_parity.compare_daily_sources` 逐源直取同一交易日 bar 做
   字段级比较、不落库。`qfq`/`none` 全字段；`hfq` 只比成交量/成交额/换手率——
   各源后复权基准不同，价格类字段直接比会误报。固定入口

@@ -103,6 +103,10 @@ _Avoid_: 日线脚本、补数脚本
 _Avoid_: 校验、比对（不加限定时）
 _Avoid_: 回填、补数据（不加限定时）
 
+**复权回落**:
+腾讯 K 线请求 qfq/hfq 但上游只给 `day` 键时按"无复权事件"返回 day 数据的语义（ADR 0010）；响应无法区分"无复权事件"与"上游不提供调整序列"，故回落必须可见：适配器 `adjust_fallback` 标记 + WARNING 日志 + fetch/query 响应 note + 采集台账 detail「复权回落=day」+ 对拍源条目 note 五处同步标注，不静默落库。
+_Avoid_: 复权降级、静默回落
+
 ### Skill 家族（继承自旧项目词汇）
 
 **Agent skill**:

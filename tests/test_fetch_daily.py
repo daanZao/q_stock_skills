@@ -216,3 +216,35 @@ def test_fetch_daily_defaults_to_daily_chain(pg_test, monkeypatch):
     assert result["segments"] == [
         {"start": "20240101", "end": "20240110", "source": "tencent", "rows": 8}
     ]
+
+
+def test_fetch_daily_adjust_fallback_visible(pg_test):
+    """复权回落可见化（issue #112）：segment 带标记、响应带 note、台账 detail 留痕。"""
+    _init(pg_test)
+    tencent = FakeAdapter("tencent")
+    tencent.adjust_fallback = True
+    result = fetch_daily("920047", start="20240101", end="20240110", adapters=[tencent])
+    assert result["status"] == "ok"
+    assert result["segments"][0]["adjust_fallback"] is True
+    assert "复权" in result["note"]
+    conn = psycopg2.connect(pg_test)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM collection_log WHERE section = 'stock_daily'"
+            )
+            details = [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+    assert any("复权回落" in d for d in details)
+
+
+def test_fetch_daily_no_fallback_no_note(pg_test):
+    """无回落时响应不带 note、segment 不带标记（不误报）。"""
+    _init(pg_test)
+    result = fetch_daily(
+        "600519", start="20240101", end="20240110", adapters=[FakeAdapter("tencent")]
+    )
+    assert result["status"] == "ok"
+    assert "note" not in result
+    assert "adjust_fallback" not in result["segments"][0]

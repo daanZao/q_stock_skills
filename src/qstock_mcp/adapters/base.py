@@ -185,6 +185,19 @@ class FetchError(RuntimeError):
         super().__init__(msg)
 
 
+def import_akshare():
+    """akshare 懒加载（可选依赖 [sources]）：未安装时抛 FetchError。
+
+    akshare 只在真实抓取路径用到，测试注入 fake 不触第三方库，故 import 推迟
+    到调用点。akshare_adapter 与 sina_adapter 共用此入口（issue #112）。
+    """
+    try:
+        import akshare as ak
+    except ImportError as e:
+        raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
+    return ak
+
+
 # 连接级故障（ADR 0007）：请求未获得任何 HTTP 响应——连接重置、TLS 后空响应、
 # 超时、DNS/建连失败。按异常类名鸭子类型判定，不 import requests/urllib3（可选依赖）；
 # 覆盖标准库、http.client、requests、urllib3 的对应类名。

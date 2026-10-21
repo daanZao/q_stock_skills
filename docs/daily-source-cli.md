@@ -75,11 +75,14 @@ stdout 只输出一份 JSON（日志走 stderr）：
 - `mode="fetch"`：`status` 为 `ok` / `partial_error` / `error`（全失败）；
   每只股票带实际命中源 `source`（`tencent`/`sina`/`baostock`）。已补过的区间
   重跑为零抓取：`source` 为 null、`rows_upserted` 0、`note` 为「区间内无缺口，
-  零抓取」，状态仍为 ok（幂等）。
+  零抓取」，状态仍为 ok（幂等）。腾讯复权键缺失按 day 回落时（无复权事件或
+  上游不提供调整序列），`note` 标注「上游缺复权键，已按不复权（day）数据落库」，
+  采集台账 detail 同步留「复权回落=day」。
 - `mode="check"`：`status` 为 `ok` / `mismatch` / `error`；每只股票带
   `sources.{tencent,sina,baostock}` 的逐源状态（`ok`/`no_data`/`error`/
   `unsupported`）与 `diffs` 字段级差异；`single_source` 只算警告（如北交所
-  baostock by-design 不支持），不改变退出码。
+  baostock by-design 不支持），不改变退出码。某源复权回落时该源条目带
+  `note`（「上游缺复权键，本次取数为不复权（day）回落」）。
 - 退出码：0 = 无失败/无差异；1 = 有失败、有对拍差异或输入非法；2 = 参数错误
   （argparse）。
 

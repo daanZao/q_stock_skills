@@ -67,6 +67,9 @@ def ensure_coverage(
             "source": result["source"],
             "rows": n,
         }
+        if result.get("adjust_fallback"):
+            # 复权回落可见化（issue #112）：上游缺复权键按 day 数据落库
+            segment["adjust_fallback"] = True
         if deferred:
             segment["deferred"] = len(deferred)
             deferred_rows.extend({**r, "source": result["source"]} for r in deferred)
@@ -86,6 +89,8 @@ def _ledger_daily(
     )
     if deferred:
         seg_detail += f"; deferred(盘中禁写)={deferred}"
+    if any(s.get("adjust_fallback") for s in segments):
+        seg_detail += "; 复权回落=day（上游缺复权键）"
     record_collection(
         conn,
         trade_date=end,
@@ -144,6 +149,11 @@ class _Ctx(NamedTuple):
 
 _INTRADAY_NOTE = (
     "盘中时段：当日未收盘数据不落库（盘中禁写防线，issue #78），收盘后可正常补采"
+)
+
+_ADJUST_FALLBACK_NOTE = (
+    "上游缺复权键，已按不复权（day）数据落库——响应无法区分"
+    "“无复权事件”与“上游不提供调整序列”（ADR 0010）"
 )
 
 
@@ -229,6 +239,12 @@ def fetch_daily(
     if ctx.deferred_rows:
         out["note"] = _INTRADAY_NOTE
         out["deferred_rows"] = len(ctx.deferred_rows)
+    if any(s.get("adjust_fallback") for s in ctx.segments):
+        out["note"] = (
+            f"{out['note']}；{_ADJUST_FALLBACK_NOTE}"
+            if out.get("note")
+            else _ADJUST_FALLBACK_NOTE
+        )
     return out
 
 

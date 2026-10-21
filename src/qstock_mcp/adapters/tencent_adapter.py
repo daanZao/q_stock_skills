@@ -17,6 +17,8 @@ qfqday/hfqday/day 键。单次最多返回 640 根，且上游忽略 start 参�
 请求的复权键缺失时（如北交所部分标的无复权事件）上游只给 `day`，数值与
 不复权一致；响应无法区分"无复权事件"与"上游不提供调整序列"，本层按无复权
 事件处理并返回 day 数据（实测 920047 三口径数值一致），不臆造调整序列。
+回落可见化：发生时置 `TencentAdapter.adjust_fallback = True` 并记 WARNING
+日志，对拍（daily_parity）与 fetch/query 工具层 note 据此标注。
 
 原始行列位（按索引解析，兼容 10/11 列两种形态）：
 
@@ -33,6 +35,7 @@ qfqday/hfqday/day 键。单次最多返回 640 根，且上游忽略 start 参�
 """
 
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,10 +43,11 @@ from datetime import datetime, timedelta
 from time import sleep
 
 from ._bse_codes import to_market_code
-from ._daily_common import ADJUST_PARAMS, derive_change_fields
+from ._daily_common import adjust_param, derive_change_fields
 from ._eastmoney import _int, _num
 from .base import FetchError
 
+log = logging.getLogger(__name__)
 
 KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 TIMEOUT_SEC = 20
@@ -61,11 +65,14 @@ def _response_key(adjust: str) -> tuple[str, ...]:
     return ("day",)
 
 
-def parse_kline_response(text: str, symbol: str, adjust: str) -> list[list]:
-    """腾讯 K 线响应文本 → 原始行列表（纯函数，fixture 可测）。
+def parse_kline_response(
+    text: str, symbol: str, adjust: str
+) -> tuple[list[list], str]:
+    """腾讯 K 线响应文本 → (原始行列表, 实际使用的响应键)（纯函数，fixture 可测）。
 
     `text` 形如 `kline_dayqfq={"code":0,...}`；业务码非 0、缺 data[symbol]、
-    JSON 损坏均抛 FetchError（收到响应后的错误，非连接级）。
+    JSON 损坏均抛 FetchError（收到响应后的错误，非连接级）。实际响应键用于
+    识别复权回落：请求 qfq/hfq 但只取到 day 即发生了回落。
     """
     idx = text.find("=")
     if idx < 0:
@@ -89,20 +96,23 @@ def parse_kline_response(text: str, symbol: str, adjust: str) -> list[list]:
     for key in _response_key(adjust):
         rows = node.get(key)
         if isinstance(rows, list):
-            return [r for r in rows if isinstance(r, list)]
-    return []
+            return [r for r in rows if isinstance(r, list)], key
+    return [], _response_key(adjust)[0]
 
 
-def fetch_kline_rows(symbol: str, end_date: str, adjust: str) -> list[list]:
+def fetch_kline_rows(
+    symbol: str, end_date: str, adjust: str
+) -> tuple[list[list], bool]:
     """请求 `end_date`（yyyymmdd）之前最近 MAX_BARS 根 K 线（可能含 start 之前行）。
 
     `symbol` 为带市场前缀的腾讯代码（sh600519/sz000001/bj920001）。
+    返回 (原始行, 复权回落是否发生)：请求复权键缺失、上游按 day 返回时为 True。
     """
     params = urllib.parse.urlencode(
         {
             "_var": f"kline_day{adjust or 'none'}",
             # start 留空：上游忽略 start，只按 end 向前取 MAX_BARS 根
-            "param": f"{symbol},day,,{_dash(end_date)},{MAX_BARS},{adjust}",
+            "param": f"{symbol},day,,{_dashed_date(end_date)},{MAX_BARS},{adjust}",
             "r": "0.8205512681390605",
         }
     )
@@ -116,10 +126,11 @@ def fetch_kline_rows(symbol: str, end_date: str, adjust: str) -> list[list]:
         raise FetchError(f"腾讯K线 HTTP 错误：status={e.code}") from e
     except Exception as e:  # noqa: BLE001 - URLError/超时/TLS 断连等传输错误
         raise FetchError(f"腾讯K线传输错误：{e}") from e
-    return parse_kline_response(text, symbol, adjust)
+    rows, used_key = parse_kline_response(text, symbol, adjust)
+    return rows, used_key != _response_key(adjust)[0]
 
 
-def _dash(yyyymmdd: str) -> str:
+def _dashed_date(yyyymmdd: str) -> str:
     return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
 
 
@@ -131,8 +142,8 @@ def _row_at(row: list, idx: int):
     return row[idx] if len(row) > idx else None
 
 
-def _new_star(tx_code: str) -> bool:
-    """科创板成交量原生为股（实测 sh688981）；其余标的为手。"""
+def _is_star_market(tx_code: str) -> bool:
+    """科创板（STAR Market）成交量原生为股（实测 sh688981）；其余标的为手。"""
     return tx_code.startswith(("sh688", "sh689"))
 
 
@@ -142,7 +153,7 @@ def map_tencent_rows(tx_code: str, rows: list[list]) -> list[dict]:
     成交量按市场换算为股（ADR 0008）；amount 原生万元（ADR 0006）；
     涨跌幅/涨跌额/振幅由前收推算。前收为序列内上一行，序列首行无前收 → None。
     """
-    star = _new_star(tx_code)
+    star = _is_star_market(tx_code)
     bars: list[dict] = []
     prev_close = None
     for row in rows:
@@ -179,9 +190,16 @@ def map_tencent_rows(tx_code: str, rows: list[list]) -> list[dict]:
 
 
 class TencentAdapter:
-    """腾讯个股日线源（fallback 第 1 位）：收盘后当晚含当日行（#104 实测）。"""
+    """腾讯个股日线源（fallback 第 1 位）：收盘后当晚含当日行（#104 实测）。
+
+    `adjust_fallback`：fetch_daily 期间上游缺复权键按 day 回落时置 True
+    （复权回落可见化，issue #112）；对拍与工具层 note 据此标注。
+    """
 
     name = "tencent"
+
+    def __init__(self) -> None:
+        self.adjust_fallback = False
 
     def fetch_daily(
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
@@ -191,17 +209,25 @@ class TencentAdapter:
         区间首日前收随分段回溯一并取得（>= start 的前一行），用于首行涨跌幅/
         振幅；本地按 [start, end] 裁剪。空区间返回 []（停牌/非交易日，非错误）。
         """
-        if adj not in ADJUST_PARAMS:
-            raise FetchError(f"腾讯不支持复权口径: {adj}", kind="unsupported")
+        adjust = adjust_param("腾讯", adj)
+        self.adjust_fallback = False
         tx_code = to_market_code(stock_code)
-        adjust = ADJUST_PARAMS[adj]
         collected: dict[str, list] = {}
         cursor = end
         for chunk in range(MAX_CHUNKS):
             if chunk:
                 # 全历史回溯逐段连续请求，按实测限速留出间隔
                 sleep(CHUNK_PAUSE_S)
-            rows = fetch_kline_rows(tx_code, cursor, adjust)
+            rows, fell_back = fetch_kline_rows(tx_code, cursor, adjust)
+            if fell_back:
+                if not self.adjust_fallback:
+                    log.warning(
+                        "腾讯 %s 缺 %s 复权键，上游按 day 回落"
+                        "（无复权事件或不提供调整序列）",
+                        tx_code,
+                        adjust or "none",
+                    )
+                self.adjust_fallback = True
             if not rows:
                 break
             added = 0
@@ -216,7 +242,7 @@ class TencentAdapter:
             if not first or first < start:
                 break
             try:
-                nxt = _previous_day(first)
+                nxt = _previous_calendar_day(first)
             except ValueError as e:
                 raise FetchError(f"腾讯K线日期格式异常: {first!r}") from e
             if nxt >= cursor:
@@ -227,6 +253,7 @@ class TencentAdapter:
         return [b for b in bars if start <= b["trade_date"] <= end]
 
 
-def _previous_day(yyyymmdd: str) -> str:
+def _previous_calendar_day(yyyymmdd: str) -> str:
+    """前一个自然日（不感知周末/节假日；仅用于回溯游标推进）。"""
     d = datetime.strptime(yyyymmdd, "%Y%m%d").date() - timedelta(days=1)
     return d.strftime("%Y%m%d")

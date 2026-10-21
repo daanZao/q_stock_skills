@@ -15,20 +15,12 @@ change_amount / amplitude 由前收推算——多取 7 个自然日以拿到区
 
 from ..dates import add_days
 from ._bse_codes import to_market_code
-from ._daily_common import ADJUST_PARAMS, derive_change_fields
+from ._daily_common import adjust_param, derive_change_fields
 from ._eastmoney import _int, _num
-from .base import FetchError
+from .base import FetchError, import_akshare
 
 
 _PRE_CLOSE_LOOKBACK_DAYS = 7  # 覆盖长假，保证区间首日前收可取
-
-
-def _ak():
-    try:
-        import akshare as ak
-    except ImportError as e:
-        raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
-    return ak
 
 
 def map_sina_rows(records: list[dict]) -> list[dict]:
@@ -80,9 +72,8 @@ class SinaAdapter:
     def fetch_daily(
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
     ) -> list[dict]:
-        if adj not in ADJUST_PARAMS:
-            raise FetchError(f"新浪不支持复权口径: {adj}", kind="unsupported")
-        ak = _ak()
+        adjust = adjust_param("新浪", adj)
+        ak = import_akshare()
         symbol = to_market_code(stock_code)
         fetch_start = add_days(start, -_PRE_CLOSE_LOOKBACK_DAYS)
         try:
@@ -90,7 +81,7 @@ class SinaAdapter:
                 symbol=symbol,
                 start_date=fetch_start,
                 end_date=end,
-                adjust=ADJUST_PARAMS[adj],
+                adjust=adjust,
             )
         except Exception as e:  # noqa: BLE001 - 上游任何失败都收敛为该源失败
             raise FetchError(f"新浪日线抓取失败（{symbol}）: {e}") from e

@@ -15,6 +15,14 @@
 - **大变更 / 批量回补** → 交付固定 CLI 入口 + 操作手册（同上）
 - **测试触库** → 单次处理不超过 100 行；动手前先备好数据还原脚本，结束即还原，不留永久改动
 
+**测试环境 `qstock_test`**：pytest 经维护库 `postgres` 自动创建、每个测试前清空所有表（`tests/conftest.py`，可用 `QSTOCK_TEST_PG_DSN` / `QSTOCK_TEST_MAINT_DSN` 覆盖）。CLI 工具与脚本的手工验证直接指向它：
+
+```bash
+PG_DSN=postgresql://localhost/qstock_test qstock-scheduler daily --codes 600519 --date 20261020
+```
+
+对 `qstock_test` 的操作豁免上面的 ≤100 行/还原纪律——该库与业务库隔离，可随时 drop 重建（pytest 会重新供给）。业务库纪律原文不变。
+
 ## 文档分工
 
 - **结构与入口：`docs/knowledge-graph.md`** — 项目全图；"想改 X 先看哪里"覆盖改 schema / 加数据源 / 加指标 / 加 MCP 工具 / 改 fallback 等分支。改代码前先读。

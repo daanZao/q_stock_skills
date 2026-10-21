@@ -20,17 +20,9 @@ from ._board_em import (
     map_zt_pool_rows,
 )
 from ._eastmoney import map_eastmoney_rows, map_spot_rows
-from .base import FetchError, json_safe
+from .base import FetchError, import_akshare, json_safe
 
 log = logging.getLogger(__name__)
-
-
-def _ak():
-    try:
-        import akshare as ak
-    except ImportError as e:
-        raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
-    return ak
 
 
 class AkshareAdapter:
@@ -51,10 +43,7 @@ class AkshareAdapter:
 
     def fetch_market_snapshot(self) -> dict:
         """单次全市场快照；spot_em 无交易日列，trade_date 为 None 由工具层回退。"""
-        try:
-            import akshare as ak
-        except ImportError as e:
-            raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
+        ak = import_akshare()
         try:
             df = ak.stock_zh_a_spot_em()
         except Exception as e:
@@ -67,7 +56,7 @@ class AkshareAdapter:
 
     def fetch_stock_list(self) -> list[dict]:
         """股票清单：stock_info_a_code_name（code/name 两列）。"""
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_info_a_code_name()
         except Exception as e:
@@ -81,7 +70,7 @@ class AkshareAdapter:
 
     def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
         """指数日线：index_zh_a_hist 与个股历史同为东财中文列，共用映射；空区间返回 []。"""
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.index_zh_a_hist(
                 symbol=index_code, period="daily", start_date=start, end_date=end
@@ -100,7 +89,7 @@ class AkshareAdapter:
         section 级容错：拿到什么传什么（失败 section 记入 errors 键），
         全部无数据才抛 FetchError 触发 fallback。
         """
-        ak = _ak()
+        ak = import_akshare()
         payload: dict = {}
         errors: list[str] = []
         for section, call in [
@@ -136,7 +125,7 @@ class AkshareAdapter:
         return [r for r in self._index_rows() if r["index_code"] == index_code]
 
     def _index_rows(self) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
         except Exception as e:
@@ -146,7 +135,7 @@ class AkshareAdapter:
         return map_index_rows(df.to_dict("records"))
 
     def fetch_boards(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         rows = []
         for board_type, fn in [
             ("industry", ak.stock_board_industry_name_em),
@@ -163,7 +152,7 @@ class AkshareAdapter:
 
     def fetch_zt_pool(self, trade_date: str) -> list[dict]:
         """涨/跌停/炸板池：单池失败记录并继续，三池全失败才抛 FetchError。"""
-        ak = _ak()
+        ak = import_akshare()
         rows, errors = [], []
         for pool_type, api_name in [
             ("zt", "stock_zt_pool_em"),
@@ -185,7 +174,7 @@ class AkshareAdapter:
         return rows
 
     def fetch_strong_stocks(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_zt_pool_strong_em(date=trade_date)
         except Exception as e:
@@ -221,7 +210,7 @@ class AkshareAdapter:
         return result
 
     def _lhb_basic(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lhb_detail_em(start_date=trade_date, end_date=trade_date)
         except TypeError as e:
@@ -238,7 +227,7 @@ class AkshareAdapter:
 
     def _lhb_statistic(self, trade_date: str) -> list[dict]:
         # 接口为近三月滚动统计，无日期参数；行级"最近上榜日"在映射层写入 trade_date
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lhb_stock_statistic_em(symbol="近三月")
         except Exception as e:
@@ -249,7 +238,7 @@ class AkshareAdapter:
 
     def _lhb_yyb_capital(self, trade_date: str) -> list[dict]:
         # 接口为当前累计资金榜，无日期参数；fetch_date 由工具层记执行日
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lh_yyb_capital()
         except Exception as e:
@@ -259,7 +248,7 @@ class AkshareAdapter:
         return map_lhb_yyb_capital_rows(df.to_dict("records"))
 
     def _lhb_yyb_most(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lh_yyb_most()
         except Exception as e:
@@ -275,7 +264,7 @@ class AkshareAdapter:
     ) -> list[dict]:
         """板块历史日 K（push2his）：stock_board_industry/concept_hist_em，
         不复权（板块行情无复权语义）。空区间返回 []。"""
-        ak = _ak()
+        ak = import_akshare()
         fn = (
             ak.stock_board_industry_hist_em
             if board_type == "industry"
@@ -292,7 +281,7 @@ class AkshareAdapter:
 
     def fetch_board_cons(self, board_name: str) -> list[dict]:
         """概念板块成分（cons 接口）：stock_board_concept_cons_em 按板块名。"""
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_board_concept_cons_em(symbol=board_name)
         except Exception as e:
