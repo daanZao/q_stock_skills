@@ -21,7 +21,7 @@ Minervini SEPA 框架的 A 股分析指引。本 skill 为方法论 skill，主�
    - `ma --on volume --periods 20`（20 日均量，VCP 量能判断）
    - `diff1 --on ma200`（200 日线方向判断，判定口径见判断逻辑第一/二步）
    - 指标返回 `insufficient_data` 时按数据缺口处理（加大 `days` 重新 `query_daily` 后重算；仍不足则报告缺口）。
-3. **基本面数据**：MCP `get_fundamentals(stock_code)`（proxy 透传，字段名保留上游，需自行解读）。需要：最近 4 个季度 EPS、营收、毛利率、扣非净利润、ROE。各数据源 section 不同（akshare：`financial_abstract`/`valuation_indicator`；efinance：`base_info` 基础信息快照；baostock：`profit`/`growth` 单季），`data` 中可能带 `errors` 键列出失败 section。**`status=error`（全部数据源失败）或所需字段缺失时，E 维度明确降级标注缺失，不臆断计分，绝不编造**（计分口径见输出契约第 3 条）。
+3. **基本面数据**：MCP `get_fundamentals(stock_code)`（proxy 透传，字段名保留上游，需自行解读）。需要：最近 4 个季度 EPS、营收、毛利率、扣非净利润、ROE。各数据源 section 不同（akshare：`financial_abstract` 新浪财务摘要 / `valuation` 百度股市通估值日序列；baostock：`profit`/`growth` 单季；efinance `base_info` 已弃用，见响应 `planned_absent` 键），`data` 中可能带 `errors` 键列出失败 section。E 维度五字段（EPS/营收/毛利率/扣非/ROE）全部在 `financial_abstract`（新浪幸存源）；**`status=error`（全部数据源失败）或所需字段缺失时，E 维度明确降级标注缺失，不臆断计分，绝不编造**（计分口径见输出契约第 3 条；兜底态 baostock 缺扣非净利润/营收同比，"加速/4 季度"类判断不可做，按降级规则标注）。
 4. **指数基线**：沪深300 等指数日线不在 `query_daily` 覆盖范围（仅个股）。RS 对比与大盘阶段判断的降级路径：`query_board_data("market_indices")` 盘面指数快照做近期表现近似（该表为盘面落库数据，查不到时先 `fetch_board_snapshot` 补抓当日盘面）；需要指数 250 日序列而无法经 MCP 获得时，RS 与大盘阶段标注"近似/降级"并说明置信度影响。
 5. **催化剂/风险信息**：近期公告、新闻（会话中由用户提供或检索获得；不可得则标注缺失）。
 

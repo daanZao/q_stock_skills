@@ -82,13 +82,14 @@ def default_daily_adapters() -> list[DailyAdapter]:
 
 
 def default_fundamentals_adapters() -> list[FundamentalsAdapter]:
-    """基本面透传（issue #6）fallback 链：akshare → efinance → baostock。
+    """基本面透传（issue #6）fallback 链：akshare → baostock（issue #115）。
 
-    与日线链顺序不同：按数据丰富度排序，akshare 提供财务指标序列，
-    efinance 仅基础/估值快照，baostock 兜底最近季度利润/成长数据。
+    akshare 提供新浪财务摘要（financial_abstract）+ 百度股市通估值日序列
+    （valuation）；efinance base_info 随东财链路退役（planned_absent，见
+    deprecations，#113 第四态机制接管）；baostock 兜底最近季度
+    profit/growth。
     """
     from .akshare_adapter import AkshareAdapter
     from .baostock_adapter import BaostockAdapter
-    from .efinance_adapter import EfinanceAdapter
 
-    return [AkshareAdapter(), EfinanceAdapter(), BaostockAdapter()]
+    return [AkshareAdapter(), BaostockAdapter()]

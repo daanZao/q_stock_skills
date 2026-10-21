@@ -242,3 +242,74 @@ def test_daily_fetch_rerun_reports_zero_gap(pg_ready, capsys):
     assert out["results"][0]["source"] is None
     assert out["results"][0]["rows_upserted"] == 0
     assert "零抓取" in out["results"][0]["note"]
+
+
+# ---------------------------------------------------------------- 基本面透传固定入口（issue #115）
+
+FUNDAMENTALS_PAYLOAD = {
+    "financial_abstract": [{"选项": "常用指标", "指标": "营业总收入", "20251231": 1.7e11}],
+    "valuation": {"总市值": [{"date": "2026-10-20", "value": 1.64e12}]},
+}
+
+
+def _fund_run(capsys, argv, adapters):
+    rc = scheduler.main(argv, fundamentals_adapters=adapters)
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_fundamentals_ok_reports_sections_and_planned_absent(capsys):
+    from fakes import FakeFundamentalsAdapter
+
+    rc, out = _fund_run(
+        capsys,
+        ["fundamentals", "--codes", "600519,000001"],
+        [FakeFundamentalsAdapter("akshare")],
+    )
+    assert rc == 0
+    assert out["job"] == "fundamentals"
+    assert out["status"] == "ok"
+    assert out["total"] == 2 and out["failed"] == 0
+    assert [r["stock_code"] for r in out["results"]] == ["600519", "000001"]
+    assert all(r["source"] == "akshare" for r in out["results"])
+    assert all(
+        r["sections"] == ["financial_abstract", "valuation"] for r in out["results"]
+    )
+    assert all("base_info" in r["planned_absent"] for r in out["results"])
+
+
+def test_fundamentals_section_errors_reported_not_fatal(capsys):
+    from fakes import FakeFundamentalsAdapter
+
+    payload = dict(FUNDAMENTALS_PAYLOAD, errors=["valuation: 市净率: boom"])
+    rc, out = _fund_run(
+        capsys,
+        ["fundamentals", "--codes", "600519"],
+        [FakeFundamentalsAdapter("akshare", payload=payload)],
+    )
+    assert rc == 0
+    r = out["results"][0]
+    assert r["sections"] == ["financial_abstract", "valuation"]
+    assert r["section_errors"] == ["valuation: 市净率: boom"]
+
+
+def test_fundamentals_all_fail_exit_1_still_declares_planned_absent(capsys):
+    from fakes import FakeFundamentalsAdapter
+
+    rc, out = _fund_run(
+        capsys,
+        ["fundamentals", "--codes", "600519"],
+        [FakeFundamentalsAdapter("akshare", fail_times=99),
+         FakeFundamentalsAdapter("baostock", fail_times=99)],
+    )
+    assert rc == 1
+    assert out["status"] == "error"
+    r = out["results"][0]
+    assert r["status"] == "error"
+    assert "base_info" in r["planned_absent"]
+    assert [a["source"] for a in r["attempted_sources"]] == ["akshare", "baostock"]
+
+
+def test_fundamentals_requires_codes(capsys):
+    rc, out = _fund_run(capsys, ["fundamentals"], [])
+    assert rc == 1
+    assert "--codes" in out["error"]
