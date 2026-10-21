@@ -7,7 +7,9 @@
                              tools_board 内联记录，本层不重复落账）。
                              boards 成功时附带概念成分积累（cons → 成分字典
                              'em' 体系）；cons 独立成败落台账、不拖垮主批
-                             （不影响退出码）。
+                             （不影响退出码）。在册 planned_absent（第四态，
+                             issue #113）的 section 占位通过：响应
+                             status=planned_absent、不计失败、不影响退出码。
   morning [--date YYYYMMDD]  次晨批：baostock 一把抓前一交易日全市场日线
                              + 7 大指数尾行补漏（tools_morning），默认目标日
                              为前一交易日。

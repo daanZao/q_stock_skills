@@ -71,8 +71,12 @@ _Avoid_: 板块映射表
 _Avoid_: 板块回补数据
 
 **采集台账**:
-一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/三态 status/来源/行数/error_kind/起止时间），全历史保留。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败，三者表述不得混用。
+一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。
 _Avoid_: 采集日志、抓取记录
+
+**计划缺席（planned_absent）**:
+采集编排第四态（决策见 #102，实施 #113）：已定方向待接线的面以该态占位——不抓取、零落库、不计失败、不进异常报告、不触发每日复盘中止线；收盘后批每日为其落一条 planned_absent 占位台账，历史模式就绪归因由此区分"计划缺席"与"未采集"。永久弃用面不占位，直接从采集清单删除（如概念维度资金流字段）。核心 section 集维持原样，真故障（error）仍触发中止。
+_Avoid_: 跳过 section、禁用 section
 
 **表承载契约**:
 每张表的写入方与读取方在其 DDL 文件头注释成文（`sql/NNN_*.sql` 头注"承载：写 X；读 Y"）；新增表或新写入路径必须同步头注。

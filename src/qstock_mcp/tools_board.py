@@ -28,6 +28,13 @@ fetch_failed / 全源口径不含该指数 no_data_for_date）。
 （detail=realtime_section_no_backfill）零落库；indices 段落库前校验行级日期
 ==请求日期（不符 detail=date_mismatch 零落库）。防线拒收同样落采集台账
 （issue #77：被拒的污染尝试最值得审计）。
+
+第四态 planned_absent（issue #113，spec #111/#102，ADR 0007 补记）：已定方向
+待接线的 section 在 PLANNED_ABSENT_SECTIONS 登记后以第四态占位——循环内最先
+判定，不抓取、零落库、不计 failed_sections、不触发核心 section fail-fast、
+全占位时整体仍 ok；每运行落一条 planned_absent 占位台账（历史模式就绪归因
+由此区分"计划缺席"与"未采集"）。永久弃用面不占位：直接从 ALL_SECTIONS /
+调度采集清单删除（如概念维度资金流字段，见 daily-review skill）。
 """
 
 import logging
@@ -69,6 +76,12 @@ CORE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks")
 # 历史日期回补不支持——对历史日期调用返回 unsupported + detail，零落库。
 REALTIME_SECTIONS = ("indices", "boards")
 REALTIME_NO_BACKFILL = "realtime_section_no_backfill"
+
+# 第四态登记处（issue #113，spec #111/#102）：已定方向待接线的
+# section → 缺席原因（决策依据）。在册 section 占位不抓：响应 status=
+# "planned_absent"，落 planned_absent 占位台账，不计失败、不进异常报告。
+# 接线完成即从本字典删除该 section 即恢复采集；测试用 monkeypatch 替换本字典。
+PLANNED_ABSENT_SECTIONS: dict[str, str] = {}
 
 _LHB_EMPTY_NOTE = "当日无龙虎榜数据（龙虎榜盘后发布）"
 
@@ -170,6 +183,25 @@ def fetch_board_snapshot(
         today = today_str()
         for name in selected:
             started = datetime.now(timezone.utc)
+            if name in PLANNED_ABSENT_SECTIONS:
+                # 第四态占位（issue #113）：已定方向待接线，不抓取零落库、不计
+                # 失败；占位落账供历史模式就绪归因（计划缺席 ≠ 未采集 ≠ 故障）
+                reason = PLANNED_ABSENT_SECTIONS[name]
+                record_collection(
+                    conn,
+                    trade_date=effective,
+                    section=name,
+                    status="planned_absent",
+                    rows=0,
+                    detail=f"planned_absent: {reason}",
+                    started_at=started,
+                )
+                results[name] = {
+                    "rows": 0,
+                    "status": "planned_absent",
+                    "note": f"计划缺席（已定方向待接线）：{reason}",
+                }
+                continue
             if effective < today and name in REALTIME_SECTIONS:
                 # 服务端防线（issue #78）：实时语义 section 不可回补历史日期，零落库
                 # 拒收也落账（issue #77）：被拒绝的历史回补尝试最值得审计
@@ -277,7 +309,9 @@ def fetch_board_snapshot(
             results[name] = res
     finally:
         conn.close()
-    failed = [k for k, v in results.items() if v["status"] != "ok"]
+    failed = [
+        k for k, v in results.items() if v["status"] not in ("ok", "planned_absent")
+    ]
     payload = {
         "tool": tool,
         "params": params,
