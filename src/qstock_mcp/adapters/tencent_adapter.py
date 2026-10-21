@@ -33,7 +33,6 @@ qfqday/hfqday/day 键。单次最多返回 640 根，且上游忽略 start 参�
 """
 
 import json
-import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -45,11 +44,10 @@ from ._daily_common import ADJUST_PARAMS, derive_change_fields
 from ._eastmoney import _int, _num
 from .base import FetchError
 
-log = logging.getLogger(__name__)
 
 KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 TIMEOUT_SEC = 20
-MAX_BARS = 640  # 上游单次返回上限（实测 count>640 仍然只给 640）
+MAX_BARS = 640  # 上游单次返回上限（实测请求 1000/3000 根仍只给 640）
 MAX_CHUNKS = 64  # 640 × 64 ≈ 4 万根，覆盖 A 股全历史
 CHUNK_PAUSE_S = 0.3  # 多段回溯时对腾讯限速（实测连发 5–6 个请求触发 TLS 断连）
 

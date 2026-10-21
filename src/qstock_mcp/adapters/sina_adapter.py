@@ -13,15 +13,12 @@ change_amount / amplitude 由前收推算——多取 7 个自然日以拿到区
 旧码按 bse_code_map 归一化到 920 新码。
 """
 
-import logging
-
 from ..dates import add_days
 from ._bse_codes import to_market_code
 from ._daily_common import ADJUST_PARAMS, derive_change_fields
 from ._eastmoney import _int, _num
 from .base import FetchError
 
-log = logging.getLogger(__name__)
 
 _PRE_CLOSE_LOOKBACK_DAYS = 7  # 覆盖长假，保证区间首日前收可取
 
