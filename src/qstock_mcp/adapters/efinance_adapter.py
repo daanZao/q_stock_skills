@@ -91,18 +91,20 @@ class EfinanceAdapter:
         """efinance 无干净的指数历史接口，明确拒绝（不伪造）。"""
         raise FetchError("efinance 不支持指数日线", kind="unsupported")
 
-    # ---------------------------------------------------------------- 基本面透传（issue #6）
+    # ---------------------------------------------------------------- 基本面透传（issue #6/#115）
 
-    def fetch_fundamentals(self, stock_code: str) -> dict:
-        """基础/估值快照透传（get_base_info 单行），字段名原样保留上游。"""
-        ef = _ef()
-        try:
-            info = ef.stock.get_base_info(stock_code)
-        except Exception as e:
-            raise FetchError(f"efinance 基本面抓取失败: {e}") from e
-        if info is None or len(info) == 0:
-            raise FetchError(f"efinance 基本面无数据（{stock_code}）")
-        return {"base_info": json_safe(dict(info))}
+    def fetch_fundamentals(self, stock_code: str) -> NoReturn:
+        """base_info 面废弃（issue #115，spec #111 剔东财）：不再触达东财 push2。
+
+        弃用事实清单见 deprecations.PLANNED_ABSENT_SECTIONS（第四态
+        planned_absent 的先行承载，#113 编排契约落地后由其接管占位语义）；
+        估值字段改由 akshare 百度股市通估值序列承载。
+        """
+        raise FetchError(
+            "efinance base_info 已弃用（spec #111 剔东财）：估值改由百度股市通承载"
+            f"（{stock_code} 不抓取）",
+            kind="unsupported",
+        )
 
     def _unsupported(self, section: str) -> NoReturn:
         raise FetchError(f"efinance 不支持盘面 section: {section}", kind="unsupported")

@@ -81,30 +81,33 @@ class AkshareAdapter:
             return []
         return map_eastmoney_rows(df.to_dict("records"))
 
-    # ---------------------------------------------------------------- 基本面透传（issue #6）
+    # ---------------------------------------------------------------- 基本面透传（issue #6/#115）
 
     def fetch_fundamentals(self, stock_code: str) -> dict:
-        """财务摘要 + 估值指标透传：section 名对应上游接口，字段名原样保留。
+        """财务摘要 + 估值序列透传：section 名对应上游接口，字段名原样保留。
 
+        financial_abstract 为新浪财务摘要（幸存，非东财）；valuation 为百度
+        股市通估值日序列（issue #115，替代已被 akshare 移除的乐咕
+        stock_a_indicator_lg——原 valuation_indicator section 随之退役）。
         section 级容错：拿到什么传什么（失败 section 记入 errors 键），
         全部无数据才抛 FetchError 触发 fallback。
         """
         ak = import_akshare()
         payload: dict = {}
         errors: list[str] = []
-        for section, call in [
-            ("financial_abstract", lambda: ak.stock_financial_abstract(symbol=stock_code)),
-            ("valuation_indicator", lambda: ak.stock_a_indicator_lg(symbol=stock_code)),
-        ]:
-            try:
-                df = call()
-            except Exception as e:  # noqa: BLE001 - 单 section 失败不拖垮其他
-                errors.append(f"{section}: {e}")
-                continue
+        try:
+            df = ak.stock_financial_abstract(symbol=stock_code)
+        except Exception as e:  # noqa: BLE001 - 单 section 失败不拖垮其他
+            errors.append(f"financial_abstract: {e}")
+        else:
             if df is not None and not df.empty:
-                payload[section] = json_safe(df.to_dict("records"))
+                payload["financial_abstract"] = json_safe(df.to_dict("records"))
             else:
-                errors.append(f"{section}: 空返回")
+                errors.append("financial_abstract: 空返回")
+        valuation, valuation_errors = _fetch_baidu_valuation(ak, stock_code)
+        if valuation:
+            payload["valuation"] = valuation
+        errors.extend(f"valuation: {e}" for e in valuation_errors)
         if not payload:
             raise FetchError(
                 f"akshare 基本面无数据（{stock_code}）: {'; '.join(errors) or '空返回'}"
@@ -289,3 +292,36 @@ class AkshareAdapter:
         if df is None or df.empty:
             return []
         return map_cons_rows(df.to_dict("records"))
+
+
+# ---------------------------------------------------------------- 百度股市通估值（issue #115）
+
+# stock_zh_valuation_baidu 的指标枚举（akshare docstring 定稿）；
+# period 取近一年：单股单指标一次请求即全年日序列，与调研实测一致
+#（docs/research/2026-10-20-fundamental-gaps.md）。
+_BAIDU_VALUATION_INDICATORS = ("总市值", "市盈率(TTM)", "市盈率(静)", "市净率", "市现率")
+_BAIDU_VALUATION_PERIOD = "近一年"
+
+
+def _fetch_baidu_valuation(ak, stock_code: str) -> tuple[dict, list[str]]:
+    """百度股市通估值日序列：逐指标抓取（date/value 列原样保留上游）。
+
+    单指标失败只记 errors 不拖垮其他指标；全部指标无数据返回空 dict
+    （由调用方记 valuation section 失败）。上游列为 date（日期）/value
+    （数值），经 json_safe 序列化为 ISO 字符串/数值。
+    """
+    series: dict = {}
+    errors: list[str] = []
+    for indicator in _BAIDU_VALUATION_INDICATORS:
+        try:
+            df = ak.stock_zh_valuation_baidu(
+                symbol=stock_code, indicator=indicator, period=_BAIDU_VALUATION_PERIOD
+            )
+        except Exception as e:  # noqa: BLE001 - 单指标失败不拖垮其他指标
+            errors.append(f"{indicator}: {e}")
+            continue
+        if df is not None and not df.empty:
+            series[indicator] = json_safe(df.to_dict("records"))
+        else:
+            errors.append(f"{indicator}: 空返回")
+    return series, errors

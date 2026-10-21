@@ -21,6 +21,10 @@
                              默认走 腾讯→新浪→baostock fallback 链抓取落库；
                              --check 三源直取对拍（不落库）。--all 从
                              stock_list 取全市场（建议配 --throttle 1 避风控）。
+  fundamentals --codes A,B   基本面透传固定入口（issue #115，spec #111）：
+                             逐 code 走 get_fundamentals 链（akshare→baostock，
+                             估值走百度股市通、base_info planned_absent）出
+                             状态报告；proxy 面不落库，可挂定时任务做链路巡检。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -242,10 +246,62 @@ def cmd_daily(
     return 0 if status == "ok" else 1
 
 
+def cmd_fundamentals(
+    codes_arg: str | None = None,
+    fundamentals_adapters: Sequence | None = None,
+) -> int:
+    """基本面透传固定入口（issue #115）：逐 code 走 get_fundamentals 链。
+
+    proxy 面不落库——本命令产出逐 code 状态报告（section 覆盖/单 section
+    errors/弃用清单/逐源明细），一次开发可重复运行，可挂定时任务做基本面
+    链路健康巡检与代表股真实拉取冒烟（验收入口）。
+    """
+    tool = "fundamentals"
+    codes = _parse_codes(codes_arg)
+    if not codes:
+        _emit({"status": "error", "job": tool,
+               "error": "需要 --codes 指定标的（逗号分隔）"})
+        return 1
+    from .tools_fundamentals import get_fundamentals
+
+    results: list[dict] = []
+    for code in codes:
+        raw = get_fundamentals(code, adapters=fundamentals_adapters)
+        entry: dict = {"stock_code": code, "status": raw.get("status")}
+        if raw.get("status") == "ok":
+            data = raw.get("data") or {}
+            entry["source"] = raw.get("source")
+            entry["sections"] = sorted(
+                k for k in data if k != "errors" and isinstance(data[k], (dict, list))
+            )
+            entry["planned_absent"] = raw.get("planned_absent") or {}
+            if data.get("errors"):
+                entry["section_errors"] = data["errors"]
+        else:
+            entry["error"] = raw.get("error")
+            entry["planned_absent"] = raw.get("planned_absent") or {}
+            if raw.get("attempted_sources"):
+                entry["attempted_sources"] = raw["attempted_sources"]
+        results.append(entry)
+    succeeded = sum(1 for r in results if r["status"] == "ok")
+    failed = len(results) - succeeded
+    status = aggregate_batch_status(len(results), failed)
+    _emit({
+        "status": status,
+        "job": tool,
+        "total": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results,
+    })
+    return 0 if status == "ok" else 1
+
+
 def main(argv: list[str] | None = None,
          adapters: Sequence[BoardAdapter] | None = None,
          cons_adapters: Sequence | None = None,
-         daily_adapters: Sequence | None = None) -> int:
+         daily_adapters: Sequence | None = None,
+         fundamentals_adapters: Sequence | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -284,6 +340,11 @@ def main(argv: list[str] | None = None,
                          help="对拍模式：逐源直取结束日 bar 比对，不落库")
     p_daily.add_argument("--throttle", type=float, default=None,
                          help="逐 code 间隔秒；--all 缺省 1.0，显式 codes 缺省 0")
+    p_fund = sub.add_parser(
+        "fundamentals",
+        help="基本面透传：逐 code 走 get_fundamentals 链出状态报告（不落库）")
+    p_fund.add_argument("--codes", default=None,
+                        help="逗号分隔股票代码（必填），如 600519,000001")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -310,6 +371,11 @@ def main(argv: list[str] | None = None,
             )
         if args.command == "backfill":
             return cmd_backfill(args.start, args.end)
+        if args.command == "fundamentals":
+            return cmd_fundamentals(
+                codes_arg=args.codes,
+                fundamentals_adapters=fundamentals_adapters,
+            )
     except Exception as e:  # 零例外：异常收敛为结构化错误输出
         _emit({"status": "error", "job": args.command,
                "error": f"{type(e).__name__}: {e}"})
