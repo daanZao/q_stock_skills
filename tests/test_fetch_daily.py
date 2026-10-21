@@ -202,3 +202,17 @@ def test_fetch_error_reports_healed_segments(pg_test):
     assert result["healed"] == [
         {"start": "20240101", "end": "20240107", "source": "headonly", "rows": 5}
     ]
+
+
+def test_fetch_daily_defaults_to_daily_chain(pg_test, monkeypatch):
+    """未注入 adapters 时走 腾讯→新浪→baostock 日线链（issue #112，东财退出）。"""
+    _init(pg_test)
+    tencent = FakeAdapter("tencent")
+    monkeypatch.setattr(
+        "qstock_mcp.tools_daily.default_daily_adapters", lambda: [tencent]
+    )
+    result = fetch_daily("600519", start="20240101", end="20240110")
+    assert result["status"] == "ok"
+    assert result["segments"] == [
+        {"start": "20240101", "end": "20240110", "source": "tencent", "rows": 8}
+    ]

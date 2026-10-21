@@ -13,7 +13,7 @@ import pytest
 
 from qstock_mcp import scheduler
 from qstock_mcp.db import ensure_schema
-from fakes import FakeBoardAdapter
+from fakes import FakeAdapter, FakeBoardAdapter
 
 TODAY = date.today().strftime("%Y%m%d")
 
@@ -148,3 +148,86 @@ class TestCloseContract:
         with pytest.raises(SystemExit) as e:
             scheduler.main([])
         assert e.value.code == 2
+
+
+# ---------------------------------------------------------------- 个股日线固定入口（issue #112）
+
+BAR = {
+    "trade_date": "20261020",
+    "open": 1321.01,
+    "high": 1335.00,
+    "low": 1316.14,
+    "close": 1331.88,
+    "volume": 3_413_600,
+    "amount": 452539.90,
+    "amplitude": 1.4234,
+    "change_percent": 0.5215,
+    "change_amount": 6.91,
+    "turnover_rate": 0.27,
+}
+
+
+def _daily_run(capsys, argv, adapters):
+    rc = scheduler.main(argv, daily_adapters=adapters)
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_daily_check_ok(capsys):
+    bar = dict(BAR)
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--codes", "600519", "--date", "20261020", "--check"],
+        [FakeAdapter("tencent", rows=[bar]),
+         FakeAdapter("sina", rows=[bar]),
+         FakeAdapter("baostock", rows=[bar])],
+    )
+    assert rc == 0
+    assert out["job"] == "daily" and out["mode"] == "check"
+    assert out["status"] == "ok"
+    assert out["results"][0]["stock_code"] == "600519"
+
+
+def test_daily_check_mismatch_exit_1(capsys):
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--codes", "600519", "--date", "20261020", "--check"],
+        [FakeAdapter("tencent", rows=[dict(BAR)]),
+         FakeAdapter("sina", rows=[dict(BAR, close=1340.0)])],
+    )
+    assert rc == 1
+    assert out["status"] == "mismatch"
+    assert out["mismatch_count"] == 1
+
+
+def test_daily_fetch_writes_rows_and_reports_source(pg_ready, capsys):
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--codes", "600519", "--date", "20261020"],
+        [FakeAdapter("tencent")],
+    )
+    assert rc == 0
+    assert out["mode"] == "fetch"
+    assert out["results"][0]["source"] == "tencent"
+    assert out["results"][0]["rows_upserted"] == 1
+
+    conn = psycopg2.connect(pg_ready)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT stock_code, trade_date, source FROM stock_daily"
+            " WHERE stock_code = '600519' AND trade_date = '20261020'"
+        )
+        assert cur.fetchone() == ("600519", "20261020", "tencent")
+    conn.close()
+
+
+def test_daily_input_conflicts_exit_1(capsys):
+    rc, out = _daily_run(capsys, ["daily", "--codes", "600519", "--all"], [])
+    assert rc == 1 and "互斥" in out["error"]
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--codes", "600519", "--date", "20261020", "--start", "20261001"],
+        [],
+    )
+    assert rc == 1 and "互斥" in out["error"]
+    rc, out = _daily_run(capsys, ["daily"], [])
+    assert rc == 1 and "--codes" in out["error"]

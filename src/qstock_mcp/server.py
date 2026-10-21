@@ -41,9 +41,9 @@ def fetch_daily(
     end: str | None = None,
     adj: str = "qfq",
 ) -> dict:
-    """抓取个股日线并落库：只补请求区间头尾缺口，efinance → akshare → baostock fallback，按 (stock_code, trade_date, adj) 幂等 upsert。
+    """抓取个股日线并落库：只补请求区间头尾缺口，腾讯 → 新浪 → baostock fallback（issue #112），按 (stock_code, trade_date, adj) 幂等 upsert。
 
-    stock_code: 6 位 A 股代码（如 600519）。days 与 start/end 二选一；
+    stock_code: 6 位 A 股代码（如 600519；北交所旧码 43x/83x/87x 自动归一化到 920）；days 与 start/end 二选一；
     日期格式 yyyymmdd 或 yyyy-mm-dd；adj: qfq/hfq/none。
     """
     return tools_daily.fetch_daily(stock_code, days=days, start=start, end=end, adj=adj)

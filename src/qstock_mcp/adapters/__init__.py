@@ -49,17 +49,36 @@ __all__ = [
     "is_bse_code",
     "json_safe",
     "default_adapters",
+    "default_daily_adapters",
     "default_fundamentals_adapters",
 ]
 
 
 def default_adapters() -> list[DataAdapter]:
-    """生产环境的 fallback 链：efinance → akshare → baostock（懒加载真实库）。"""
+    """盘面/快照等能力面的 fallback 链：efinance → akshare → baostock（懒加载真实库）。
+
+    个股日线不走本链——见 default_daily_adapters（issue #112 东财退出日线）。
+    """
     from .akshare_adapter import AkshareAdapter
     from .baostock_adapter import BaostockAdapter
     from .efinance_adapter import EfinanceAdapter
 
     return [EfinanceAdapter(), AkshareAdapter(), BaostockAdapter()]
+
+
+def default_daily_adapters() -> list[DailyAdapter]:
+    """个股日线 fallback 链（issue #112，spec #111）：腾讯 → 新浪 → baostock。
+
+    顺序依据 #104 收盘后实测：腾讯/新浪当晚均含当日行（T+0）；腾讯原生换手率、
+    amount 万元口径、北交所 920xxx 可取，故列首；新浪作备选（全历史下载慢、
+    上游明示易封 IP）；baostock 兜底保留 tradestatus 权威停牌列与 turn 换手率。
+    东财链路（efinance / akshare *_em）退出个股日线。
+    """
+    from .baostock_adapter import BaostockAdapter
+    from .sina_adapter import SinaAdapter
+    from .tencent_adapter import TencentAdapter
+
+    return [TencentAdapter(), SinaAdapter(), BaostockAdapter()]
 
 
 def default_fundamentals_adapters() -> list[FundamentalsAdapter]:

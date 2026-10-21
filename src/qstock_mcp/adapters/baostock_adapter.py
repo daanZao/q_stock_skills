@@ -1,7 +1,9 @@
-"""baostock 适配器（fallback 第 3 位，兜底）。
+"""baostock 适配器（个股日线 fallback 第 3 位，兜底）。
 
-约束（issue #3）：北交所代码（4/8/9 开头）明确拒绝；baostock 无振幅/换手/涨跌额列，
+约束（issue #3）：北交所代码（4/8/9 开头）明确拒绝；baostock 无振幅/涨跌额列，
 对应字段置 null（不伪造）。日期参数为 yyyy-mm-dd，adjustflag: 1 后复权/2 前复权/3 不复权。
+issue #112：`_FIELDS` 补 turn 列恢复换手率（个股与指数接口实测均可用，
+百分数口径直接入 turnover_rate）；全市场一把抓 map_astock_daily_rows 早已映射 turn。
 baostock 无全市场快照接口，fetch_market_snapshot 明确拒绝（issue #4）。
 init 轻量初始化（issue #8）：支持股票清单（query_stock_basic 过滤 A 股前缀）
 与指数日线（指数不复权，adjustflag=3）。
@@ -16,7 +18,7 @@ from ..dates import dash_date
 from ._eastmoney import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
-_FIELDS = "date,open,high,low,close,volume,amount,pctChg,tradestatus"
+_FIELDS = "date,open,high,low,close,volume,amount,pctChg,tradestatus,turn"
 _ADJUSTFLAG = {"qfq": "2", "hfq": "1", "none": "3"}
 
 
@@ -96,7 +98,7 @@ def map_baostock_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
                 "amplitude": None,
                 "change_percent": _num(r.get("pctChg")),
                 "change_amount": None,
-                "turnover_rate": None,
+                "turnover_rate": _num(r.get("turn")),  # issue #112：turn 列补换手率
                 "tradestatus": _int(r.get("tradestatus")),  # 权威停牌状态（issue #80）
             }
         )

@@ -24,8 +24,6 @@ from .base import FetchError, json_safe
 
 log = logging.getLogger(__name__)
 
-_ADJUST = {"qfq": "qfq", "hfq": "hfq", "none": ""}  # akshare 复权参数
-
 
 def _ak():
     try:
@@ -41,23 +39,15 @@ class AkshareAdapter:
     def fetch_daily(
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
     ) -> list[dict]:
-        try:
-            import akshare as ak
-        except ImportError as e:
-            raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=stock_code,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust=_ADJUST.get(adj, "qfq"),
-            )
-        except Exception as e:
-            raise FetchError(f"akshare 抓取失败: {e}") from e
-        if df is None or df.empty:
-            return []
-        return map_eastmoney_rows(df.to_dict("records"))
+        """东财个股日线已退役（spec #111 / issue #112）。
+
+        个股日线链路为 腾讯 → 新浪 → baostock；`stock_zh_a_hist`（东财 push2his）
+        不再被调用。保留方法并显式拒绝，避免误接线后静默走回东财。
+        """
+        raise FetchError(
+            "akshare 东财个股日线已退役（个股日线链：腾讯→新浪→baostock）",
+            kind="unsupported",
+        )
 
     def fetch_market_snapshot(self) -> dict:
         """单次全市场快照；spot_em 无交易日列，trade_date 为 None 由工具层回退。"""

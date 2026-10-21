@@ -15,6 +15,12 @@
                              板块历史回补：push2his 板块 K 线回补
                              market_boards（默认窗口 = 前一交易日前推约
                              3 个月），CLI 专用路径，不经历史日期防线。
+  daily [--codes A,B] [--all] [--limit N] [--date D | --start D --end D]
+        [--adj qfq|hfq|none] [--check] [--throttle SEC]
+                             个股日线固定入口（issue #112，spec #111）：
+                             默认走 腾讯→新浪→baostock fallback 链抓取落库；
+                             --check 三源直取对拍（不落库）。--all 从
+                             stock_list 取全市场（建议配 --throttle 1 避风控）。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -25,11 +31,17 @@ import argparse
 import json
 import logging
 import sys
+import time
 from typing import Sequence
 
 from .adapters import BoardAdapter
+from .dates import normalize_date, today_str
+from .db import connect
+from .output import aggregate_batch_status
+from .repository import select_stock_codes
 from .tools_backfill import accumulate_em_concepts, fetch_boards_backfill
 from .tools_board import fetch_board_snapshot
+from .tools_daily import compare_daily_sources, fetch_daily
 from .tools_morning import fetch_morning_batch
 
 CLOSE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
@@ -93,9 +105,141 @@ def cmd_backfill(start: str | None, end: str | None) -> int:
     return 0 if result.get("status") == "ok" else 1
 
 
+def _parse_codes(codes_arg: str | None) -> list[str]:
+    """逗号分隔代码 → 去空去重（保持输入顺序）。"""
+    seen: set[str] = set()
+    codes: list[str] = []
+    for raw in (codes_arg or "").split(","):
+        code = raw.strip()
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
+
+
+def _daily_range(
+    date_arg: str | None, start_arg: str | None, end_arg: str | None
+) -> tuple[tuple[str, str] | None, str | None]:
+    """解析日线日期参数：--date 单日 / --start+--end 区间 / 缺省当日。"""
+    if date_arg and (start_arg or end_arg):
+        return None, "--date 与 --start/--end 互斥"
+    try:
+        if date_arg:
+            day = normalize_date(date_arg)
+            return (day, day), None
+        if start_arg or end_arg:
+            first = start_arg if start_arg is not None else end_arg
+            last = end_arg if end_arg is not None else start_arg
+            assert first is not None and last is not None
+            start = normalize_date(first)
+            end = normalize_date(last)
+            if start > end:
+                return None, f"起始日 {start} 晚于结束日 {end}"
+            return (start, end), None
+        today = today_str()
+        return (today, today), None
+    except ValueError as e:
+        return None, str(e)
+
+
+def cmd_daily(
+    codes_arg: str | None = None,
+    all_codes: bool = False,
+    limit: int | None = None,
+    date_arg: str | None = None,
+    start_arg: str | None = None,
+    end_arg: str | None = None,
+    adj: str = "qfq",
+    check: bool = False,
+    throttle: float | None = None,
+    daily_adapters: Sequence | None = None,
+) -> int:
+    """个股日线固定入口（issue #112）：抓取落库 / 三源对拍。
+
+    - 默认（fetch）：逐 code 走 腾讯→新浪→baostock fallback 链落库；
+    - --check：逐源直取结束日 bar 做字段级对拍，不落库；
+    - --all：从 stock_list 取全市场，缺省按 1 秒/只节流（腾讯连接级限速实测）。
+    """
+    tool = "daily"
+    rng, err = _daily_range(date_arg, start_arg, end_arg)
+    if err:
+        _emit({"status": "error", "job": tool, "error": err})
+        return 1
+    assert rng is not None
+    start, end = rng
+    codes = _parse_codes(codes_arg)
+    if codes and all_codes:
+        _emit({"status": "error", "job": tool,
+               "error": "--codes 与 --all 互斥"})
+        return 1
+    if not codes and not all_codes:
+        _emit({"status": "error", "job": tool,
+               "error": "需要 --codes 或 --all 指定标的"})
+        return 1
+    if all_codes:
+        conn, db_err = connect()
+        if db_err:
+            _emit({"status": "error", "job": tool, "error": db_err})
+            return 1
+        try:
+            codes = select_stock_codes(conn)
+        finally:
+            conn.close()
+        if limit is not None:
+            codes = codes[:limit]
+        if not codes:
+            _emit({"status": "error", "job": tool,
+                   "error": "股票清单为空（先运行 qstock-mcp init 或 init_database）"})
+            return 1
+    if check:
+        result = compare_daily_sources(
+            codes, end, adj=adj, adapters=daily_adapters
+        )
+        _emit({"job": tool, "mode": "check", **result})
+        return 0 if result.get("status") == "ok" else 1
+    pause = throttle if throttle is not None else (1.0 if all_codes else 0.0)
+    results: list[dict] = []
+    for i, code in enumerate(codes):
+        raw = fetch_daily(
+            code, start=start, end=end, adj=adj, adapters=daily_adapters
+        )
+        entry: dict = {"stock_code": code, "status": raw.get("status")}
+        if raw.get("status") == "ok":
+            entry["source"] = ",".join(
+                sorted({s["source"] for s in raw.get("segments", [])})
+            )
+            entry["rows_upserted"] = raw.get("rows_upserted", 0)
+            entry["data_range"] = raw.get("data_range")
+            if raw.get("note"):
+                entry["note"] = raw["note"]
+        else:
+            entry["error"] = raw.get("error")
+            if raw.get("attempted_sources"):
+                entry["attempted_sources"] = raw["attempted_sources"]
+        results.append(entry)
+        if pause and i < len(codes) - 1:
+            time.sleep(pause)
+    succeeded = sum(1 for r in results if r["status"] == "ok")
+    failed = len(results) - succeeded
+    status = aggregate_batch_status(len(results), failed)
+    _emit({
+        "status": status,
+        "job": tool,
+        "mode": "fetch",
+        "range": {"start": start, "end": end},
+        "adj": adj,
+        "total": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results,
+    })
+    return 0 if status == "ok" else 1
+
+
 def main(argv: list[str] | None = None,
          adapters: Sequence[BoardAdapter] | None = None,
-         cons_adapters: Sequence | None = None) -> int:
+         cons_adapters: Sequence | None = None,
+         daily_adapters: Sequence | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -114,6 +258,26 @@ def main(argv: list[str] | None = None,
                             help="回补起点 yyyymmdd，缺省 end 前推约 3 个月")
     p_backfill.add_argument("--end", default=None,
                             help="回补终点 yyyymmdd，缺省前一交易日")
+    p_daily = sub.add_parser(
+        "daily", help="个股日线：腾讯→新浪→baostock 抓取落库 / 三源对拍")
+    p_daily.add_argument("--codes", default=None,
+                         help="逗号分隔股票代码（支持北交所旧码 43x/83x/87x）")
+    p_daily.add_argument("--all", action="store_true",
+                         help="从数据库 stock_list 取全市场标的")
+    p_daily.add_argument("--limit", type=int, default=None,
+                         help="--all 时只取前 N 只（冒烟用）")
+    p_daily.add_argument("--date", default=None,
+                         help="单日 yyyymmdd，缺省当日")
+    p_daily.add_argument("--start", default=None,
+                         help="区间起点 yyyymmdd（与 --end 配对）")
+    p_daily.add_argument("--end", default=None,
+                         help="区间终点 yyyymmdd（与 --start 配对）")
+    p_daily.add_argument("--adj", default="qfq", choices=("qfq", "hfq", "none"),
+                         help="复权口径，缺省 qfq")
+    p_daily.add_argument("--check", action="store_true",
+                         help="对拍模式：逐源直取结束日 bar 比对，不落库")
+    p_daily.add_argument("--throttle", type=float, default=None,
+                         help="逐 code 间隔秒；--all 缺省 1.0，显式 codes 缺省 0")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -125,6 +289,19 @@ def main(argv: list[str] | None = None,
                              cons_adapters=cons_adapters)
         if args.command == "morning":
             return cmd_morning(args.date)
+        if args.command == "daily":
+            return cmd_daily(
+                codes_arg=args.codes,
+                all_codes=args.all,
+                limit=args.limit,
+                date_arg=args.date,
+                start_arg=args.start,
+                end_arg=args.end,
+                adj=args.adj,
+                check=args.check,
+                throttle=args.throttle,
+                daily_adapters=daily_adapters,
+            )
         if args.command == "backfill":
             return cmd_backfill(args.start, args.end)
     except Exception as e:  # 零例外：异常收敛为结构化错误输出

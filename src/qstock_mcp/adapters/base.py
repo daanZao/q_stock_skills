@@ -1,6 +1,7 @@
 """数据源适配层接缝：协议 + 错误类型 + 代码工具。
 
-真实适配器（efinance/akshare/baostock）与测试注入的 fake 都实现同一协议：
+真实适配器（tencent/sina/efinance/akshare/baostock）与测试注入的 fake 都实现
+同一协议：
     name: str
     fetch_daily(stock_code, start, end, adj) -> list[bar]
 bar 为 dict，键见 BAR_FIELDS；trade_date 为 yyyymmdd 字符串，数值缺失为 None。
@@ -201,6 +202,10 @@ _CONNECTION_ERROR_NAMES = frozenset(
         "RemoteDisconnected",
         "IncompleteRead",
         "BadStatusLine",
+        # urllib（issue #112 腾讯薄封装）：URLError 表示请求未拿到响应
+        # （DNS/连接重置/TLS 断连/超时），HTTPError 是其子类但类名不同，
+        # 已收到状态码的失败仍归 other
+        "URLError",
         # requests / urllib3
         "ConnectTimeout",
         "ReadTimeout",

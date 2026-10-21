@@ -28,7 +28,12 @@ from ._sw_classify import (
     load_sw_industry_meta_seed,
     parse_sw_classification,
 )
-from .adapters import DataAdapter, default_adapters
+from .adapters import (
+    DailyAdapter,
+    DataAdapter,
+    default_adapters,
+    default_daily_adapters,
+)
 from .dates import is_trading_time, normalize_date, today_str
 from .db import connect, ensure_schema, list_tables
 from .fetch_chain import (
@@ -177,7 +182,7 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
     }
 
 
-def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
+def _init_backfill(conn, adapters: Sequence[DailyAdapter]) -> dict:
     """全市场个股历史日线回溯：复用日线头尾自愈，单股失败不中断。"""
     today = today_str()
     started = datetime.now(timezone.utc)
@@ -240,16 +245,23 @@ def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
 def init_database(
     backfill_history: bool = False,
     adapters: Sequence[DataAdapter] | None = None,
+    daily_adapters: Sequence[DailyAdapter] | None = None,
     now=None,
 ) -> dict:
     """建表 + 轻量初始化数据；backfill_history=True 追加全市场历史日线回溯。
 
-    now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内 index_daily
-    当日行不落库）。"""
+    个股日线回溯走独立 fallback 链（issue #112：腾讯→新浪→baostock），由
+    daily_adapters 注入；未显式注入时生产默认用 default_daily_adapters，测试
+    注入 adapters 时沿用同一组 fake（保持既有接缝）。now 为测试注入的时钟
+    （盘中禁写防线，issue #78：交易时段内 index_daily 当日行不落库）。"""
     tool = "init_database"
     params = {"backfill_history": backfill_history}
     if adapters is None:
         adapters = default_adapters()
+        if daily_adapters is None:
+            daily_adapters = default_daily_adapters()
+    elif daily_adapters is None:
+        daily_adapters = adapters
     conn, err = connect()
     if err:
         return {"status": "error", "tool": tool, "params": params, "error": err}
@@ -271,7 +283,7 @@ def init_database(
             "index_daily": _init_index_daily(conn, adapters, now),
         }
         if backfill_history:
-            parts["backfill"] = _init_backfill(conn, adapters)
+            parts["backfill"] = _init_backfill(conn, daily_adapters)
     finally:
         conn.close()
 
