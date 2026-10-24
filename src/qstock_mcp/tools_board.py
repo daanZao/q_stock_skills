@@ -50,6 +50,7 @@ from .adapters import (
     BoardAdapter,
     default_adapters,
     default_index_spot_adapters,
+    default_lhb_adapters,
 )
 from .dates import normalize_date, today_str
 from .db import connect
@@ -167,8 +168,15 @@ def fetch_board_snapshot(
     trade_date: str | None = None,
     sections: str | Sequence[str] | None = None,
     adapters: Sequence[BoardAdapter] | None = None,
+    lhb_adapters: Sequence[BoardAdapter] | None = None,
 ) -> dict:
-    """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。"""
+    """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。
+
+    lhb section 专用链（issue #114，spec #111）：默认走 default_lhb_adapters()
+    （交易所官方主源 → akshare 东财 legacy 兜底），其余 section 用 adapters。
+    调用方显式传 adapters 而未传 lhb_adapters 时，lhb 随 adapters（测试 fake
+    注入的既有接缝保持兼容）；显式传 lhb_adapters 时 lhb 以它为准。
+    """
     tool = "fetch_board_snapshot"
     params = {"trade_date": trade_date, "sections": sections}
     if trade_date is None:
@@ -183,7 +191,8 @@ def fetch_board_snapshot(
     except ValueError as e:
         return _error(tool, params, str(e))
     # adapters 为 None 保留到循环内按 section 解析生产链（indices 走腾讯→新浪，
-    # 其余走 default_adapters，issue #117）；注入适配器（测试）时全 section 沿用注入
+    # issue #117；lhb 走交易所官方链，issue #114；其余走 default_adapters）；
+    # 注入适配器（测试）时全 section 沿用注入
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -232,16 +241,24 @@ def fetch_board_snapshot(
                 }
                 continue
             # 生产链按 section 解析：indices 走腾讯→新浪指数快照链（issue #117），
-            # 其余 section 走 default_adapters；注入适配器（测试）时全 section 沿用注入
-            chain = (
-                adapters
-                if adapters is not None
-                else (
-                    default_index_spot_adapters()
-                    if name == "indices"
-                    else default_adapters()
+            # lhb 走交易所官方链（issue #114）；注入适配器（测试）时全 section
+            # 沿用注入，显式传 lhb_adapters 时 lhb 以它为准
+            if adapters is not None:
+                chain = (
+                    lhb_adapters
+                    if name == "lhb" and lhb_adapters is not None
+                    else adapters
                 )
-            )
+            elif name == "indices":
+                chain = default_index_spot_adapters()
+            elif name == "lhb":
+                chain = (
+                    lhb_adapters
+                    if lhb_adapters is not None
+                    else default_lhb_adapters()
+                )
+            else:
+                chain = default_adapters()
             try:
                 r = fetch_section_with_fallback(chain, name, effective)
             except AllSourcesFailed as e:

@@ -10,6 +10,8 @@
                              （不影响退出码）。在册 planned_absent（第四态，
                              issue #113）的 section 占位通过：响应
                              status=planned_absent、不计失败、不影响退出码。
+                             lhb section 走专用链（交易所官方 → akshare 东财
+                             legacy，issue #114）。
   morning [--date YYYYMMDD]  次晨批：baostock 一把抓前一交易日全市场日线
                              + 7 大指数尾行补漏（tools_morning），默认目标日
                              为前一交易日。
@@ -36,6 +38,12 @@
                              默认走 腾讯→baostock 链抓取落库（断档回填/T+0
                              当日行补采）；--verify 纯读覆盖核验（对照交易日历
                              列缺口），不写库。缺省代码 = 7 大指数白名单。
+  lhb [--date D] [--start D --end D] [--check]
+                             龙虎榜固定入口（issue #114，spec #111）：沪深北
+                             交易所官方源（深所 JSON/上所文本/北所 JSONP）抓取
+                             落库，逐日幂等；--start/--end 历史回溯（单日失败
+                             不中断）；--check 新浪互补对拍（不落库，可手动
+                             触发）。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -59,6 +67,7 @@ from .snapshot_parity import compare_snapshot_sources
 from .tools_backfill import accumulate_em_concepts, fetch_boards_backfill
 from .tools_board import fetch_board_snapshot
 from .tools_daily import fetch_daily
+from .tools_lhb import compare_lhb_sources, fetch_lhb_backfill, fetch_lhb_day
 from .tools_morning import fetch_morning_batch
 from .tools_snapshot import fetch_market_snapshot
 
@@ -71,10 +80,12 @@ def _emit(payload: dict) -> None:
 
 def cmd_close(date_arg: str | None,
               adapters: Sequence[BoardAdapter] | None = None,
-              cons_adapters: Sequence | None = None) -> int:
+              cons_adapters: Sequence | None = None,
+              lhb_adapters: Sequence[BoardAdapter] | None = None) -> int:
     """收盘后批：五 section 盘面快照 + 概念成分积累。任一 section 失败 exit 1。"""
     result = fetch_board_snapshot(
-        trade_date=date_arg, sections=list(CLOSE_SECTIONS), adapters=adapters)
+        trade_date=date_arg, sections=list(CLOSE_SECTIONS), adapters=adapters,
+        lhb_adapters=lhb_adapters)
     failed = result.get("failed_sections")
     if failed is None:
         # 参数解析等前置失败（fetch_board_snapshot 的 error 契约，无 sections）
@@ -121,6 +132,42 @@ def cmd_backfill(start: str | None, end: str | None) -> int:
     out = {"job": "backfill", **result}
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
+
+
+def cmd_lhb(
+    date_arg: str | None = None,
+    start_arg: str | None = None,
+    end_arg: str | None = None,
+    check: bool = False,
+    lhb_adapters: Sequence[BoardAdapter] | None = None,
+) -> int:
+    """龙虎榜固定入口（issue #114）：单日抓取 / 区间回溯 / 新浪对拍。
+
+    - 默认：单日抓取落库（缺省当日；三所盘后发布，盘中空数据是正常语义）；
+    - --start/--end：历史回溯（单日失败不中断，逐日独立成败）；
+    - --check：新浪互补对拍（不落库）。--date 与 --start/--end 互斥。
+    """
+    tool = "lhb"
+    if date_arg and (start_arg or end_arg):
+        _emit({"status": "error", "job": tool,
+               "error": "--date 与 --start/--end 互斥"})
+        return 1
+    if check:
+        result = compare_lhb_sources(trade_date=date_arg)
+        _emit({"job": tool, "mode": "check", **result})
+        return 0 if result.get("status") == "ok" else 1
+    if start_arg or end_arg:
+        if not (start_arg and end_arg):
+            _emit({"status": "error", "job": tool,
+                   "error": "--start 与 --end 需成对提供"})
+            return 1
+        result = fetch_lhb_backfill(start_arg, end_arg, lhb_adapters=lhb_adapters)
+        _emit({"job": tool, "mode": "backfill", **result})
+        return 0 if result.get("status") == "ok" else 1
+    result = fetch_lhb_day(date_arg, lhb_adapters=lhb_adapters)
+    _emit({"job": tool, "mode": "fetch", **result})
+    lhb = result.get("lhb") or {}
+    return 0 if lhb.get("status") == "ok" else 1
 
 
 def _parse_codes(codes_arg: str | None) -> list[str]:
@@ -377,7 +424,8 @@ def main(argv: list[str] | None = None,
          daily_adapters: Sequence | None = None,
          fundamentals_adapters: Sequence | None = None,
          snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
-         index_adapters: Sequence | None = None) -> int:
+         index_adapters: Sequence | None = None,
+         lhb_adapters: Sequence[BoardAdapter] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -443,6 +491,16 @@ def main(argv: list[str] | None = None,
                          help="区间终点 yyyymmdd（与 --start 配对）")
     p_index.add_argument("--verify", action="store_true",
                          help="覆盖核验：对照交易日历列缺口，不写库")
+    p_lhb = sub.add_parser(
+        "lhb", help="龙虎榜：沪深北交易所官方源抓取落库 / 历史回溯 / 新浪对拍")
+    p_lhb.add_argument("--date", default=None,
+                       help="单日 yyyymmdd，缺省当日（对拍模式同样适用）")
+    p_lhb.add_argument("--start", default=None,
+                       help="回溯起点 yyyymmdd（与 --end 配对，历史回溯模式）")
+    p_lhb.add_argument("--end", default=None,
+                       help="回溯终点 yyyymmdd（与 --start 配对）")
+    p_lhb.add_argument("--check", action="store_true",
+                       help="对拍模式：交易所官方 vs 新浪互补校验，不落库")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -451,7 +509,8 @@ def main(argv: list[str] | None = None,
     try:
         if args.command == "close":
             return cmd_close(args.date, adapters=adapters,
-                             cons_adapters=cons_adapters)
+                             cons_adapters=cons_adapters,
+                             lhb_adapters=lhb_adapters)
         if args.command == "morning":
             return cmd_morning(args.date)
         if args.command == "daily":
@@ -473,6 +532,14 @@ def main(argv: list[str] | None = None,
                 check=args.check,
                 limit=args.limit,
                 snapshot_adapters=snapshot_adapters,
+            )
+        if args.command == "lhb":
+            return cmd_lhb(
+                date_arg=args.date,
+                start_arg=args.start,
+                end_arg=args.end,
+                check=args.check,
+                lhb_adapters=lhb_adapters,
             )
         if args.command == "backfill":
             return cmd_backfill(args.start, args.end)

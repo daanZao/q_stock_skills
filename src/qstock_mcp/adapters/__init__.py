@@ -54,6 +54,7 @@ __all__ = [
     "default_fundamentals_adapters",
     "default_index_daily_adapters",
     "default_index_spot_adapters",
+    "default_lhb_adapters",
 ]
 
 
@@ -147,3 +148,16 @@ def default_fundamentals_adapters() -> list[FundamentalsAdapter]:
     from .baostock_adapter import BaostockAdapter
 
     return [AkshareAdapter(), BaostockAdapter()]
+
+
+def default_lhb_adapters() -> list[BoardAdapter]:
+    """lhb section 专用链（issue #114，spec #111）：交易所官方 → akshare（东财 legacy）。
+
+    主源为沪深北交易所一手披露（深交所 ShowReport JSON + 上交所定宽文本 +
+    北交所 bseinfo.net JSONP，见 lhb_exchange_adapter）；akshare（东财 EM
+    lhb 函数）留作链上兜底，待 spec 清理 ticket 退役。其余 section 不走本链。
+    """
+    from .akshare_adapter import AkshareAdapter
+    from .lhb_exchange_adapter import ExchangeLhbAdapter
+
+    return [ExchangeLhbAdapter(), AkshareAdapter()]
