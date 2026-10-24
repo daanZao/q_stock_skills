@@ -48,6 +48,22 @@ qfqday/hfqday/day 键。单次最多返回 640 根，且上游忽略 start 参�
 - change_percent / change_amount / amplitude：上游无列，由前收推算；无前收的
   首行置 None（不伪造）。
 - tradestatus：腾讯无权威停牌列，置 None 由工具层启发式兜底（ADR 0009）。
+
+指数面（issue #117 / spec #111，2026-10-23 收盘后实测）：
+
+- 指数快照：`qt.gtimg.cn` 批量报价 `q=sh000001,sz399001,...`，单请求 7 大
+  指数一次取齐，是所有候选源中唯一覆盖 `volume_ratio` 的源。响应 GBK 编码、
+  `v_sh000001="1~名称~代码~..."` 每行一只。列位（与个股同源布局，逐字段
+  实测验算）：[36] 成交量（手）、[37] 成交额（万元，原生免换算）、
+  [31]/[32] 涨跌额/涨跌幅、[33]/[34]/[5] 最高/最低/今开、[4] 昨收、
+  [43] 振幅、[49] **量比**、[30] 行情时间戳（行级 trade_date 取自此）。
+  注意 [38] 是换手率（与 K 线 turnover 列逐日实测一致），不是量比——
+  调研报告（2026-10-20-index-alternatives.md §2.1）把 [38] 标为量比，
+  本层以 10-23 收盘数据复核证伪；量比字段位为 [49]。
+- 指数日线：复用上述 K 线薄封装（指数为手 ×100、amount 原生万元、turnover
+  原生列实测有效），请求复权口径为空（指数无复权概念，上游只回 `day` 键，
+  不触发复权回落标记）。收盘后当晚含当日行（T+0，#117 实测 10-23 行
+  16:15 已可取）。
 """
 
 import json
@@ -57,6 +73,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from time import sleep
+from typing import Sequence
 
 from ._bse_codes import to_market_code
 from ._daily_common import adjust_param, derive_change_fields
@@ -66,6 +83,7 @@ from .base import FetchError
 log = logging.getLogger(__name__)
 
 KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+QUOTE_URL = "https://qt.gtimg.cn/q="
 TIMEOUT_SEC = 20
 MAX_BARS = 640  # 上游单次返回上限（实测请求 1000/3000 根仍只给 640）
 MAX_CHUNKS = 64  # 640 × 64 ≈ 4 万根，覆盖 A 股全历史
@@ -78,6 +96,18 @@ QT_BATCH_PAUSE_S = 0.1  # 批量报价逐批限速（qt.gtimg.cn 为轻量报价
 RANK_URL = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
 RANK_PAGE_SIZE = 200  # 榜单分页上限；全市场约 28 页/轮
 RANK_PAGE_PAUSE_S = 0.3  # 与 K 线同域（proxy.finance.qq.com），沿用实测限速
+
+# 指数快照批量请求的 7 大指数（腾讯代码形态；与 tools_init.MAJOR_INDICES 同一
+# 清单，tests 有等价性守护）。适配器只取复盘白名单，不捞全量指数口径。
+MAJOR_INDEX_TX_CODES = (
+    "sh000001",
+    "sz399001",
+    "sz399006",
+    "sh000300",
+    "sh000016",
+    "sh000905",
+    "sh000688",
+)
 
 
 def _response_key(adjust: str) -> tuple[str, ...]:
@@ -213,11 +243,122 @@ def map_tencent_rows(tx_code: str, rows: list[list]) -> list[dict]:
     return bars
 
 
+def _collect_kline_rows(
+    tx_code: str, start: str, end: str, adjust: str
+) -> tuple[list[list], bool]:
+    """逐段向前回溯收集 [start, end] 的原始 K 线行（升序）与复权回落标记。
+
+    上游单次最多 MAX_BARS 根且忽略 start（只按 end 向前取），因此循环回溯；
+    区间首日前收随回溯一并取得（>= start 的前一行）。fell_back 为请求复权键
+    缺失、上游按 day 返回的标志（复权回落可见化，issue #112）。
+    """
+    collected: dict[str, list] = {}
+    cursor = end
+    fell_back = False
+    for chunk in range(MAX_CHUNKS):
+        if chunk:
+            # 全历史回溯逐段连续请求，按实测限速留出间隔
+            sleep(CHUNK_PAUSE_S)
+        rows, chunk_fell_back = fetch_kline_rows(tx_code, cursor, adjust)
+        if chunk_fell_back:
+            fell_back = True
+        if not rows:
+            break
+        added = 0
+        for row in rows:
+            day = _row_date(row)
+            if day and day not in collected:
+                collected[day] = row
+                added += 1
+        if not added:
+            break
+        first = next((d for d in (_row_date(r) for r in rows) if d), "")
+        if not first or first < start:
+            break
+        try:
+            nxt = _previous_calendar_day(first)
+        except ValueError as e:
+            raise FetchError(f"腾讯K线日期格式异常: {first!r}") from e
+        if nxt >= cursor:
+            break  # 防御：上游未按预期向前推进
+        cursor = nxt
+    return [collected[d] for d in sorted(collected)], fell_back
+
+
+def to_tx_index_code(index_code: str) -> str:
+    """指数代码 → 腾讯代码（399xxx 深系 sz，其余沪系 sh；与 baostock 路由同口径）。"""
+    if index_code.startswith("399"):
+        return f"sz{index_code}"
+    if index_code[:1] in "015":
+        return f"sh{index_code}"
+    raise FetchError(f"无法识别的指数代码: {index_code}", kind="unsupported")
+
+
+# 指数批量报价响应为 GBK 编码的 `v_sh000001="1~名称~代码~..."` 行集（分号结尾）。
+def parse_tx_index_quotes(text: str) -> list[dict]:
+    """腾讯指数批量报价文本 → INDEX_FIELDS 行 dict（纯函数，fixture 可测）。
+
+    列位见模块 docstring（2026-10-23 收盘实测验算）：量比=[49] 是候选源中唯一
+    覆盖 volume_ratio 的字段；行级 trade_date 取自行情时间戳 [30]（yyyymmdd），
+    供工具层做日期相符校验（issue #78）。空报价（非交易时段未开盘）跳过。
+    """
+    rows: list[dict] = []
+    for stmt in text.split(";"):
+        stmt = stmt.strip()
+        if "=" not in stmt:
+            continue
+        head, _, payload = stmt.partition("=\"")
+        if not head.startswith("v_") or not payload.rstrip('"'):
+            continue
+        f = payload.rstrip('"').rstrip(";").split("~")
+        if len(f) < 50:
+            continue  # 字段数不足的异常行不臆造
+        ts = str(f[30]).strip()
+        rows.append(
+            {
+                "trade_date": ts[:8] if ts.isdigit() and len(ts) >= 8 else None,
+                "index_code": str(f[2]),
+                "index_name": str(f[1]),
+                "latest_price": _num(f[3]),
+                "change_percent": _num(f[32]),
+                "change_amount": _num(f[31]),
+                "volume": _int(f[36]) and _int(f[36]) * 100,  # 手 → 股（ADR 0008）
+                "amount": _num(f[37]),  # 原生万元（ADR 0006）
+                "amplitude": _num(f[43]),
+                "high": _num(f[33]),
+                "low": _num(f[34]),
+                "open": _num(f[5]),
+                "pre_close": _num(f[4]),
+                "volume_ratio": _num(f[49]),
+            }
+        )
+    return rows
+
+
+def fetch_tx_index_quotes(tx_codes: Sequence[str]) -> str:
+    """请求腾讯指数批量报价，返回 GBK 解码后的文本。"""
+    req = urllib.request.Request(
+        QUOTE_URL + ",".join(tx_codes), headers={"User-Agent": "Mozilla/5.0"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            return resp.read().decode("gbk", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise FetchError(f"腾讯指数报价 HTTP 错误：status={e.code}") from e
+    except Exception as e:  # noqa: BLE001 - URLError/超时/TLS 断连等传输错误
+        raise FetchError(f"腾讯指数报价传输错误：{e}") from e
+
+
 class TencentAdapter:
-    """腾讯个股日线源（fallback 第 1 位）：收盘后当晚含当日行（#104 实测）。
+    """腾讯源（个股日线 fallback 第 1 位；指数快照/指数日线主源，issue #117）。
+
+    个股日线：收盘后当晚含当日行（#104 实测）。指数快照：qt.gtimg.cn 批量
+    报价，唯一覆盖量比字段的源。指数日线：K 线薄封装 T+0 当日行，收盘后
+    当晚可得；科创50（000688）覆盖（baostock 实测不支持该指数）。
 
     `adjust_fallback`：fetch_daily 期间上游缺复权键按 day 回落时置 True
-    （复权回落可见化，issue #112）；对拍与工具层 note 据此标注。
+    （复权回落可见化，issue #112）；对拍与工具层 note 据此标注。指数日线
+    请求不带复权口径（指数无复权概念），不会触发该标记。
     """
 
     name = "tencent"
@@ -236,43 +377,50 @@ class TencentAdapter:
         adjust = adjust_param("腾讯", adj)
         self.adjust_fallback = False
         tx_code = to_market_code(stock_code)
-        collected: dict[str, list] = {}
-        cursor = end
-        for chunk in range(MAX_CHUNKS):
-            if chunk:
-                # 全历史回溯逐段连续请求，按实测限速留出间隔
-                sleep(CHUNK_PAUSE_S)
-            rows, fell_back = fetch_kline_rows(tx_code, cursor, adjust)
-            if fell_back:
-                if not self.adjust_fallback:
-                    log.warning(
-                        "腾讯 %s 缺 %s 复权键，上游按 day 回落"
-                        "（无复权事件或不提供调整序列）",
-                        tx_code,
-                        adjust or "none",
-                    )
-                self.adjust_fallback = True
-            if not rows:
-                break
-            added = 0
-            for row in rows:
-                day = _row_date(row)
-                if day and day not in collected:
-                    collected[day] = row
-                    added += 1
-            if not added:
-                break
-            first = next((d for d in (_row_date(r) for r in rows) if d), "")
-            if not first or first < start:
-                break
-            try:
-                nxt = _previous_calendar_day(first)
-            except ValueError as e:
-                raise FetchError(f"腾讯K线日期格式异常: {first!r}") from e
-            if nxt >= cursor:
-                break  # 防御：上游未按预期向前推进
-            cursor = nxt
-        ordered = [collected[d] for d in sorted(collected)]
+        ordered, fell_back = _collect_kline_rows(tx_code, start, end, adjust)
+        if fell_back:
+            log.warning(
+                "腾讯 %s 缺 %s 复权键，上游按 day 回落"
+                "（无复权事件或不提供调整序列）",
+                tx_code,
+                adjust or "none",
+            )
+            self.adjust_fallback = True
+        bars = map_tencent_rows(tx_code, ordered)
+        return [b for b in bars if start <= b["trade_date"] <= end]
+
+    # ---------------------------------------------------------------- 指数面（issue #117）
+
+    def fetch_indices(self, trade_date: str) -> list[dict]:
+        """7 大指数批量快照：单请求一次取齐（MAJOR_INDEX_TX_CODES），
+        行级 trade_date 取自行情时间戳，供工具层日期相符校验（issue #78）。"""
+        rows = parse_tx_index_quotes(fetch_tx_index_quotes(MAJOR_INDEX_TX_CODES))
+        if not rows:
+            raise FetchError("腾讯指数批量报价返回为空")
+        return rows
+
+    def fetch_index_spot(self, index_code: str) -> list[dict]:
+        """单 code 指数行情（issue #49 补漏）：批量端点按 code 定点请求；
+        空结果表示上游无该指数行情（由工具层转下一源）。"""
+        try:
+            tx_code = to_tx_index_code(index_code)
+        except FetchError:
+            return []
+        return [
+            r
+            for r in parse_tx_index_quotes(fetch_tx_index_quotes((tx_code,)))
+            if r["index_code"] == index_code
+        ]
+
+    def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
+        """指数日线 [start, end]（不复权；T+0 当日行收盘后当晚可得）。
+
+        复用个股 K 线薄封装（指数为手 ×100、amount 原生万元、turnover 原生列
+        实测有效）；科创50（000688）上游只回 `day` 键，按不复权直取（指数无
+        复权概念，不触发复权回落标记）。空区间返回 []（非交易日，非错误）。
+        """
+        tx_code = to_tx_index_code(index_code)
+        ordered, _fell_back = _collect_kline_rows(tx_code, start, end, "")
         bars = map_tencent_rows(tx_code, ordered)
         return [b for b in bars if start <= b["trade_date"] <= end]
 

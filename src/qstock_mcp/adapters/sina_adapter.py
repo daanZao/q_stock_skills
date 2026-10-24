@@ -21,6 +21,15 @@ stock_zh_a_sina.py:64-83），直连原始接口 Market_Center.getHQNodeData 只
 兜底。响应字段（2026-10-21 实录 tests/fixtures/sina/spot_page1.json）：
 trade/settlement/open/high/low/pricechange/changepercent、volume(股)、
 amount(元)、per、pb、mktcap/nmc（万元）、turnoverratio。
+
+指数快照（issue #117 / spec #111）：`hq.sinajs.cn/list=sh000001,...` 批量报价
+薄封装（须带 `Referer: https://finance.sina.com.cn`，响应 GBK），作腾讯批量
+报价之后的第 2 位。字段：name/今开/昨收/最新/最高/最低/成交量/成交额（元）
+/日期/时间；量比无源（单快照无 5 日均量）置 None，涨跌额/涨跌幅/振幅由现价
+与昨收推算。**单位陷阱（2026-10-23 实测）**：沪系指数成交量为手（×100 入库），
+深系为股（透传）——同响应内口径不一致，映射层按市场前缀分别换算。新浪
+指数日线（stock_zh_index_daily）无成交额列，不入指数日线链（链：腾讯 →
+baostock，issue #117）。
 """
 
 import json
@@ -33,7 +42,7 @@ from time import sleep
 from ..dates import add_days
 from ._bse_codes import to_market_code
 from ._daily_common import adjust_param, derive_change_fields
-from ._eastmoney import _int, _num
+from ._eastmoney import _int, _num, _wan
 from .base import FetchError, import_akshare
 
 log = logging.getLogger(__name__)
@@ -48,6 +57,96 @@ SINA_SPOT_COUNT_URL = (
 )
 SINA_PAGE_SIZE = 100  # 实测 num>100 也只返回 100 行；全市场约 56 页/轮
 SINA_PAGE_PAUSE_S = 0.2  # 上游明示重复运行封 IP，翻页保守限速（第三重兜底本就低频）
+
+SINA_HQ_URL = "https://hq.sinajs.cn/list="
+SINA_HQ_TIMEOUT_S = 20
+SINA_HQ_HEADERS = {
+    "Referer": "https://finance.sina.com.cn",  # 上游校验，缺省 403
+    "User-Agent": "Mozilla/5.0",
+}
+
+
+def to_sina_index_code(index_code: str) -> str:
+    """指数代码 → 新浪代码（399xxx 深系 sz，其余沪系 sh；与腾讯/ baostock 同口径）。"""
+    if index_code.startswith("399"):
+        return f"sz{index_code}"
+    if index_code[:1] in "015":
+        return f"sh{index_code}"
+    raise FetchError(f"无法识别的指数代码: {index_code}", kind="unsupported")
+
+
+def parse_sina_index_quotes(text: str) -> list[dict]:
+    """新浪指数批量报价文本 → INDEX_FIELDS 行 dict（纯函数，fixture 可测）。
+
+    `var hq_str_sh000001="名称,今开,昨收,最新,最高,最低,买一,卖一,成交量,
+    成交额(元),...,日期,时间"` 分号结尾；行级 trade_date 取自日期字段（位置
+    -3/-4，尾部空字段数随标的略有出入），供工具层日期相符校验（issue #78）。
+    空报价（非交易时段）跳过；涨跌额/涨跌幅/振幅由最新价与昨收推算（derive_
+    change_fields）；量比无源置 None；成交量沪系手 ×100、深系股透传（ADR 0008）。
+    """
+    rows: list[dict] = []
+    for stmt in text.split(";"):
+        stmt = stmt.strip()
+        if "=" not in stmt:
+            continue
+        head, _, payload = stmt.partition("=\"")
+        if not head.startswith("var hq_str_") or not payload.rstrip('"'):
+            continue
+        f = payload.rstrip('"').split(",")
+        if len(f) < 32:
+            continue  # 字段数不足的异常行不臆造
+        code = head.replace("var hq_str_", "")
+        # 实测尾部为 [..., 日期, 时间, "00", ""]（34 列）或 [..., 日期, 时间, "00"]
+        # （33 列，深市）：日期恒在时间前一位，从尾部倒序找第一个 yyyy-mm-dd。
+        trade_date = None
+        for v in reversed(f):
+            s = str(v).strip()
+            if len(s) == 10 and s[4] == "-" and s[:4].isdigit():
+                trade_date = s.replace("-", "")
+                break
+        latest = _num(f[3])
+        pre_close = _num(f[2])
+        high = _num(f[4])
+        low = _num(f[5])
+        change_amount, change_percent, amplitude = derive_change_fields(
+            latest, high, low, pre_close
+        )
+        volume = _int(f[8])
+        if volume is not None and code.startswith("sh"):
+            volume *= 100  # 沪系指数成交量为手（ADR 0008）；深系为股透传
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "index_code": code[2:],
+                "index_name": str(f[0]),
+                "latest_price": latest,
+                "change_percent": change_percent,
+                "change_amount": change_amount,
+                "volume": volume,
+                "amount": _wan(f[9]),  # 元 → 万元（ADR 0006）
+                "amplitude": amplitude,
+                "high": high,
+                "low": low,
+                "open": _num(f[1]),
+                "pre_close": pre_close,
+                "volume_ratio": None,  # 新浪快照无量比（不伪造）
+            }
+        )
+    return rows
+
+
+def fetch_sina_index_quotes(sina_codes) -> str:
+    """请求新浪指数批量报价，返回 GBK 解码后的文本。"""
+    req = urllib.request.Request(
+        SINA_HQ_URL + ",".join(sina_codes), headers=SINA_HQ_HEADERS
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=SINA_HQ_TIMEOUT_S) as resp:
+            return resp.read().decode("gbk", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise FetchError(f"新浪指数报价 HTTP 错误：status={e.code}") from e
+    except Exception as e:  # noqa: BLE001 - URLError/超时/TLS 断连等传输错误
+        raise FetchError(f"新浪指数报价传输错误：{e}") from e
 
 
 _PRE_CLOSE_LOOKBACK_DAYS = 7  # 覆盖长假，保证区间首日前收可取
@@ -119,6 +218,43 @@ class SinaAdapter:
             return []
         bars = map_sina_rows(df.to_dict("records"))
         return [b for b in bars if start <= b["trade_date"] <= end]
+
+    # ---------------------------------------------------------------- 指数面（issue #117）
+
+    def fetch_indices(self, trade_date: str) -> list[dict]:
+        """7 大指数批量快照：hq.sinajs.cn 定点批量（沪 sh/深 sz 各指数同源族），
+        行级 trade_date 取自响应日期字段，供工具层日期相符校验（issue #78）。"""
+        from .tencent_adapter import MAJOR_INDEX_TX_CODES
+
+        codes = [to_sina_index_code(c[2:]) for c in MAJOR_INDEX_TX_CODES]
+        rows = parse_sina_index_quotes(fetch_sina_index_quotes(codes))
+        if not rows:
+            raise FetchError("新浪指数批量报价返回为空")
+        return rows
+
+    def fetch_index_spot(self, index_code: str) -> list[dict]:
+        """单 code 指数行情（issue #49 补漏）：批量端点按 code 定点请求；
+        空结果表示上游无该指数行情（由工具层转下一源）。"""
+        try:
+            sina_code = to_sina_index_code(index_code)
+        except FetchError:
+            return []
+        return [
+            r
+            for r in parse_sina_index_quotes(fetch_sina_index_quotes((sina_code,)))
+            if r["index_code"] == index_code
+        ]
+
+    def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
+        """新浪指数日线无成交额列（index_daily.amount 会断供），不入指数日线链。
+
+        指数日线链为 腾讯 → baostock（issue #117）；新浪日线仅留作科创50 历史
+        回补的人工备选（akshare stock_zh_index_daily，全历史 T+1）。
+        """
+        raise FetchError(
+            "新浪指数日线不入链（无成交额列）；指数日线链：腾讯 → baostock",
+            kind="unsupported",
+        )
 
 
 # ---------------------------------------------------------------- 全市场快照直连

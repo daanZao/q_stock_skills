@@ -52,15 +52,20 @@ __all__ = [
     "default_daily_adapters",
     "default_snapshot_adapters",
     "default_fundamentals_adapters",
+    "default_index_daily_adapters",
+    "default_index_spot_adapters",
 ]
 
 
 def default_adapters() -> list[DataAdapter]:
     """盘面/快照等能力面的 fallback 链：efinance → akshare → baostock（懒加载真实库）。
 
-    个股日线不走本链——见 default_daily_adapters（issue #112 东财退出日线）。
+    个股日线不走本链——见 default_daily_adapters（issue #112 东财退出日线）；
     全市场快照也不走本链——见 default_snapshot_adapters（issue #116 东财
-    退出快照）；本链仅服务盘面五 section / 清单 / 指数日线 / 基本面等。
+    退出快照）；indices section 与指数日线不走本链——见
+    default_index_spot_adapters / default_index_daily_adapters（issue #117
+    东财退出指数面）；本链仅服务 boards/zt_pool/strong_stocks/lhb 盘面
+    section、清单与基本面等。
     """
     from .akshare_adapter import AkshareAdapter
     from .baostock_adapter import BaostockAdapter
@@ -98,6 +103,36 @@ def default_daily_adapters() -> list[DailyAdapter]:
     from .tencent_adapter import TencentAdapter
 
     return [TencentAdapter(), SinaAdapter(), BaostockAdapter()]
+
+
+def default_index_spot_adapters() -> list[BoardAdapter]:
+    """指数快照 fallback 链（issue #117，spec #111）：腾讯 → 新浪。
+
+    腾讯 qt.gtimg.cn 批量报价为唯一覆盖量比（volume_ratio）的源，单请求 7 大
+    指数一次取齐（含科创50）；新浪 hq.sinajs.cn 批量报价为备选（无量比，沪深
+    成交量单位不一致已在映射层处理）。东财链路（efinance 沪深系列指数 /
+    akshare 沪深重要指数）随本 ticket 退出指数快照面；baostock 无指数快照
+    接口（unsupported，不入链）。
+    """
+    from .sina_adapter import SinaAdapter
+    from .tencent_adapter import TencentAdapter
+
+    return [TencentAdapter(), SinaAdapter()]
+
+
+def default_index_daily_adapters() -> list[IndexDailyAdapter]:
+    """指数日线 fallback 链（issue #117，spec #111）：腾讯 → baostock。
+
+    腾讯 K 线薄封装收盘后当晚含当日行（T+0）且覆盖科创50（000688，baostock
+    实测返回 0 行）；baostock 保留为次晨权威复核与历史回溯底座（全历史、
+    tradestatus/turn 列；无 000688）。两源经 index_daily.source 列并存对账。
+    东财指数日线（akshare index_zh_a_hist）随本 ticket 退出；新浪指数日线
+    无成交额列，不入链（人工备选，见 sina_adapter）。
+    """
+    from .baostock_adapter import BaostockAdapter
+    from .tencent_adapter import TencentAdapter
+
+    return [TencentAdapter(), BaostockAdapter()]
 
 
 def default_fundamentals_adapters() -> list[FundamentalsAdapter]:
