@@ -110,6 +110,8 @@ ZT_POOL_FIELDS = (
     "industry",
     "dt_price",
     "zb_info",
+    "sealed_amount",
+    "reason_type",
 )
 
 STRONG_FIELDS = (

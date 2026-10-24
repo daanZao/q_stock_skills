@@ -42,6 +42,21 @@ def summarize_attempted(attempted: list[dict] | None) -> str | None:
     return text[:_DETAIL_MAX]
 
 
+def already_collected(conn, trade_date: str, section: str) -> bool:
+    """当日该 section 已有 ok/empty 台账行（采集已成功完成）。
+
+    低频纪律（issue #120，THS 涨停池"每日每池一次"）守卫依据：采集已成功
+    的 section 当日不再打上游；error 不在其列（失败允许当日修复后重跑）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM collection_log WHERE trade_date = %s"
+            " AND section = %s AND status IN ('ok', 'empty') LIMIT 1",
+            (trade_date, section),
+        )
+        return cur.fetchone() is not None
+
+
 def record_collection(
     conn,
     *,
