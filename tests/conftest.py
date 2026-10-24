@@ -12,8 +12,12 @@ import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 MAINT_DSN = os.environ.get("QSTOCK_TEST_MAINT_DSN", "postgresql://localhost/postgres")
-TEST_DB = "qstock_test"
-TEST_DSN = os.environ.get("QSTOCK_TEST_PG_DSN", f"postgresql://localhost/{TEST_DB}")
+TEST_DSN = os.environ.get(
+    "QSTOCK_TEST_PG_DSN", "postgresql://localhost/qstock_test"
+)
+# 待建/待清库名随 DSN 覆盖（并行开发各自的隔离测试库，如 qstock_test_115）；
+# 缺省仍为 qstock_test
+TEST_DB = TEST_DSN.rsplit("/", 1)[-1]
 
 
 def _reachable(dsn: str) -> bool:

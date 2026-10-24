@@ -1,6 +1,7 @@
 """数据源适配层接缝：协议 + 错误类型 + 代码工具。
 
-真实适配器（efinance/akshare/baostock）与测试注入的 fake 都实现同一协议：
+真实适配器（tencent/sina/efinance/akshare/baostock）与测试注入的 fake 都实现
+同一协议：
     name: str
     fetch_daily(stock_code, start, end, adj) -> list[bar]
 bar 为 dict，键见 BAR_FIELDS；trade_date 为 yyyymmdd 字符串，数值缺失为 None。
@@ -109,6 +110,8 @@ ZT_POOL_FIELDS = (
     "industry",
     "dt_price",
     "zb_info",
+    "sealed_amount",
+    "reason_type",
 )
 
 STRONG_FIELDS = (
@@ -184,6 +187,19 @@ class FetchError(RuntimeError):
         super().__init__(msg)
 
 
+def import_akshare():
+    """akshare 懒加载（可选依赖 [sources]）：未安装时抛 FetchError。
+
+    akshare 只在真实抓取路径用到，测试注入 fake 不触第三方库，故 import 推迟
+    到调用点。akshare_adapter 与 sina_adapter 共用此入口（issue #112）。
+    """
+    try:
+        import akshare as ak
+    except ImportError as e:
+        raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
+    return ak
+
+
 # 连接级故障（ADR 0007）：请求未获得任何 HTTP 响应——连接重置、TLS 后空响应、
 # 超时、DNS/建连失败。按异常类名鸭子类型判定，不 import requests/urllib3（可选依赖）；
 # 覆盖标准库、http.client、requests、urllib3 的对应类名。
@@ -201,6 +217,10 @@ _CONNECTION_ERROR_NAMES = frozenset(
         "RemoteDisconnected",
         "IncompleteRead",
         "BadStatusLine",
+        # urllib（issue #112 腾讯薄封装）：URLError 表示请求未拿到响应
+        # （DNS/连接重置/TLS 断连/超时），HTTPError 是其子类但类名不同，
+        # 已收到状态码的失败仍归 other
+        "URLError",
         # requests / urllib3
         "ConnectTimeout",
         "ReadTimeout",
@@ -368,7 +388,11 @@ class DataAdapter(
 
 
 def is_bse_code(stock_code: str) -> bool:
-    """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。"""
+    """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。
+
+    baostock 适配器的粗粒度拒绝守卫；精确 A 股市场路由见
+    `adapters/_bse_codes.market_of`（900xxx 沪 B 股不属北交所，ADR 0007 补记）。
+    """
     return stock_code[:1] in ("4", "8", "9")
 
 

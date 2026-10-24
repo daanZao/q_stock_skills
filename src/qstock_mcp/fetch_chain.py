@@ -133,17 +133,25 @@ def fetch_with_fallback(
     adj: str = "qfq",
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
-    """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。"""
+    """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。
+
+    获胜适配器带 adjust_fallback 标记（腾讯复权键缺失回落 day，issue #112）
+    时结果带 "adjust_fallback": True，由工具层落 segment 并出 note。
+    """
     r = _with_fallback(
         adapters,
         lambda a: a.fetch_daily(stock_code, start, end, adj),
         max_retries,
     )
-    return {
+    out = {
         "rows": r["result"],
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
+    winner = next((a for a in adapters if a.name == r["source"]), None)
+    if winner is not None and getattr(winner, "adjust_fallback", False):
+        out["adjust_fallback"] = True
+    return out
 
 
 def fetch_snapshot_with_fallback(

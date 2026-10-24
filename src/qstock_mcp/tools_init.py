@@ -28,7 +28,14 @@ from ._sw_classify import (
     load_sw_industry_meta_seed,
     parse_sw_classification,
 )
-from .adapters import DataAdapter, default_adapters
+from .adapters import (
+    DailyAdapter,
+    DataAdapter,
+    SnapshotAdapter,
+    default_adapters,
+    default_daily_adapters,
+    default_snapshot_adapters,
+)
 from .dates import is_trading_time, normalize_date, today_str
 from .db import connect, ensure_schema, list_tables
 from .fetch_chain import (
@@ -92,7 +99,7 @@ def _init_stock_list(conn, adapters: Sequence[DataAdapter]) -> dict:
     }
 
 
-def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
+def _init_market_snapshot(conn, adapters: Sequence[SnapshotAdapter]) -> dict:
     today = today_str()
     started = datetime.now(timezone.utc)
     try:
@@ -120,11 +127,14 @@ def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
     }
 
 
-def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
+def _init_index_daily(
+    conn, adapters: Sequence[DataAdapter], now=None
+) -> dict:
     """主要指数全历史日线：按指数独立 fallback，仅全部失败才 part error。
 
-    盘中禁写（issue #78）：交易时段内当日行不落库（未收盘数据非最终值），
-    历史行照常；deferred 计数进 part 明细。
+    链为指数日线链 腾讯 → baostock（issue #117，default_index_daily_adapters
+    在 init_database 解析）；盘中禁写（issue #78）：交易时段内当日行不落库
+    （未收盘数据非最终值），历史行照常；deferred 计数进 part 明细。
     """
     today = today_str(now)
     defer_today = today if is_trading_time(now) else None
@@ -177,7 +187,7 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
     }
 
 
-def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
+def _init_backfill(conn, adapters: Sequence[DailyAdapter]) -> dict:
     """全市场个股历史日线回溯：复用日线头尾自愈，单股失败不中断。"""
     today = today_str()
     started = datetime.now(timezone.utc)
@@ -240,16 +250,40 @@ def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
 def init_database(
     backfill_history: bool = False,
     adapters: Sequence[DataAdapter] | None = None,
+    daily_adapters: Sequence[DailyAdapter] | None = None,
+    snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
+    index_adapters: Sequence[DataAdapter] | None = None,
     now=None,
 ) -> dict:
     """建表 + 轻量初始化数据；backfill_history=True 追加全市场历史日线回溯。
 
-    now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内 index_daily
-    当日行不落库）。"""
+    个股日线回溯走独立 fallback 链（issue #112：腾讯→新浪→baostock），由
+    daily_adapters 注入；全市场快照走独立链（issue #116：腾讯批量报价→腾讯
+    rank→新浪直连），由 snapshot_adapters 注入；指数日线走独立链
+    （issue #117：腾讯→baostock），由 index_adapters 注入；未显式注入时
+    生产默认分别用 default_daily_adapters / default_snapshot_adapters /
+    default_index_daily_adapters，测试注入 adapters 时沿用同一组 fake（保持
+    既有接缝）。now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内
+    index_daily 当日行不落库）。"""
     tool = "init_database"
     params = {"backfill_history": backfill_history}
     if adapters is None:
         adapters = default_adapters()
+        if daily_adapters is None:
+            daily_adapters = default_daily_adapters()
+        if snapshot_adapters is None:
+            snapshot_adapters = default_snapshot_adapters()
+        if index_adapters is None:
+            from .adapters import default_index_daily_adapters
+
+            index_adapters = default_index_daily_adapters()
+    else:
+        if daily_adapters is None:
+            daily_adapters = adapters
+        if snapshot_adapters is None:
+            snapshot_adapters = adapters
+        if index_adapters is None:
+            index_adapters = adapters
     conn, err = connect()
     if err:
         return {"status": "error", "tool": tool, "params": params, "error": err}
@@ -267,11 +301,11 @@ def init_database(
             }
         parts = {
             "stock_list": _init_stock_list(conn, adapters),
-            "market_snapshot": _init_market_snapshot(conn, adapters),
-            "index_daily": _init_index_daily(conn, adapters, now),
+            "market_snapshot": _init_market_snapshot(conn, snapshot_adapters),
+            "index_daily": _init_index_daily(conn, index_adapters, now),
         }
         if backfill_history:
-            parts["backfill"] = _init_backfill(conn, adapters)
+            parts["backfill"] = _init_backfill(conn, daily_adapters)
     finally:
         conn.close()
 

@@ -1,0 +1,52 @@
+[
+ {
+  "metadata": {
+   "catalogid": "1842_xxpl",
+   "name": "竞价交易公开信息",
+   "tabkey": "tab1",
+   "pagesize": 10,
+   "pageno": 1,
+   "pagecount": 2,
+   "recordcount": 5
+  },
+  "data": [
+   {
+    "bz": "<a href='javascript:void(0);' a-back=1 a-param='/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_detal&TABKEY=tab1,tab2&DQRQ=2026-10-20&ZQDM=000056&ZBDM=0901'>查看详情</a>",
+    "cjje": "1.39",
+    "cjsl": "6,612.81",
+    "dqrq": "2026-10-20",
+    "plyy": "日价格跌幅偏离值达到-10.34%",
+    "zqdm": "000056",
+    "zqjc": "*ST皇庭"
+   },
+   {
+    "bz": "<a href='javascript:void(0);' a-back=1 a-param='/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_detal&TABKEY=tab1,tab2&DQRQ=2026-10-20&ZQDM=000530&ZBDM=0902'>查看详情</a>",
+    "cjje": "20.42",
+    "cjsl": "26,651.62",
+    "dqrq": "2026-10-20",
+    "plyy": "日价格振幅达到18.39%",
+    "zqdm": "000530",
+    "zqjc": "冰山冷热"
+   },
+   {
+    "bz": "<a href='javascript:void(0);' a-back=1 a-param='/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_detal&TABKEY=tab1,tab2&DQRQ=2026-10-20&ZQDM=301001&ZBDM=0903'>查看详情</a>",
+    "cjje": "9.87",
+    "cjsl": "8,123.45",
+    "dqrq": "2026-10-20",
+    "plyy": "日换手率达到44.65%",
+    "zqdm": "301001",
+    "zqjc": "示例智能"
+   },
+   {
+    "bz": "<a href='javascript:void(0);' a-back=1 a-param='/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_detal&TABKEY=tab1,tab2&DQRQ=2026-10-20&ZQDM=002164&ZBDM=0901'>查看详情</a>",
+    "cjje": "3.21",
+    "cjsl": "1,234.56",
+    "dqrq": "2026-10-20",
+    "plyy": "日价格涨幅偏离值达到7.12%",
+    "zqdm": "002164",
+    "zqjc": "示例电力"
+   }
+  ],
+  "error": null
+ }
+]

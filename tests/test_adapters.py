@@ -488,3 +488,19 @@ def test_baostock_rejects_all_board_sections():
             fn("20240105")
     with pytest.raises(FetchError, match="不支持"):
         bs.fetch_index_spot("000688")
+
+
+def test_baostock_fields_include_turn():
+    """issue #112：单股日线 _FIELDS 补 turn，恢复换手率（个股/指数实测均可用）。"""
+    from qstock_mcp.adapters.baostock_adapter import _FIELDS
+
+    assert "turn" in _FIELDS.split(",")
+
+
+def test_baostock_mapping_turnover_rate_from_turn():
+    fields = "date,open,high,low,close,volume,amount,pctChg,tradestatus,turn".split(",")
+    rows = [["2026-10-20", "1321.01", "1335.00", "1316.14", "1331.88",
+             "3413565", "4525398958.59", "0.5215", "1", "0.2731"]]
+    (bar,) = map_baostock_rows(fields, rows)
+    assert bar["turnover_rate"] == 0.2731  # 百分数口径直接入库
+    assert bar["tradestatus"] == 1

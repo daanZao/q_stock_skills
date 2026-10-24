@@ -2,18 +2,21 @@
 
 工具函数层（server.py）只做薄包装；本层是测试接缝：注入 fake 适配器 +
 真实 PG 测试库（见 tests/）。查询自愈契约（issue #3）：库里缺数据时只补
-请求区间的头部和尾部缺口（中段缺口视为停牌/非交易日），按 efinance →
-akshare → baostock fallback；全失败时报错并给出 attempted_sources，
-绝不返回过期/伪造数据。
+请求区间的头部和尾部缺口（中段缺口视为停牌/非交易日），按腾讯 → 新浪 →
+baostock fallback（issue #112，东财退出个股日线）；全失败时报错并给出
+attempted_sources，绝不返回过期/伪造数据。
 盘中禁写（issue #78）：交易时段内（交易日 09:30–15:00 东八区）当日行不落库
 （未收盘数据非最终值），fetch/query 正常返回数据并带 note；盘后行为不变。
+
+三源对拍（issue #112）在独立模块 `daily_parity.py`：逐源直取同一交易日 bar 做
+字段级比对、不落库——固定 CLI `qstock-scheduler daily --check` 的入口。
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import NamedTuple, Sequence
 
-from .adapters import DailyAdapter, default_adapters
+from .adapters import DailyAdapter, default_daily_adapters
 from .dates import is_trading_time, resolve_range, today_str
 from .db import connect
 from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_with_fallback
@@ -64,6 +67,9 @@ def ensure_coverage(
             "source": result["source"],
             "rows": n,
         }
+        if result.get("adjust_fallback"):
+            # 复权回落可见化（issue #112）：上游缺复权键按 day 数据落库
+            segment["adjust_fallback"] = True
         if deferred:
             segment["deferred"] = len(deferred)
             deferred_rows.extend({**r, "source": result["source"]} for r in deferred)
@@ -83,6 +89,8 @@ def _ledger_daily(
     )
     if deferred:
         seg_detail += f"; deferred(盘中禁写)={deferred}"
+    if any(s.get("adjust_fallback") for s in segments):
+        seg_detail += "; 复权回落=day（上游缺复权键）"
     record_collection(
         conn,
         trade_date=end,
@@ -143,6 +151,11 @@ _INTRADAY_NOTE = (
     "盘中时段：当日未收盘数据不落库（盘中禁写防线，issue #78），收盘后可正常补采"
 )
 
+_ADJUST_FALLBACK_NOTE = (
+    "上游缺复权键，已按不复权（day）数据落库——响应无法区分"
+    "“无复权事件”与“上游不提供调整序列”（ADR 0010）"
+)
+
 
 def _run(stock_code: str, days, start, end, adj, adapters, tool: str, now=None):
     """公共骨架：参数解析 → 连接 → 头尾自愈。失败返回 (None, error_dict)。"""
@@ -158,7 +171,7 @@ def _run(stock_code: str, days, start, end, adj, adapters, tool: str, now=None):
     except ValueError as e:
         return None, _error(tool, params, str(e))
     if adapters is None:
-        adapters = default_adapters()
+        adapters = default_daily_adapters()
     conn, err = connect()
     if err:
         return None, _error(tool, params, err)
@@ -203,7 +216,7 @@ def fetch_daily(
     start: str | None = None,
     end: str | None = None,
     adj: str = "qfq",
-    adapters: list[DailyAdapter] | None = None,
+    adapters: Sequence[DailyAdapter] | None = None,
     now=None,
 ) -> dict:
     """抓取个股日线并落库：只补头尾缺口，按业务键 upsert（幂等）。
@@ -226,6 +239,12 @@ def fetch_daily(
     if ctx.deferred_rows:
         out["note"] = _INTRADAY_NOTE
         out["deferred_rows"] = len(ctx.deferred_rows)
+    if any(s.get("adjust_fallback") for s in ctx.segments):
+        out["note"] = (
+            f"{out['note']}；{_ADJUST_FALLBACK_NOTE}"
+            if out.get("note")
+            else _ADJUST_FALLBACK_NOTE
+        )
     return out
 
 
@@ -235,7 +254,7 @@ def query_daily(
     start: str | None = None,
     end: str | None = None,
     adj: str = "qfq",
-    adapters: list[DailyAdapter] | None = None,
+    adapters: Sequence[DailyAdapter] | None = None,
     now=None,
 ) -> dict:
     """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间。

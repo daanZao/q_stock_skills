@@ -23,18 +23,47 @@ indices 段抓取后对照 MAJOR_INDICES 白名单（复用 tools_init 清单，
 patch failed 明细（复用 ADR 0007 命名：upstream_unreachable 带 retry_advice /
 fetch_failed / 全源口径不含该指数 no_data_for_date）。
 
+承载源（issue #117，spec #111）：indices section 自 #117 起由腾讯批量报价承载
+（唯一覆盖量比字段、含 000688），fallback 链 腾讯 → 新浪（default_index_spot_
+adapters）；efinance/akshare 东财口径退出指数快照面，白名单补漏机制保留
+（腾讯 7 指数全命中时零补抓请求）。注入适配器时（测试）全 section 沿用注入。
+
 服务端防线（issue #78，ADR 0007 补记）：boards/indices 为实时语义 section
 （REALTIME_SECTIONS），对历史日期调用返回 section 级 unsupported
 （detail=realtime_section_no_backfill）零落库；indices 段落库前校验行级日期
 ==请求日期（不符 detail=date_mismatch 零落库）。防线拒收同样落采集台账
 （issue #77：被拒的污染尝试最值得审计）。
+
+第四态 planned_absent（issue #113，spec #111/#102，ADR 0007 补记）：已定方向
+待接线的 section 在 PLANNED_ABSENT_SECTIONS 登记后以第四态占位——循环内最先
+判定，不抓取、零落库、不计 failed_sections、不触发核心 section fail-fast、
+全占位时整体仍 ok；每运行落一条 planned_absent 占位台账（历史模式就绪归因
+由此区分"计划缺席"与"未采集"）。永久弃用面不占位：直接从 ALL_SECTIONS /
+调度采集清单删除（如概念维度资金流字段，见 daily-review skill）。
+
+zt_pool/strong_stocks 承载切换（issue #120，spec #111，ADR 0012）——仅生产
+路径（调用方未注入适配器）生效，注入 fake 的测试走原 fetch 路径：
+
+- zt_pool → 同花顺涨停揭秘 ThsAdapter 单源：台账"每日一次"守卫（当日已
+  ok/empty 即跳过上游）+ fetch_section_with_fallback(max_retries=0)（低频
+  纪律：不进入同源重试）+ 封禁探测命中按 upstream_unreachable 语义上报
+  （THS IP 级封禁视同连接级故障，触发核心 section 中止线）。单池失败、
+  他池成功时拿到的池照常落库并以 partial_error 报告（lhb 部分失败同构）。
+- strong_stocks → 库内自算（tools_strong）：stock_daily 60 日新高 ∪
+  zt_pool 近 10 日多次涨停；输入缺失（当日无日线）按 no_data_for_date
+  正常语义跳过，非故障不中止。
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import BoardAdapter, default_adapters
+from .adapters import (
+    BoardAdapter,
+    default_adapters,
+    default_index_spot_adapters,
+    default_lhb_adapters,
+)
 from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
@@ -45,7 +74,7 @@ from .fetch_chain import (
     fetch_index_spot_with_fallback,
     fetch_section_with_fallback,
 )
-from .ledger import record_collection, summarize_attempted
+from .ledger import already_collected, record_collection, summarize_attempted
 from .output import error as _error
 from .repository import (
     BOARD_QUERY_TABLES,
@@ -70,7 +99,130 @@ CORE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks")
 REALTIME_SECTIONS = ("indices", "boards")
 REALTIME_NO_BACKFILL = "realtime_section_no_backfill"
 
+# 第四态登记处（issue #113，spec #111/#102）：已定方向待接线的
+# section → 缺席原因（决策依据）。在册 section 占位不抓：响应 status=
+# "planned_absent"，落 planned_absent 占位台账，不计失败、不进异常报告。
+# 接线完成即从本字典删除该 section 即恢复采集；测试用 monkeypatch 替换本字典。
+PLANNED_ABSENT_SECTIONS: dict[str, str] = {}
+
 _LHB_EMPTY_NOTE = "当日无龙虎榜数据（龙虎榜盘后发布）"
+
+# THS 封禁恢复建议（实测恢复 >5 分钟，issue #120 调研）：覆盖通用重试建议
+_THS_RETRY_ADVICE = (
+    "同花顺 IP 级封禁恢复时间 >5 分钟（2026-10-20 实测），今日勿再重试，"
+    "等次日采集窗口；可用 qstock-scheduler limitpool --probe 探测解封状态"
+)
+
+
+def _zt_pool_section(conn, trade_date: str, started) -> dict:
+    """zt_pool 段（issue #120）：同花顺涨停揭秘低频纪律抓取 + 落库 + 落账。
+
+    每日一次守卫：当日台账已有 ok/empty 行即跳过上游（THS 风控极敏感，
+    重复执行不重复消耗配额）；error 不在守卫之列（失败允许修复后当日重跑）。
+    封禁探测命中（FetchError kind=connection）按 upstream_unreachable 上报，
+    触发核心 section 中止线（spec #111"新源故障含 THS 风控仍触发中止线"）。
+    """
+    from .adapters.ths_adapter import ThsAdapter
+
+    if already_collected(conn, trade_date, "zt_pool"):
+        n = len(select_board_rows(conn, "zt_pool", "trade_date", "stock_code",
+                                  trade_date))
+        record_collection(
+            conn, trade_date=trade_date, section="zt_pool", status="ok", rows=n,
+            detail="skip: 每日一次纪律（当日已采集，跳过上游请求）",
+            started_at=started,
+        )
+        return {
+            "rows": n,
+            "status": "ok",
+            "note": "当日已采集（每日一次纪律），跳过上游请求",
+        }
+    adapter = ThsAdapter()
+    try:
+        r = fetch_section_with_fallback([adapter], "zt_pool", trade_date,
+                                        max_retries=0)
+    except AllSourcesFailed as e:
+        kind = aggregate_error_kind(e.attempted)
+        entry = {
+            "rows": 0,
+            "status": "error",
+            "error": str(e),
+            "error_kind": kind,
+            "attempted_sources": e.attempted,
+        }
+        if kind == "upstream_unreachable":
+            entry["retry_advice"] = _THS_RETRY_ADVICE
+        record_collection(
+            conn, trade_date=trade_date, section="zt_pool", status="error",
+            error_kind=kind, detail=summarize_attempted(e.attempted),
+            started_at=started,
+        )
+        return entry
+    data = r["data"]
+    res = {
+        "rows": _upsert_section(conn, "zt_pool", data, trade_date),
+        "source": r["source"],
+        "status": "ok",
+    }
+    partial = getattr(adapter, "pool_errors", None)
+    if partial:
+        # 单池失败他池成功：拿到的池照常落库，失败原因必须报告（lhb 同构）
+        res["partial_error"] = "; ".join(f"{k}: {v}" for k, v in partial.items())
+    if not data:
+        res["empty_kind"] = "no_data_for_date"
+    record_collection(
+        conn,
+        trade_date=trade_date,
+        section="zt_pool",
+        status="ok" if res["rows"] > 0 else "empty",
+        source=r["source"],
+        rows=res["rows"],
+        error_kind=None if res["rows"] > 0 else "no_data_for_date",
+        detail="; ".join(f"{k}: {v}" for k, v in partial.items())
+        if partial
+        else summarize_attempted(r["attempted_sources"]),
+        started_at=started,
+    )
+    return res
+
+
+def _strong_stocks_section(conn, trade_date: str, started) -> dict:
+    """strong_stocks 段（issue #120）：库内自算（tools_strong）+ 落库 + 落账。
+
+    自算输入缺失（stock_daily 当日无数据）按 no_data_for_date 正常语义跳过：
+    非故障、不中止——先经 daily 入口补当日日线后重跑本段即可。
+    """
+    from .tools_strong import compute_strong_rows
+
+    rows = compute_strong_rows(conn, trade_date)
+    if rows is None:
+        note = ("stock_daily 当日无数据，跳过自算"
+                "（先经 daily 入口补当日日线后重跑）")
+        record_collection(
+            conn, trade_date=trade_date, section="strong_stocks",
+            status="empty", source="selfcalc", rows=0,
+            error_kind="no_data_for_date",
+            detail="selfcalc_skip: stock_daily 无当日行", started_at=started,
+        )
+        return {
+            "rows": 0,
+            "status": "ok",
+            "source": "selfcalc",
+            "empty_kind": "no_data_for_date",
+            "note": note,
+        }
+    n = _upsert_section(conn, "strong_stocks", rows, trade_date)
+    record_collection(
+        conn, trade_date=trade_date, section="strong_stocks", status="ok",
+        source="selfcalc", rows=n,
+        detail="selfcalc: stock_daily 60日新高 ∪ zt_pool 近10日多次涨停",
+        started_at=started,
+    )
+    res: dict = {"rows": n, "source": "selfcalc", "status": "ok"}
+    if not rows:
+        res["empty_kind"] = "no_data_for_date"
+    return res
+
 
 
 def _parse_sections(sections) -> list[str]:
@@ -145,8 +297,15 @@ def fetch_board_snapshot(
     trade_date: str | None = None,
     sections: str | Sequence[str] | None = None,
     adapters: Sequence[BoardAdapter] | None = None,
+    lhb_adapters: Sequence[BoardAdapter] | None = None,
 ) -> dict:
-    """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。"""
+    """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。
+
+    lhb section 专用链（issue #114，spec #111）：默认走 default_lhb_adapters()
+    （交易所官方主源 → akshare 东财 legacy 兜底），其余 section 用 adapters。
+    调用方显式传 adapters 而未传 lhb_adapters 时，lhb 随 adapters（测试 fake
+    注入的既有接缝保持兼容）；显式传 lhb_adapters 时 lhb 以它为准。
+    """
     tool = "fetch_board_snapshot"
     params = {"trade_date": trade_date, "sections": sections}
     if trade_date is None:
@@ -160,8 +319,11 @@ def fetch_board_snapshot(
         selected = _parse_sections(sections)
     except ValueError as e:
         return _error(tool, params, str(e))
-    if adapters is None:
-        adapters = default_adapters()
+    # adapters 为 None 保留到循环内按 section 解析生产链（indices 走腾讯→新浪，
+    # issue #117；lhb 走交易所官方链，issue #114；zt_pool/strong_stocks 生产路径
+    # 走 THS 低频纪律与库内自算，issue #120，见循环内分支；其余走
+    # default_adapters）；注入适配器（测试）时全 section 沿用注入
+    injected = adapters is not None  # 测试注入走原 fetch 路径；生产路径见下
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -170,6 +332,25 @@ def fetch_board_snapshot(
         today = today_str()
         for name in selected:
             started = datetime.now(timezone.utc)
+            if name in PLANNED_ABSENT_SECTIONS:
+                # 第四态占位（issue #113）：已定方向待接线，不抓取零落库、不计
+                # 失败；占位落账供历史模式就绪归因（计划缺席 ≠ 未采集 ≠ 故障）
+                reason = PLANNED_ABSENT_SECTIONS[name]
+                record_collection(
+                    conn,
+                    trade_date=effective,
+                    section=name,
+                    status="planned_absent",
+                    rows=0,
+                    detail=f"planned_absent: {reason}",
+                    started_at=started,
+                )
+                results[name] = {
+                    "rows": 0,
+                    "status": "planned_absent",
+                    "note": f"计划缺席（已定方向待接线）：{reason}",
+                }
+                continue
             if effective < today and name in REALTIME_SECTIONS:
                 # 服务端防线（issue #78）：实时语义 section 不可回补历史日期，零落库
                 # 拒收也落账（issue #77）：被拒绝的历史回补尝试最值得审计
@@ -190,8 +371,35 @@ def fetch_board_snapshot(
                     "detail": REALTIME_NO_BACKFILL,
                 }
                 continue
+            # 生产链按 section 解析：indices 走腾讯→新浪指数快照链（issue #117），
+            # lhb 走交易所官方链（issue #114）；注入适配器（测试）时全 section
+            # 沿用注入，显式传 lhb_adapters 时 lhb 以它为准
+            if name == "zt_pool" and not injected:
+                # 生产路径：THS 涨停揭秘低频纪律抓取（issue #120）
+                results[name] = _zt_pool_section(conn, effective, started)
+                continue
+            if name == "strong_stocks" and not injected:
+                # 生产路径：库内自算（issue #120）
+                results[name] = _strong_stocks_section(conn, effective, started)
+                continue
+            if adapters is not None:
+                chain = (
+                    lhb_adapters
+                    if name == "lhb" and lhb_adapters is not None
+                    else adapters
+                )
+            elif name == "indices":
+                chain = default_index_spot_adapters()
+            elif name == "lhb":
+                chain = (
+                    lhb_adapters
+                    if lhb_adapters is not None
+                    else default_lhb_adapters()
+                )
+            else:
+                chain = default_adapters()
             try:
-                r = fetch_section_with_fallback(adapters, name, effective)
+                r = fetch_section_with_fallback(chain, name, effective)
             except AllSourcesFailed as e:
                 kind = aggregate_error_kind(e.attempted)
                 entry = {
@@ -217,7 +425,7 @@ def fetch_board_snapshot(
             data = r["data"]
             patch = None
             if name == "indices":
-                data, patch = _patch_major_indices(adapters, data)
+                data, patch = _patch_major_indices(chain, data)
                 # 行级日期校验（issue #78）：行级日期与请求日期不符即拒收零落库，
                 # 防止上游返回陈旧交易日数据被静默计入请求日（efinance 行级"最新交易日"）
                 mismatched = sorted(
@@ -277,7 +485,9 @@ def fetch_board_snapshot(
             results[name] = res
     finally:
         conn.close()
-    failed = [k for k, v in results.items() if v["status"] != "ok"]
+    failed = [
+        k for k, v in results.items() if v["status"] not in ("ok", "planned_absent")
+    ]
     payload = {
         "tool": tool,
         "params": params,

@@ -20,19 +20,9 @@ from ._board_em import (
     map_zt_pool_rows,
 )
 from ._eastmoney import map_eastmoney_rows, map_spot_rows
-from .base import FetchError, json_safe
+from .base import FetchError, import_akshare, json_safe
 
 log = logging.getLogger(__name__)
-
-_ADJUST = {"qfq": "qfq", "hfq": "hfq", "none": ""}  # akshare 复权参数
-
-
-def _ak():
-    try:
-        import akshare as ak
-    except ImportError as e:
-        raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
-    return ak
 
 
 class AkshareAdapter:
@@ -41,30 +31,19 @@ class AkshareAdapter:
     def fetch_daily(
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
     ) -> list[dict]:
-        try:
-            import akshare as ak
-        except ImportError as e:
-            raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=stock_code,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust=_ADJUST.get(adj, "qfq"),
-            )
-        except Exception as e:
-            raise FetchError(f"akshare 抓取失败: {e}") from e
-        if df is None or df.empty:
-            return []
-        return map_eastmoney_rows(df.to_dict("records"))
+        """东财个股日线已退役（spec #111 / issue #112）。
+
+        个股日线链路为 腾讯 → 新浪 → baostock；`stock_zh_a_hist`（东财 push2his）
+        不再被调用。保留方法并显式拒绝，避免误接线后静默走回东财。
+        """
+        raise FetchError(
+            "akshare 东财个股日线已退役（个股日线链：腾讯→新浪→baostock）",
+            kind="unsupported",
+        )
 
     def fetch_market_snapshot(self) -> dict:
         """单次全市场快照；spot_em 无交易日列，trade_date 为 None 由工具层回退。"""
-        try:
-            import akshare as ak
-        except ImportError as e:
-            raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
+        ak = import_akshare()
         try:
             df = ak.stock_zh_a_spot_em()
         except Exception as e:
@@ -77,7 +56,7 @@ class AkshareAdapter:
 
     def fetch_stock_list(self) -> list[dict]:
         """股票清单：stock_info_a_code_name（code/name 两列）。"""
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_info_a_code_name()
         except Exception as e:
@@ -91,7 +70,7 @@ class AkshareAdapter:
 
     def fetch_index_daily(self, index_code: str, start: str, end: str) -> list[dict]:
         """指数日线：index_zh_a_hist 与个股历史同为东财中文列，共用映射；空区间返回 []。"""
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.index_zh_a_hist(
                 symbol=index_code, period="daily", start_date=start, end_date=end
@@ -102,30 +81,33 @@ class AkshareAdapter:
             return []
         return map_eastmoney_rows(df.to_dict("records"))
 
-    # ---------------------------------------------------------------- 基本面透传（issue #6）
+    # ---------------------------------------------------------------- 基本面透传（issue #6/#115）
 
     def fetch_fundamentals(self, stock_code: str) -> dict:
-        """财务摘要 + 估值指标透传：section 名对应上游接口，字段名原样保留。
+        """财务摘要 + 估值序列透传：section 名对应上游接口，字段名原样保留。
 
+        financial_abstract 为新浪财务摘要（幸存，非东财）；valuation 为百度
+        股市通估值日序列（issue #115，替代已被 akshare 移除的乐咕
+        stock_a_indicator_lg——原 valuation_indicator section 随之退役）。
         section 级容错：拿到什么传什么（失败 section 记入 errors 键），
         全部无数据才抛 FetchError 触发 fallback。
         """
-        ak = _ak()
+        ak = import_akshare()
         payload: dict = {}
         errors: list[str] = []
-        for section, call in [
-            ("financial_abstract", lambda: ak.stock_financial_abstract(symbol=stock_code)),
-            ("valuation_indicator", lambda: ak.stock_a_indicator_lg(symbol=stock_code)),
-        ]:
-            try:
-                df = call()
-            except Exception as e:  # noqa: BLE001 - 单 section 失败不拖垮其他
-                errors.append(f"{section}: {e}")
-                continue
+        try:
+            df = ak.stock_financial_abstract(symbol=stock_code)
+        except Exception as e:  # noqa: BLE001 - 单 section 失败不拖垮其他
+            errors.append(f"financial_abstract: {e}")
+        else:
             if df is not None and not df.empty:
-                payload[section] = json_safe(df.to_dict("records"))
+                payload["financial_abstract"] = json_safe(df.to_dict("records"))
             else:
-                errors.append(f"{section}: 空返回")
+                errors.append("financial_abstract: 空返回")
+        valuation, valuation_errors = _fetch_baidu_valuation(ak, stock_code)
+        if valuation:
+            payload["valuation"] = valuation
+        errors.extend(f"valuation: {e}" for e in valuation_errors)
         if not payload:
             raise FetchError(
                 f"akshare 基本面无数据（{stock_code}）: {'; '.join(errors) or '空返回'}"
@@ -146,7 +128,7 @@ class AkshareAdapter:
         return [r for r in self._index_rows() if r["index_code"] == index_code]
 
     def _index_rows(self) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
         except Exception as e:
@@ -156,7 +138,7 @@ class AkshareAdapter:
         return map_index_rows(df.to_dict("records"))
 
     def fetch_boards(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         rows = []
         for board_type, fn in [
             ("industry", ak.stock_board_industry_name_em),
@@ -173,7 +155,7 @@ class AkshareAdapter:
 
     def fetch_zt_pool(self, trade_date: str) -> list[dict]:
         """涨/跌停/炸板池：单池失败记录并继续，三池全失败才抛 FetchError。"""
-        ak = _ak()
+        ak = import_akshare()
         rows, errors = [], []
         for pool_type, api_name in [
             ("zt", "stock_zt_pool_em"),
@@ -195,7 +177,7 @@ class AkshareAdapter:
         return rows
 
     def fetch_strong_stocks(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_zt_pool_strong_em(date=trade_date)
         except Exception as e:
@@ -231,7 +213,7 @@ class AkshareAdapter:
         return result
 
     def _lhb_basic(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lhb_detail_em(start_date=trade_date, end_date=trade_date)
         except TypeError as e:
@@ -248,7 +230,7 @@ class AkshareAdapter:
 
     def _lhb_statistic(self, trade_date: str) -> list[dict]:
         # 接口为近三月滚动统计，无日期参数；行级"最近上榜日"在映射层写入 trade_date
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lhb_stock_statistic_em(symbol="近三月")
         except Exception as e:
@@ -259,7 +241,7 @@ class AkshareAdapter:
 
     def _lhb_yyb_capital(self, trade_date: str) -> list[dict]:
         # 接口为当前累计资金榜，无日期参数；fetch_date 由工具层记执行日
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lh_yyb_capital()
         except Exception as e:
@@ -269,7 +251,7 @@ class AkshareAdapter:
         return map_lhb_yyb_capital_rows(df.to_dict("records"))
 
     def _lhb_yyb_most(self, trade_date: str) -> list[dict]:
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_lh_yyb_most()
         except Exception as e:
@@ -285,7 +267,7 @@ class AkshareAdapter:
     ) -> list[dict]:
         """板块历史日 K（push2his）：stock_board_industry/concept_hist_em，
         不复权（板块行情无复权语义）。空区间返回 []。"""
-        ak = _ak()
+        ak = import_akshare()
         fn = (
             ak.stock_board_industry_hist_em
             if board_type == "industry"
@@ -302,7 +284,7 @@ class AkshareAdapter:
 
     def fetch_board_cons(self, board_name: str) -> list[dict]:
         """概念板块成分（cons 接口）：stock_board_concept_cons_em 按板块名。"""
-        ak = _ak()
+        ak = import_akshare()
         try:
             df = ak.stock_board_concept_cons_em(symbol=board_name)
         except Exception as e:
@@ -310,3 +292,36 @@ class AkshareAdapter:
         if df is None or df.empty:
             return []
         return map_cons_rows(df.to_dict("records"))
+
+
+# ---------------------------------------------------------------- 百度股市通估值（issue #115）
+
+# stock_zh_valuation_baidu 的指标枚举（akshare docstring 定稿）；
+# period 取近一年：单股单指标一次请求即全年日序列，与调研实测一致
+#（docs/research/2026-10-20-fundamental-gaps.md）。
+_BAIDU_VALUATION_INDICATORS = ("总市值", "市盈率(TTM)", "市盈率(静)", "市净率", "市现率")
+_BAIDU_VALUATION_PERIOD = "近一年"
+
+
+def _fetch_baidu_valuation(ak, stock_code: str) -> tuple[dict, list[str]]:
+    """百度股市通估值日序列：逐指标抓取（date/value 列原样保留上游）。
+
+    单指标失败只记 errors 不拖垮其他指标；全部指标无数据返回空 dict
+    （由调用方记 valuation section 失败）。上游列为 date（日期）/value
+    （数值），经 json_safe 序列化为 ISO 字符串/数值。
+    """
+    series: dict = {}
+    errors: list[str] = []
+    for indicator in _BAIDU_VALUATION_INDICATORS:
+        try:
+            df = ak.stock_zh_valuation_baidu(
+                symbol=stock_code, indicator=indicator, period=_BAIDU_VALUATION_PERIOD
+            )
+        except Exception as e:  # noqa: BLE001 - 单指标失败不拖垮其他指标
+            errors.append(f"{indicator}: {e}")
+            continue
+        if df is not None and not df.empty:
+            series[indicator] = json_safe(df.to_dict("records"))
+        else:
+            errors.append(f"{indicator}: 空返回")
+    return series, errors

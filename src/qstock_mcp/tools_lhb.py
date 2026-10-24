@@ -1,0 +1,265 @@
+"""龙虎榜固定入口核心层（issue #114，spec #111）：单日抓取 / 历史回溯 / 新浪对拍。
+
+CLI（qstock-scheduler lhb，手册 docs/lhb-source-cli.md）直调本层，不经 MCP
+协议层：
+- fetch_lhb_day：单日抓取落库——复用 fetch_board_snapshot 的 lhb 专用链
+  （三态契约、台账、业务键 upsert 全继承），幂等可重跑。
+- fetch_lhb_backfill：区间历史回溯（逐交易日；沪深实测回溯到 2015，北交所
+  到 2021-11 开市当周，#97/#107）；单日失败不中断、逐日落台账，进度经
+  logging 走 stderr（issue #89 双阈值模式）。
+- compare_lhb_sources：新浪互补对拍（可手动触发，不落库）——交易所官方
+  主源 vs 新浪独立转载面，逐股比对股票集合/全日成交额/席位净买额；
+  容差沿用 daily_parity 口径（成交额 rel 0.005；净买 rel 0.005，万元）。
+"""
+
+import logging
+from datetime import datetime, timezone
+from time import monotonic
+from typing import Sequence
+
+from .adapters import BoardAdapter
+from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
+from .adapters._lhb_sina import SinaLhbClient, seat_net
+from .dates import add_days, is_trading_day, normalize_date, today_str
+from .daily_parity import _within_tolerance
+from .output import aggregate_batch_status
+from .output import error as _error
+from .tools_board import fetch_board_snapshot
+
+log = logging.getLogger(__name__)
+
+PROGRESS_LOG_EVERY = 20  # 回溯每 N 日报告一次进度
+PROGRESS_LOG_INTERVAL_S = 60  # 距上条 ≥N 秒也报（慢路径可观测，issue #89）
+
+_AMOUNT_TOL = ("rel", 0.005)  # 成交额/净买额相对容差（daily_parity 同口径）
+_PARITY_FIELDS = ("day_amount", "net_buy_amount")
+
+
+def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
+    return (
+        i % PROGRESS_LOG_EVERY == 0
+        or i == total
+        or now_m - last_logged >= PROGRESS_LOG_INTERVAL_S
+    )
+
+
+def fetch_lhb_day(
+    trade_date: str | None = None,
+    lhb_adapters: Sequence[BoardAdapter] | None = None,
+) -> dict:
+    """单日龙虎榜抓取落库（lhb 专用链）；返回 fetch_board_snapshot 的 lhb 段结果。"""
+    result = fetch_board_snapshot(
+        trade_date=trade_date, sections=["lhb"], lhb_adapters=lhb_adapters
+    )
+    if result.get("sections") is None:
+        return result  # 参数级 error 契约原样上抛
+    return {
+        "tool": "fetch_lhb_day",
+        "status": result["status"],
+        "trade_date": result["trade_date"],
+        "lhb": result["sections"]["lhb"],
+        "failed_sections": result["failed_sections"],
+    }
+
+
+def fetch_lhb_backfill(
+    start: str,
+    end: str,
+    lhb_adapters: Sequence[BoardAdapter] | None = None,
+) -> dict:
+    """区间历史回溯：逐交易日抓取，单日失败不中断；逐日结果+汇总台账由
+    fetch_board_snapshot 内联记录（本层不重复落账）。"""
+    tool = "fetch_lhb_backfill"
+    params = {"start": start, "end": end}
+    try:
+        start_d, end_d = normalize_date(start), normalize_date(end)
+    except ValueError as e:
+        return _error(tool, params, str(e))
+    if start_d > end_d:
+        return _error(tool, params, f"start({start_d}) 晚于 end({end_d})")
+    days = []
+    d = start_d
+    while d <= end_d:
+        if is_trading_day(d):
+            days.append(d)
+        d = add_days(d, 1)
+    if not days:
+        return _error(tool, params, f"区间 {start_d}~{end_d} 内无交易日")
+    total = len(days)
+    results = []
+    last_logged = monotonic()
+    for i, d in enumerate(days, 1):
+        r = fetch_lhb_day(d, lhb_adapters=lhb_adapters)
+        lhb = r.get("lhb") or {}
+        results.append(
+            {
+                "trade_date": r.get("trade_date", d),
+                "status": lhb.get("status", "error"),
+                "rows": lhb.get("rows", 0),
+                "source": lhb.get("source"),
+                "empty_kind": lhb.get("empty_kind"),
+                "error_kind": lhb.get("error_kind"),
+                "partial_error": lhb.get("partial_error"),
+            }
+        )
+        now_m = monotonic()
+        if _progress_due(i, total, last_logged, now_m):
+            log.info("lhb 回溯进度 %d/%d（%s）", i, total, d)
+            last_logged = now_m
+    failed = [r for r in results if r["status"] != "ok"]
+    status = aggregate_batch_status(total, len(failed))
+    return {
+        "tool": tool,
+        "status": status,
+        "params": {"start": start_d, "end": end_d},
+        "total_days": total,
+        "succeeded": total - len(failed),
+        "failed": len(failed),
+        "empty_days": sum(1 for r in results if r.get("empty_kind")),
+        "results": results,
+    }
+
+
+def _compare_one(code, ex, si, seat_net_wan):
+    """单股对拍：全日成交额（双方；累计类情形跳过——上游口径不同）+ 席位净买额。"""
+    entry = {
+        "stock_code": code,
+        "exchange": ex,
+        "sina": si,
+        "diffs": [],
+    }
+    if ex is None or si is None:
+        entry["status"] = "single_source"
+        return entry
+    # 异常期间/三日累计类情形：交易所 day_amount 为单日成交金额，新浪成交额
+    # 列为期间累计（实测 ~3 倍差），口径不同不比，note 标注
+    if "累计" in (ex.get("lhb_reason") or ""):
+        entry["day_amount_note"] = "累计类情形：交易所为单日额、新浪为期间累计，跳过比对"
+    else:
+        ex_amt, si_amt = ex.get("day_amount"), si.get("amount_wan")
+        if ex_amt is not None and si_amt is not None and not _within_tolerance(
+            ex_amt, si_amt, *_AMOUNT_TOL
+        ):
+            entry["diffs"].append(
+                {"field": "day_amount", "exchange": ex_amt, "sina": si_amt}
+            )
+    if seat_net_wan is not None and ex.get("net_buy_amount") is not None:
+        if not _within_tolerance(ex["net_buy_amount"], seat_net_wan, *_AMOUNT_TOL):
+            entry["diffs"].append(
+                {
+                    "field": "net_buy_amount",
+                    "exchange": ex["net_buy_amount"],
+                    "sina_seat_net": seat_net_wan,
+                }
+            )
+    entry["status"] = "mismatch" if entry["diffs"] else "ok"
+    return entry
+
+
+def compare_lhb_sources(
+    trade_date: str | None = None,
+    exchange: ExchangeLhbAdapter | None = None,
+    sina: SinaLhbClient | None = None,
+) -> dict:
+    """新浪互补对拍（不落库）：交易所官方 vs 新浪转载面。
+
+    逐股比对股票集合（双向差集报 info 级）、全日成交额（双方披露口径一致，
+    rel 0.005）、席位净买额（新浪 seat JSONP 去重后 Σnet，可得时）。对拍
+    失败/无数据只记该侧，不中断另一侧；两侧均无数据才 error。
+    """
+    tool = "compare_lhb_sources"
+    params = {"trade_date": trade_date}
+    try:
+        effective = normalize_date(trade_date) if trade_date else today_str()
+    except ValueError as e:
+        return _error(tool, params, str(e))
+    if exchange is None:
+        exchange = ExchangeLhbAdapter()
+    if sina is None:
+        sina = SinaLhbClient()
+
+    ex_entry: dict = {"source": exchange.name, "status": None, "basic_count": 0}
+    ex_by_code: dict[str, dict] = {}
+    ex_rows_by_code: dict[str, int] = {}
+    try:
+        data = exchange.fetch_lhb(effective)
+        for row in data.get("lhb_basic") or []:
+            ex_rows_by_code[row["stock_code"]] = ex_rows_by_code.get(row["stock_code"], 0) + 1
+            ex_by_code.setdefault(row["stock_code"], row)
+        ex_entry["basic_count"] = len(ex_by_code)
+        if data.get("errors"):
+            ex_entry["partial_error"] = "; ".join(data["errors"])
+        ex_entry["status"] = "ok"
+    except Exception as e:  # noqa: BLE001 - 对拍单源失败只记该源
+        ex_entry = {"source": exchange.name, "status": "error", "error": str(e)}
+
+    si_entry: dict = {"source": sina.name, "status": None, "row_count": 0}
+    si_by_code: dict[str, dict] = {}
+    si_rows_by_code: dict[str, int] = {}
+    try:
+        for row in sina.daily_detail(effective):
+            si_rows_by_code[row["stock_code"]] = si_rows_by_code.get(row["stock_code"], 0) + 1
+            si_by_code.setdefault(row["stock_code"], row)
+        si_entry["row_count"] = len(si_by_code)
+        si_entry["status"] = "ok"
+    except Exception as e:  # noqa: BLE001
+        si_entry = {"source": sina.name, "status": "error", "error": str(e)}
+
+    if ex_entry["status"] != "ok" and si_entry["status"] != "ok":
+        return {
+            "tool": tool,
+            "status": "error",
+            "params": {"trade_date": effective},
+            "error": "交易所与新浪两侧均抓取失败",
+            "exchange": ex_entry,
+            "sina": si_entry,
+        }
+
+    ex_codes, si_codes = set(ex_by_code), set(si_by_code)
+    only_ex = sorted(ex_codes - si_codes)
+    only_si = sorted(si_codes - ex_codes)
+    results = []
+    mismatched = 0
+    for code in sorted(ex_codes & si_codes):
+        seat_net_wan = None
+        si = si_by_code[code]
+        ex = ex_by_code[code]
+        if si.get("seat_type") and sina is not None and si_entry["status"] == "ok":
+            try:
+                seats = sina.seat_detail(code, effective, si["seat_type"])
+                seat_net_wan = seat_net(seats)
+            except Exception as e:  # noqa: BLE001 - 单股席位缺失只记 note
+                si = {**si, "seat_note": f"席位抓取失败: {e}"}
+        entry = _compare_one(code, ex, si, seat_net_wan)
+        # 多榜单同股：两侧各自按首行归并，席位集可能属于不同榜单——
+        # 展示双方原值但不计差异（结构性不可比，非数据错误）
+        if ex_rows_by_code.get(code, 0) > 1 or si_rows_by_code.get(code, 0) > 1:
+            entry = {
+                "stock_code": code,
+                "exchange": ex,
+                "sina": si,
+                "status": "ok",
+                "note": "多榜单同股：双方各按首行归并，席位可能属不同榜单，不计差异",
+            }
+        results.append(entry)
+        if entry["status"] == "mismatch":
+            mismatched += 1
+    single = sum(1 for r in results if r["status"] == "single_source")
+    status = "mismatch" if mismatched else "ok"
+    return {
+        "tool": tool,
+        "status": status,
+        "params": {"trade_date": effective},
+        "compared_fields": list(_PARITY_FIELDS),
+        "exchange": ex_entry,
+        "sina": si_entry,
+        "stock_set_diff": {
+            "exchange_only": only_ex,
+            "sina_only": only_si,
+            "note": "指标文案口径因源而异（交易所披露原文 vs 新浪归类），不逐条比对",
+        },
+        "results": results,
+        "mismatch_count": mismatched,
+        "single_source_count": single,
+        "note": "对拍不落库；净买额比对依赖新浪席位 JSONP（买/卖各五，万元）",
+    }

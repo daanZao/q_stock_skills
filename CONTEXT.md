@@ -13,7 +13,7 @@ _Avoid_: 后端、B/S 服务
 ### MCP 数据服务的五个能力面
 
 **抓取（fetch）**:
-执行 web 数据源接口获取证券数据，多源 fallback（efinance → akshare → baostock）。
+执行 web 数据源接口获取证券数据，多源 fallback（按能力面定序；个股日线为 腾讯 → 新浪 → baostock、全市场快照为 腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连，见 `docs/knowledge-graph.md`）。
 _Avoid_: 爬虫
 
 **抓取三态错误契约**:
@@ -70,9 +70,17 @@ _Avoid_: 板块映射表
 成分字典 × 库内个股日线在**查询时实时聚合**的板块行情（当日成交额加权涨跌幅、涨跌家数、成交额合计），不加列、不物化，任意历史日期可算。东财 boards 缺失时每日复盘板块节的降级来源，降级日整节切换并标注口径。
 _Avoid_: 板块回补数据
 
+**自算强势股**:
+strong_stocks 的库内派生产出口径（issue #120，ADR 0012）：stock_daily 60 日新高 ∪ zt_pool 近 10 日涨停 ≥2 次，并集入选，`reason` 列为规则文本（"60日新高"/"多次涨停（近10日 N 次）"）。无外部强势股池源（东财口径本身为派生定义），台账来源记 `selfcalc`。自算输入缺失（stock_daily 当日无数据）按 no_data_for_date 正常语义跳过，非故障。
+_Avoid_: 强势股回补、强势股抓取
+
 **采集台账**:
-一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/三态 status/来源/行数/error_kind/起止时间），全历史保留。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败，三者表述不得混用。
+一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。低频纪律的"每日一次"守卫也读台账（当日已 ok/empty 即跳过上游，issue #120）。
 _Avoid_: 采集日志、抓取记录
+
+**计划缺席（planned_absent）**:
+采集编排第四态（决策见 #102，实施 #113）：已定方向待接线的面以该态占位——不抓取、零落库、不计失败、不进异常报告、不触发每日复盘中止线；收盘后批每日为其落一条 planned_absent 占位台账，历史模式就绪归因由此区分"计划缺席"与"未采集"。永久弃用面不占位，直接从采集清单删除（如概念维度资金流字段）。核心 section 集维持原样，真故障（error）仍触发中止。
+_Avoid_: 跳过 section、禁用 section
 
 **表承载契约**:
 每张表的写入方与读取方在其 DDL 文件头注释成文（`sql/NNN_*.sql` 头注"承载：写 X；读 Y"）；新增表或新写入路径必须同步头注。
@@ -93,7 +101,23 @@ _Avoid_: 早盘补抓
 
 **板块回补**:
 `qstock-scheduler backfill` 执行的板块历史补数：东财 push2his 板块 K 线同口径回补行业+概念板块入 `market_boards`（默认窗口 = 前一交易日前推约 3 个月），回补行带 `source='push2his'` 标注与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。收盘后批东财健康时附带概念成分积累入成分字典 'em' 体系（随 close 执行，独立成败不拖垮主批）。
+
+**个股日线入口**:
+`qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
+_Avoid_: 日线脚本、补数脚本
+
+**指数日线入口**:
+`qstock-scheduler index` 执行的指数日线固定入口：默认经腾讯 → baostock 的 fallback 链抓取区间并按业务键幂等写入 `index_daily`，逐指数独立成败；用于断档回填（如科创50 自 2026-10-13 起缺口，腾讯 K 线为首个覆盖 000688 的日线源）与收盘后当晚 T+0 当日行补采；`--verify` 纯读覆盖核验（对照交易日历列缺口），不写库。缺省代码 = 7 大指数白名单。盘中（交易时段）当日行 defer 不落库（issue #78）。手册见 `docs/index-source-cli.md`。
+_Avoid_: 指数脚本、回填脚本
+
+**对拍**:
+换源/迁移后的数据质量验证动作：逐源直取同一交易日数据并做字段级比较，不落库；`daily --check` 入口。后复权（hfq）基准因源而异，只比成交量/成交额/换手率。
+_Avoid_: 校验、比对（不加限定时）
 _Avoid_: 回填、补数据（不加限定时）
+
+**复权回落**:
+腾讯 K 线请求 qfq/hfq 但上游只给 `day` 键时按"无复权事件"返回 day 数据的语义（ADR 0010）；响应无法区分"无复权事件"与"上游不提供调整序列"，故回落必须可见：适配器 `adjust_fallback` 标记 + WARNING 日志 + fetch/query 响应 note + 采集台账 detail「复权回落=day」+ 对拍源条目 note 五处同步标注，不静默落库。
+_Avoid_: 复权降级、静默回落
 
 ### Skill 家族（继承自旧项目词汇）
 
