@@ -1,0 +1,35 @@
+{
+  "status_code": 0,
+  "status_msg": "success",
+  "data": {
+    "info": [
+      {
+        "page": 1,
+        "pages": 1,
+        "per_page": 500,
+        "total": 1,
+        "items": [
+          {
+            "code": "300666",
+            "name": "示例炸板股",
+            "latest": 15.5,
+            "change_rate": 5.44,
+            "high_days": "首板",
+            "open_num": 3,
+            "first_limit_up_time": 1792117800,
+            "last_limit_up_time": 1792133100,
+            "limit_up_price": 16.28,
+            "order_amount": 21000000.0,
+            "order_volume": 1290000,
+            "reason_type": "新能源",
+            "limit_up_type": "换手板",
+            "is_again_limit": 0,
+            "limit_up_suc_rate": 0.33,
+            "currency_value": 1800000000.0,
+            "turnover_rate": 12.1
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -106,6 +106,8 @@ def map_zt_pool_rows(records: list[dict], pool_type: str) -> list[dict]:
             "industry": _text(r.get("所属行业")),
             "dt_price": None,
             "zb_info": None,
+            "sealed_amount": None,  # 东财池字段映射不含封单额（THS 源承载，issue #120）
+            "reason_type": None,
         }
         for col, src in _ZT_EXTRA_MAP[pool_type].items():
             if col == "consecutive_boards":

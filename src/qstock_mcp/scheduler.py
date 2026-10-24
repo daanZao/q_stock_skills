@@ -31,6 +31,13 @@
                              全市场快照固定入口（issue #116，spec #111）：
                              默认走 腾讯批量报价→腾讯 rank→新浪 三层链抓取
                              落库；--check 三源直取对拍（不落库）。
+  limitpool [--date D] [--probe]
+                             涨停池固定入口（issue #120，spec #111）：zt_pool
+                             三池经同花顺涨停揭秘低频纪律抓取落库（每日每池
+                             一次、长退避、封禁探测；当日已采集即跳过），
+                             strong_stocks 库内自算（60日新高 ∪ 近10日多次
+                             涨停）。--probe 只做封禁探测（单次页面请求，不打
+                             dataapi），不落库。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -327,6 +334,40 @@ def cmd_snapshot(
     out = {"job": tool, "mode": "fetch", **result}
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
+def cmd_limitpool(date_arg: str | None, probe: bool = False) -> int:
+    """涨停池固定入口（issue #120）：zt_pool 三池 THS 抓取 + strong_stocks
+    库内自算；--probe 只做封禁探测（不落库、不触库）。
+
+    生产路径（不传适配器）走 tools_board 的 THS 低频纪律与自算段；抓取前
+    的"每日一次"守卫在 tools_board 内（读采集台账）。
+    """
+    tool = "limitpool"
+    if probe:
+        from .adapters.ths_adapter import probe as ths_probe
+
+        result = ths_probe()
+        _emit({"job": tool, "mode": "probe", **result})
+        return 0 if result["reachable"] and not result["banned"] else 1
+    result = fetch_board_snapshot(
+        trade_date=date_arg, sections=["zt_pool", "strong_stocks"])
+    failed = result.get("failed_sections")
+    if failed is None:
+        _emit({"status": "error", "job": tool,
+               "error": result.get("error", "未知错误")})
+        return 1
+    out = {
+        "status": "ok" if not failed else "error",
+        "job": tool,
+        "trade_date": result["trade_date"],
+        "sections": result["sections"],
+        "failed_sections": failed,
+    }
+    if failed and result.get("error"):
+        out["error"] = result["error"]
+        if result.get("error_kind"):
+            out["error_kind"] = result["error_kind"]
+    _emit(out)
+    return 0 if not failed else 1
 
 
 def main(argv: list[str] | None = None,
@@ -387,6 +428,13 @@ def main(argv: list[str] | None = None,
                             help="对拍模式：逐源直取字段级比较，不落库")
     p_snapshot.add_argument("--limit", type=int, default=None,
                             help="只对拍前 N 只（按代码序，冒烟用；抓取模式忽略）")
+    p_pool = sub.add_parser(
+        "limitpool",
+        help="涨停池：zt_pool 三池 THS 低频抓取 + strong_stocks 库内自算")
+    p_pool.add_argument("--date", default=None,
+                        help="交易日 yyyymmdd，缺省当日")
+    p_pool.add_argument("--probe", action="store_true",
+                        help="只做封禁探测（单次页面请求，不打 dataapi），不落库")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -425,6 +473,8 @@ def main(argv: list[str] | None = None,
                 codes_arg=args.codes,
                 fundamentals_adapters=fundamentals_adapters,
             )
+        if args.command == "limitpool":
+            return cmd_limitpool(args.date, probe=args.probe)
     except Exception as e:  # 零例外：异常收敛为结构化错误输出
         _emit({"status": "error", "job": args.command,
                "error": f"{type(e).__name__}: {e}"})

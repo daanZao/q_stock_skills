@@ -70,8 +70,12 @@ _Avoid_: 板块映射表
 成分字典 × 库内个股日线在**查询时实时聚合**的板块行情（当日成交额加权涨跌幅、涨跌家数、成交额合计），不加列、不物化，任意历史日期可算。东财 boards 缺失时每日复盘板块节的降级来源，降级日整节切换并标注口径。
 _Avoid_: 板块回补数据
 
+**自算强势股**:
+strong_stocks 的库内派生产出口径（issue #120，ADR 0012）：stock_daily 60 日新高 ∪ zt_pool 近 10 日涨停 ≥2 次，并集入选，`reason` 列为规则文本（"60日新高"/"多次涨停（近10日 N 次）"）。无外部强势股池源（东财口径本身为派生定义），台账来源记 `selfcalc`。自算输入缺失（stock_daily 当日无数据）按 no_data_for_date 正常语义跳过，非故障。
+_Avoid_: 强势股回补、强势股抓取
+
 **采集台账**:
-一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。
+一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。低频纪律的"每日一次"守卫也读台账（当日已 ok/empty 即跳过上游，issue #120）。
 _Avoid_: 采集日志、抓取记录
 
 **计划缺席（planned_absent）**:
