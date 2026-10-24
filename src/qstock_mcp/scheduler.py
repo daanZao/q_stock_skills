@@ -31,6 +31,11 @@
                              全市场快照固定入口（issue #116，spec #111）：
                              默认走 腾讯批量报价→腾讯 rank→新浪 三层链抓取
                              落库；--check 三源直取对拍（不落库）。
+  index [--codes A,B] [--date D | --start D --end D] [--verify]
+                             指数日线固定入口（issue #117，spec #111）：
+                             默认走 腾讯→baostock 链抓取落库（断档回填/T+0
+                             当日行补采）；--verify 纯读覆盖核验（对照交易日历
+                             列缺口），不写库。缺省代码 = 7 大指数白名单。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -305,6 +310,43 @@ def cmd_fundamentals(
     return 0 if status == "ok" else 1
 
 
+def cmd_index(
+    codes_arg: str | None = None,
+    date_arg: str | None = None,
+    start_arg: str | None = None,
+    end_arg: str | None = None,
+    verify: bool = False,
+    index_adapters: Sequence | None = None,
+) -> int:
+    """指数日线固定入口（issue #117）：抓取落库 / 覆盖核验。
+
+    - 默认（fetch）：逐指数走 腾讯→baostock fallback 链抓取 [start, end]
+      落库 index_daily（业务键幂等，可重复执行）；用于断档回填（如科创50
+      2026-10-13 起缺口）与收盘后当晚 T+0 当日行补采。缺省代码 = 7 大指数。
+    - --verify：纯读覆盖核验（对照交易日历列缺口），不写库。
+    """
+    tool = "index"
+    if verify:
+        from .tools_index import verify_index_coverage
+
+        result = verify_index_coverage(codes=codes_arg, start=start_arg, end=end_arg)
+        _emit({"job": tool, "mode": "verify", **result})
+        return 0 if result.get("status") == "ok" else 1
+    rng, err = _daily_range(date_arg, start_arg, end_arg)
+    if err:
+        _emit({"status": "error", "job": tool, "error": err})
+        return 1
+    assert rng is not None
+    start, end = rng
+    from .tools_index import fetch_index_backfill
+
+    result = fetch_index_backfill(
+        codes=codes_arg, start=start, end=end, adapters=index_adapters
+    )
+    _emit({"job": tool, "mode": "fetch", **result})
+    return 0 if result.get("status") == "ok" else 1
+
+
 def cmd_snapshot(
     date_arg: str | None = None,
     check: bool = False,
@@ -334,7 +376,8 @@ def main(argv: list[str] | None = None,
          cons_adapters: Sequence | None = None,
          daily_adapters: Sequence | None = None,
          fundamentals_adapters: Sequence | None = None,
-         snapshot_adapters: Sequence[SnapshotAdapter] | None = None) -> int:
+         snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
+         index_adapters: Sequence | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -387,6 +430,19 @@ def main(argv: list[str] | None = None,
                             help="对拍模式：逐源直取字段级比较，不落库")
     p_snapshot.add_argument("--limit", type=int, default=None,
                             help="只对拍前 N 只（按代码序，冒烟用；抓取模式忽略）")
+    p_index = sub.add_parser(
+        "index",
+        help="指数日线：腾讯→baostock 抓取落库（回填/T+0）/ --verify 覆盖核验")
+    p_index.add_argument("--codes", default=None,
+                         help="逗号分隔指数代码，缺省 7 大指数白名单")
+    p_index.add_argument("--date", default=None,
+                         help="单日 yyyymmdd，缺省当日")
+    p_index.add_argument("--start", default=None,
+                         help="区间起点 yyyymmdd（与 --end 配对）")
+    p_index.add_argument("--end", default=None,
+                         help="区间终点 yyyymmdd（与 --start 配对）")
+    p_index.add_argument("--verify", action="store_true",
+                         help="覆盖核验：对照交易日历列缺口，不写库")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -424,6 +480,15 @@ def main(argv: list[str] | None = None,
             return cmd_fundamentals(
                 codes_arg=args.codes,
                 fundamentals_adapters=fundamentals_adapters,
+            )
+        if args.command == "index":
+            return cmd_index(
+                codes_arg=args.codes,
+                date_arg=args.date,
+                start_arg=args.start,
+                end_arg=args.end,
+                verify=args.verify,
+                index_adapters=index_adapters,
             )
     except Exception as e:  # 零例外：异常收敛为结构化错误输出
         _emit({"status": "error", "job": args.command,

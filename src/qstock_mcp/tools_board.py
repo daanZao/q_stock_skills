@@ -23,6 +23,11 @@ indices 段抓取后对照 MAJOR_INDICES 白名单（复用 tools_init 清单，
 patch failed 明细（复用 ADR 0007 命名：upstream_unreachable 带 retry_advice /
 fetch_failed / 全源口径不含该指数 no_data_for_date）。
 
+承载源（issue #117，spec #111）：indices section 自 #117 起由腾讯批量报价承载
+（唯一覆盖量比字段、含 000688），fallback 链 腾讯 → 新浪（default_index_spot_
+adapters）；efinance/akshare 东财口径退出指数快照面，白名单补漏机制保留
+（腾讯 7 指数全命中时零补抓请求）。注入适配器时（测试）全 section 沿用注入。
+
 服务端防线（issue #78，ADR 0007 补记）：boards/indices 为实时语义 section
 （REALTIME_SECTIONS），对历史日期调用返回 section 级 unsupported
 （detail=realtime_section_no_backfill）零落库；indices 段落库前校验行级日期
@@ -41,7 +46,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import BoardAdapter, default_adapters
+from .adapters import (
+    BoardAdapter,
+    default_adapters,
+    default_index_spot_adapters,
+)
 from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
@@ -173,8 +182,8 @@ def fetch_board_snapshot(
         selected = _parse_sections(sections)
     except ValueError as e:
         return _error(tool, params, str(e))
-    if adapters is None:
-        adapters = default_adapters()
+    # adapters 为 None 保留到循环内按 section 解析生产链（indices 走腾讯→新浪，
+    # 其余走 default_adapters，issue #117）；注入适配器（测试）时全 section 沿用注入
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -222,8 +231,19 @@ def fetch_board_snapshot(
                     "detail": REALTIME_NO_BACKFILL,
                 }
                 continue
+            # 生产链按 section 解析：indices 走腾讯→新浪指数快照链（issue #117），
+            # 其余 section 走 default_adapters；注入适配器（测试）时全 section 沿用注入
+            chain = (
+                adapters
+                if adapters is not None
+                else (
+                    default_index_spot_adapters()
+                    if name == "indices"
+                    else default_adapters()
+                )
+            )
             try:
-                r = fetch_section_with_fallback(adapters, name, effective)
+                r = fetch_section_with_fallback(chain, name, effective)
             except AllSourcesFailed as e:
                 kind = aggregate_error_kind(e.attempted)
                 entry = {
@@ -249,7 +269,7 @@ def fetch_board_snapshot(
             data = r["data"]
             patch = None
             if name == "indices":
-                data, patch = _patch_major_indices(adapters, data)
+                data, patch = _patch_major_indices(chain, data)
                 # 行级日期校验（issue #78）：行级日期与请求日期不符即拒收零落库，
                 # 防止上游返回陈旧交易日数据被静默计入请求日（efinance 行级"最新交易日"）
                 mismatched = sorted(

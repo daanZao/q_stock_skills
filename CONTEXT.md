@@ -102,6 +102,10 @@ _Avoid_: 早盘补抓
 `qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
 _Avoid_: 日线脚本、补数脚本
 
+**指数日线入口**:
+`qstock-scheduler index` 执行的指数日线固定入口：默认经腾讯 → baostock 的 fallback 链抓取区间并按业务键幂等写入 `index_daily`，逐指数独立成败；用于断档回填（如科创50 自 2026-10-13 起缺口，腾讯 K 线为首个覆盖 000688 的日线源）与收盘后当晚 T+0 当日行补采；`--verify` 纯读覆盖核验（对照交易日历列缺口），不写库。缺省代码 = 7 大指数白名单。盘中（交易时段）当日行 defer 不落库（issue #78）。手册见 `docs/index-source-cli.md`。
+_Avoid_: 指数脚本、回填脚本
+
 **对拍**:
 换源/迁移后的数据质量验证动作：逐源直取同一交易日数据并做字段级比较，不落库；`daily --check` 入口。后复权（hfq）基准因源而异，只比成交量/成交额/换手率。
 _Avoid_: 校验、比对（不加限定时）

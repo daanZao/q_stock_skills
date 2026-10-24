@@ -7,8 +7,9 @@
    单源调用不走 fallback 链（一把抓是 baostock 独有接口）；失败按三态
    契约分类 error_kind 落台账。
 2. index_daily：7 大指数白名单尾行缺失即补（spec 补充输入 07a/07b）——
-   尾行早于目标日的指数按尾行次日起经 fetch_index_daily fallback 链补抓；
-   尾行已在目标日的指数零请求。
+   尾行早于目标日的指数按尾行次日起经指数日线 fallback 链补抓
+   （issue #117：腾讯 → baostock，腾讯 T+0 当日行先落、baostock 次晨
+   权威复核经本批对账覆盖）；尾行已在目标日的指数零请求。
 
 盘中禁写防线（issue #78）延伸：显式指定目标日为当日且正在交易时段时报错
 零落库（次晨批语义是抓"已收盘"的前一交易日）。调度入口见 scheduler.py
@@ -19,7 +20,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import AStockDailyAdapter, IndexDailyAdapter, default_adapters
+from .adapters import (
+    AStockDailyAdapter,
+    IndexDailyAdapter,
+    default_index_daily_adapters,
+)
 from .adapters.base import FetchError, fetch_failure_kind
 from .dates import add_days, is_trading_time, normalize_date, prev_trading_day, today_str
 from .db import connect
@@ -132,7 +137,7 @@ def fetch_morning_batch(
 
         adapter = BaostockAdapter()
     if adapters is None:
-        adapters = default_adapters()
+        adapters = default_index_daily_adapters()
     conn, err = connect()
     if err:
         return _error(tool, params, err)
