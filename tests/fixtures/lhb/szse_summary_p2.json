@@ -1,0 +1,25 @@
+[
+ {
+  "metadata": {
+   "catalogid": "1842_xxpl",
+   "name": "竞价交易公开信息",
+   "tabkey": "tab1",
+   "pagesize": 10,
+   "pageno": 2,
+   "pagecount": 2,
+   "recordcount": 5
+  },
+  "data": [
+   {
+    "bz": "<a href='javascript:void(0);' a-back=1 a-param='/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_detal&TABKEY=tab1,tab2&DQRQ=2026-10-20&ZQDM=300750&ZBDM=0902'>查看详情</a>",
+    "cjje": "45.6",
+    "cjsl": "12,345.67",
+    "dqrq": "2026-10-20",
+    "plyy": "日价格振幅达到16.20%",
+    "zqdm": "300750",
+    "zqjc": "示例时代"
+   }
+  ],
+  "error": null
+ }
+]
