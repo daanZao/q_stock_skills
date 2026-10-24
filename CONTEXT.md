@@ -13,7 +13,7 @@ _Avoid_: 后端、B/S 服务
 ### MCP 数据服务的五个能力面
 
 **抓取（fetch）**:
-执行 web 数据源接口获取证券数据，多源 fallback（按能力面定序；个股日线为 腾讯 → 新浪 → baostock，见 `docs/knowledge-graph.md`）。
+执行 web 数据源接口获取证券数据，多源 fallback（按能力面定序；个股日线为 腾讯 → 新浪 → baostock、全市场快照为 腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连，见 `docs/knowledge-graph.md`）。
 _Avoid_: 爬虫
 
 **抓取三态错误契约**:

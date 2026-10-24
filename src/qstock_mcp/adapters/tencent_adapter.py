@@ -1,8 +1,24 @@
-"""腾讯行情薄封装（个股日线，issue #112 / spec #111）。
+"""腾讯行情薄封装（个股日线 issue #112 / spec #111；全市场快照 issue #116）。
 
-自研直调腾讯 K 线裸接口（仅标准库 urllib，薄封装先例见 mx_client.py），不使用
+自研直调腾讯裸接口（仅标准库 urllib，薄封装先例见 mx_client.py），不使用
 akshare `stock_zh_a_hist_tx` / `stock_zh_index_daily_tx`：实测封装层把第 6 列
 成交量误命名为 amount、丢弃真实成交额列，且北交所 920xxx 不在其代码归一化范围。
+
+全市场快照（issue #116，spec #111 决策地图）：三条快照承载路径里腾讯占两条——
+
+- `TencentSnapshotAdapter`（主源）：qt.gtimg.cn 批量报价（`/q=sh600000,...`），
+  18 个快照字段全覆盖（2026-10-20 盘中逐项核对），时间戳字段含日期可过 #78
+  日期防线，amount 原生万元（ADR 0006）、市值原生亿（×1e4 收敛到万元）、
+  成交量主板/北交所为手（×100 收敛到股，ADR 0008）、科创板 sh688/sh689 原生
+  股不换算（与日线同规则）。需外部股票清单驱动（默认提供者见
+  `_snapshot_codes.default_snapshot_codes`：akshare 交易所官网清单 → 库内
+  stock_list 兜底）。
+- `TencentRankAdapter`（fallback 第 2 位）：proxy.finance.qq.com 沪深京榜单
+  （getBoardRankList，200 行/页约 28 页/轮），免清单；缺 open/high/low/
+  pre_close 置 None 不伪造，涨跌家数口径由工具层改按 zdf 判定
+  （repository 聚合 SQL，issue #116）；pe_ratio 为 pe_ttm 口径（与东财
+  "市盈率-动态"口径切换，见 docs/research/2026-10-20-snapshot-alternatives.md
+  §7 未验证清单）。无时间戳字段 → trade_date=None。
 
 接口与解析口径（2026-10-20/21 实测）：
 
@@ -54,6 +70,14 @@ TIMEOUT_SEC = 20
 MAX_BARS = 640  # 上游单次返回上限（实测请求 1000/3000 根仍只给 640）
 MAX_CHUNKS = 64  # 640 × 64 ≈ 4 万根，覆盖 A 股全历史
 CHUNK_PAUSE_S = 0.3  # 多段回溯时对腾讯限速（实测连发 5–6 个请求触发 TLS 断连）
+
+QT_QUOTES_URL = "https://qt.gtimg.cn/q="
+QT_BATCH_SIZE = 80  # 实测单次 80 只全部返回（响应约 37KB）；5576 只实测 70 请求/轮
+QT_BATCH_PAUSE_S = 0.1  # 批量报价逐批限速（qt.gtimg.cn 为轻量报价端点，略保守）
+
+RANK_URL = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
+RANK_PAGE_SIZE = 200  # 榜单分页上限；全市场约 28 页/轮
+RANK_PAGE_PAUSE_S = 0.3  # 与 K 线同域（proxy.finance.qq.com），沿用实测限速
 
 
 def _response_key(adjust: str) -> tuple[str, ...]:
@@ -257,3 +281,245 @@ def _previous_calendar_day(yyyymmdd: str) -> str:
     """前一个自然日（不感知周末/节假日；仅用于回溯游标推进）。"""
     d = datetime.strptime(yyyymmdd, "%Y%m%d").date() - timedelta(days=1)
     return d.strftime("%Y%m%d")
+
+
+# ---------------------------------------------------------------- 全市场快照
+# （issue #116，spec #111：快照链 腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连）
+
+
+def _at(fields: list[str], idx: int) -> str:
+    return fields[idx] if len(fields) > idx else ""
+
+
+def parse_qt_quotes(text: str) -> tuple[list[dict], str | None]:
+    """qt.gtimg.cn 批量报价响应文本 → (SNAPSHOT_FIELDS 行, 交易日)（纯函数）。
+
+    响应 GBK 编码，每行 `v_sh600000="1~名称~代码~...";`。字段下标经 2026-10-20
+    盘中逐项核对（tests/fixtures/tencent/qt_batch_quotes.txt 实录）：
+
+        1/2 名称/代码  3 最新价  4 昨收  5 今开  6 成交量(手; 科创板原生股)
+        30 时间戳(含日期)  31/32 涨跌额/涨跌幅%  33/34 最高/最低
+        37 成交额(万元)  38 换手率%  39 PE(TTM)  43 振幅%
+        44/45 流通/总市值(亿)  46 市净率  49 量比
+
+    空字段（停牌等）映射 None 不伪造；无代码的残缺行跳过。交易日取各行
+    时间戳的最大日期（yyyymmdd），无时间戳返回 None。
+    """
+    rows: list[dict] = []
+    stamps: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        var, _, body = line.partition("=")
+        # 变量名 v_<symbol>（如 v_sh688981）是权威市场前缀来源：科创板
+        # 成交量原生为股，判断须用带前缀代码（_is_star_market）
+        symbol = var.strip()[2:] if var.strip().startswith("v_") else ""
+        body = body.strip().strip(";").strip('"')
+        if not body:
+            continue
+        f = body.split("~")
+        code = _at(f, 2)
+        if not code:
+            continue
+        stamp = _at(f, 30)
+        if len(stamp) >= 8 and stamp[:8].isdigit():
+            stamps.append(stamp[:8])
+        volume = _int(_at(f, 6))
+        if volume is not None and not _is_star_market(symbol):
+            volume *= 100  # 手 → 股（ADR 0008；科创板原生股不换算）
+        market_cap = _num(_at(f, 45))  # 亿 → 万元（ADR 0006）
+        float_cap = _num(_at(f, 44))
+        rows.append(
+            {
+                "stock_code": code,
+                "stock_name": _at(f, 1) or None,
+                "latest_price": _num(_at(f, 3)),
+                "change_percent": _num(_at(f, 32)),
+                "change_amount": _num(_at(f, 31)),
+                "amplitude": _num(_at(f, 43)),
+                "high": _num(_at(f, 33)),
+                "low": _num(_at(f, 34)),
+                "open": _num(_at(f, 5)),
+                "pre_close": _num(_at(f, 4)),
+                "volume_ratio": _num(_at(f, 49)),
+                "turnover_rate": _num(_at(f, 38)),
+                "pe_ratio": _num(_at(f, 39)),
+                "pb_ratio": _num(_at(f, 46)),
+                "volume": volume,
+                "amount": _num(_at(f, 37)),  # 原生万元（ADR 0006）
+                "market_cap": None if market_cap is None else market_cap * 1e4,
+                "float_cap": None if float_cap is None else float_cap * 1e4,
+            }
+        )
+    rows.sort(key=lambda r: r["stock_code"])
+    return rows, (max(stamps) if stamps else None)
+
+
+def fetch_qt_quotes(symbols: list[str]) -> str:
+    """请求一批（≤QT_BATCH_SIZE）带市场前缀代码的批量报价，返回 GBK 解码文本。"""
+    url = QT_QUOTES_URL + ",".join(symbols)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            return resp.read().decode("gbk", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise FetchError(f"腾讯批量报价 HTTP 错误：status={e.code}") from e
+    except Exception as e:  # noqa: BLE001 - URLError/超时/TLS 断连等传输错误
+        raise FetchError(f"腾讯批量报价传输错误：{e}") from e
+
+
+class TencentSnapshotAdapter:
+    """全市场快照主源（issue #116）：qt.gtimg.cn 批量报价，18 字段全覆盖。
+
+    需股票清单驱动：`codes_provider` 返回 6 位代码列表（缺省
+    `_snapshot_codes.default_snapshot_codes`：akshare 交易所官网清单 → 库内
+    stock_list 兜底）。清单为空视为该源失败（转 rank 榜单），不返回空结果——
+    空结果在 fallback 链里是"上游无数据"成功语义，与清单缺失语义不同。
+    """
+
+    name = "tencent"
+
+    def __init__(self, codes_provider=None) -> None:
+        self._codes_provider = codes_provider
+
+    def _codes(self) -> list[str]:
+        provider = self._codes_provider
+        if provider is None:
+            from ._snapshot_codes import default_snapshot_codes
+
+            provider = default_snapshot_codes
+        codes = [to_market_code(c) for c in provider()]
+        if not codes:
+            raise FetchError("腾讯批量报价快照：股票清单为空")
+        return sorted(set(codes))
+
+    def fetch_market_snapshot(self) -> dict:
+        rows: list[dict] = []
+        stamps: list[str] = []
+        codes = self._codes()
+        for i in range(0, len(codes), QT_BATCH_SIZE):
+            if i:
+                sleep(QT_BATCH_PAUSE_S)
+            batch_rows, trade_date = parse_qt_quotes(
+                fetch_qt_quotes(codes[i : i + QT_BATCH_SIZE])
+            )
+            rows.extend(batch_rows)
+            if trade_date:
+                stamps.append(trade_date)
+        return {
+            "trade_date": max(stamps) if stamps else None,
+            "rows": rows,
+        }
+
+
+def parse_rank_page(payload: dict) -> list[dict]:
+    """腾讯 rank 榜单单页 JSON → SNAPSHOT_FIELDS 行（纯函数）。
+
+    字段经 2026-10-20 盘中核对（tests/fixtures/tencent/rank_page1.json 实录，
+    200 行/页含沪深京）：
+
+        code 带市场前缀  zxj 最新价  zd 涨跌额  zdf 涨跌幅%  zf 振幅%
+        hsl 换手率%  lb 量比  pe_ttm 市盈率(TTM)  pn 市净率
+        ltsz/zsz 流通/总市值(亿)  turnover 成交额(万元)  volume 成交量(手)
+
+    缺 open/high/low/pre_close（榜单不带 OHLC）置 None 不伪造；涨跌家数口径
+    由工具层改按 zdf 判定（repository 聚合 SQL，issue #116）。
+    """
+    data = payload.get("data") or {}
+    raw_rows = data.get("rank_list")
+    if not isinstance(raw_rows, list):
+        raise FetchError("腾讯 rank 榜单响应缺少 rank_list")
+    rows: list[dict] = []
+    for r in raw_rows:
+        if not isinstance(r, dict):
+            continue
+        code = str(r.get("code") or "")
+        code = code[2:] if code[:2] in ("sh", "sz", "bj") else code
+        if not code:
+            continue
+        volume = _num(r.get("volume"))  # 手 → 股（ADR 0008）
+        market_cap = _num(r.get("zsz"))  # 亿 → 万元（ADR 0006）
+        float_cap = _num(r.get("ltsz"))
+        rows.append(
+            {
+                "stock_code": code,
+                "stock_name": r.get("name"),
+                "latest_price": _num(r.get("zxj")),
+                "change_percent": _num(r.get("zdf")),
+                "change_amount": _num(r.get("zd")),
+                "amplitude": _num(r.get("zf")),
+                "high": None,
+                "low": None,
+                "open": None,
+                "pre_close": None,
+                "volume_ratio": _num(r.get("lb")),
+                "turnover_rate": _num(r.get("hsl")),
+                "pe_ratio": _num(r.get("pe_ttm")),
+                "pb_ratio": _num(r.get("pn")),
+                "volume": None if volume is None else volume * 100,
+                "amount": _num(r.get("turnover")),  # 原生万元（ADR 0006）
+                "market_cap": None if market_cap is None else market_cap * 1e4,
+                "float_cap": None if float_cap is None else float_cap * 1e4,
+            }
+        )
+    return rows
+
+
+def fetch_rank_page(offset: int) -> dict:
+    """请求榜单一页（200 行），返回原始 JSON payload。"""
+    params = urllib.parse.urlencode(
+        {
+            "_appver": "11.17.0",
+            "board_code": "aStock",
+            "sort_type": "price",
+            "direct": "down",
+            "offset": str(offset),
+            "count": str(RANK_PAGE_SIZE),
+        }
+    )
+    req = urllib.request.Request(
+        f"{RANK_URL}?{params}", headers={"User-Agent": "Mozilla/5.0"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        raise FetchError(f"腾讯 rank 榜单 HTTP 错误：status={e.code}") from e
+    except FetchError:
+        raise
+    except Exception as e:  # noqa: BLE001 - URLError/超时/非法 JSON 等
+        raise FetchError(f"腾讯 rank 榜单传输错误：{e}") from e
+    if not isinstance(payload, dict):
+        raise FetchError("腾讯 rank 榜单返回非 JSON 对象")
+    return payload
+
+
+class TencentRankAdapter:
+    """全市场快照 fallback 第 2 位（issue #116）：腾讯沪深京榜单，免清单。
+
+    200 行/页按 data.total 翻页（约 28 页/轮），按 code 去重（上游翻页边界
+    实测有重叠风险）；无时间戳字段 → trade_date=None（受 #78 防线限制，
+    仅无参调用可落库）。pe_ratio 为 pe_ttm 口径（与东财动态口径切换）。
+    """
+
+    name = "tencent_rank"
+
+    def fetch_market_snapshot(self) -> dict:
+        payload = fetch_rank_page(0)
+        total = int((payload.get("data") or {}).get("total") or 0)
+        rows = parse_rank_page(payload)
+        for page in range(1, max(1, -(-total // RANK_PAGE_SIZE))):
+            if len(rows) >= total:
+                break
+            sleep(RANK_PAGE_PAUSE_S)
+            rows.extend(parse_rank_page(fetch_rank_page(page * RANK_PAGE_SIZE)))
+        seen: set[str] = set()
+        deduped = []
+        for r in rows:
+            if r["stock_code"] in seen:
+                continue
+            seen.add(r["stock_code"])
+            deduped.append(r)
+        deduped.sort(key=lambda r: r["stock_code"])
+        return {"trade_date": None, "rows": deduped}

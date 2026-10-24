@@ -27,6 +27,10 @@
                              逐 code 走 get_fundamentals 链（akshare→baostock，
                              估值走百度股市通、base_info planned_absent）出
                              状态报告；proxy 面不落库，可挂定时任务做链路巡检。
+  snapshot [--date D] [--check] [--limit N]
+                             全市场快照固定入口（issue #116，spec #111）：
+                             默认走 腾讯批量报价→腾讯 rank→新浪 三层链抓取
+                             落库；--check 三源直取对拍（不落库）。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -40,16 +44,18 @@ import sys
 import time
 from typing import Sequence
 
-from .adapters import BoardAdapter
+from .adapters import BoardAdapter, SnapshotAdapter
 from .daily_parity import compare_daily_sources
 from .dates import normalize_date, today_str
 from .db import connect
 from .output import aggregate_batch_status
 from .repository import select_stock_codes
+from .snapshot_parity import compare_snapshot_sources
 from .tools_backfill import accumulate_em_concepts, fetch_boards_backfill
 from .tools_board import fetch_board_snapshot
 from .tools_daily import fetch_daily
 from .tools_morning import fetch_morning_batch
+from .tools_snapshot import fetch_market_snapshot
 
 CLOSE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
 
@@ -299,11 +305,36 @@ def cmd_fundamentals(
     return 0 if status == "ok" else 1
 
 
+def cmd_snapshot(
+    date_arg: str | None = None,
+    check: bool = False,
+    limit: int | None = None,
+    snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
+) -> int:
+    """全市场快照固定入口（issue #116）：三层链抓取落库 / 三源对拍。
+
+    默认（fetch）经 腾讯批量报价→腾讯 rank→新浪 链抓取落库（台账由
+    tools_snapshot 内联记录）；--check 逐源直取字段级对拍，不落库。
+    """
+    tool = "snapshot"
+    if check:
+        result = compare_snapshot_sources(
+            adapters=snapshot_adapters, codes_limit=limit
+        )
+        _emit({"job": tool, "mode": "check", **result})
+        return 0 if result.get("status") == "ok" else 1
+    result = fetch_market_snapshot(trade_date=date_arg, adapters=snapshot_adapters)
+    out = {"job": tool, "mode": "fetch", **result}
+    _emit(out)
+    return 0 if result.get("status") == "ok" else 1
+
+
 def main(argv: list[str] | None = None,
          adapters: Sequence[BoardAdapter] | None = None,
          cons_adapters: Sequence | None = None,
          daily_adapters: Sequence | None = None,
-         fundamentals_adapters: Sequence | None = None) -> int:
+         fundamentals_adapters: Sequence | None = None,
+         snapshot_adapters: Sequence[SnapshotAdapter] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -347,6 +378,15 @@ def main(argv: list[str] | None = None,
         help="基本面透传：逐 code 走 get_fundamentals 链出状态报告（不落库）")
     p_fund.add_argument("--codes", default=None,
                         help="逗号分隔股票代码（必填），如 600519,000001")
+    p_snapshot = sub.add_parser(
+        "snapshot", help="全市场快照：腾讯批量报价→腾讯 rank→新浪抓取落库 / 三源对拍")
+    p_snapshot.add_argument("--date", default=None,
+                            help="交易日 yyyymmdd，缺省由 API 报告/当日回退"
+                                 "（仅主源含日期时间戳可带参校验）")
+    p_snapshot.add_argument("--check", action="store_true",
+                            help="对拍模式：逐源直取字段级比较，不落库")
+    p_snapshot.add_argument("--limit", type=int, default=None,
+                            help="只对拍前 N 只（按代码序，冒烟用；抓取模式忽略）")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -370,6 +410,13 @@ def main(argv: list[str] | None = None,
                 check=args.check,
                 throttle=args.throttle,
                 daily_adapters=daily_adapters,
+            )
+        if args.command == "snapshot":
+            return cmd_snapshot(
+                date_arg=args.date,
+                check=args.check,
+                limit=args.limit,
+                snapshot_adapters=snapshot_adapters,
             )
         if args.command == "backfill":
             return cmd_backfill(args.start, args.end)

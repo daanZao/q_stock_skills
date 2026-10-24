@@ -215,12 +215,20 @@ def select_snapshot(
         ]
 
 
+# 涨跌判定（issue #48；issue #116 zdf 回退）：有昨收按 最新价 vs 昨收；
+# 昨收缺失（腾讯 rank 榜单行不带 pre_close）改由 change_percent（上游 zdf）
+# 判定——>0 涨、<0 跌、=0 平；最新价缺失、或昨收与涨跌幅双双缺失（无法判定）
+# 计入 no_price 桶。up + down + flat + no_price = 过滤后总行数不变。
 _SNAPSHOT_AGGREGATE_SQL = """
 SELECT {market} AS market,
-    count(*) FILTER (WHERE latest_price > pre_close) AS up,
-    count(*) FILTER (WHERE latest_price < pre_close) AS down,
-    count(*) FILTER (WHERE latest_price = pre_close) AS flat,
-    count(*) FILTER (WHERE latest_price IS NULL OR pre_close IS NULL) AS no_price,
+    count(*) FILTER (WHERE latest_price > pre_close
+        OR (pre_close IS NULL AND latest_price IS NOT NULL AND change_percent > 0)) AS up,
+    count(*) FILTER (WHERE latest_price < pre_close
+        OR (pre_close IS NULL AND latest_price IS NOT NULL AND change_percent < 0)) AS down,
+    count(*) FILTER (WHERE latest_price = pre_close
+        OR (pre_close IS NULL AND latest_price IS NOT NULL AND change_percent = 0)) AS flat,
+    count(*) FILTER (WHERE latest_price IS NULL
+        OR (pre_close IS NULL AND change_percent IS NULL)) AS no_price,
     sum(amount) AS total_amount
 FROM market_snapshot
 {{where}}
@@ -237,9 +245,11 @@ def select_snapshot_aggregate(
 ) -> dict:
     """快照聚合（issue #48）下推到数据库：涨跌家数与成交额合计，全市场 + 分市场。
 
-    上涨/下跌/平盘按最新价 vs 昨收判定；最新价或昨收为 NULL 的行（停牌等）计入
-    no_price 桶，up + down + flat + no_price = 过滤后总行数（total 与 by_market
-    同口径），调用方无需假设三桶之和即全部家数。成交额合计为库内万元口径
+    上涨/下跌/平盘按最新价 vs 昨收判定；昨收缺失（腾讯 rank 榜单行）改由
+    change_percent（上游 zdf）判定（issue #116）；最新价缺失、或昨收与涨跌幅
+    双双缺失的行（停牌等）计入 no_price 桶，
+    up + down + flat + no_price = 过滤后总行数（total 与 by_market 同口径），
+    调用方无需假设三桶之和即全部家数。成交额合计为库内万元口径
     （ADR 0006）。无行时各项为 0 / 0.0。
     返回 {"breadth": {"total", "by_market"}, "amount": {"total_amount", "by_market"}}，
     by_market 恒含 sh/sz/bj 三键。

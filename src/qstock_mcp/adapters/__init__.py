@@ -50,6 +50,7 @@ __all__ = [
     "json_safe",
     "default_adapters",
     "default_daily_adapters",
+    "default_snapshot_adapters",
     "default_fundamentals_adapters",
 ]
 
@@ -58,12 +59,30 @@ def default_adapters() -> list[DataAdapter]:
     """盘面/快照等能力面的 fallback 链：efinance → akshare → baostock（懒加载真实库）。
 
     个股日线不走本链——见 default_daily_adapters（issue #112 东财退出日线）。
+    全市场快照也不走本链——见 default_snapshot_adapters（issue #116 东财
+    退出快照）；本链仅服务盘面五 section / 清单 / 指数日线 / 基本面等。
     """
     from .akshare_adapter import AkshareAdapter
     from .baostock_adapter import BaostockAdapter
     from .efinance_adapter import EfinanceAdapter
 
     return [EfinanceAdapter(), AkshareAdapter(), BaostockAdapter()]
+
+
+def default_snapshot_adapters() -> list[SnapshotAdapter]:
+    """全市场快照 fallback 链（issue #116，spec #111）：腾讯批量报价 →
+    腾讯 rank 榜单 → 新浪直连。
+
+    主源 qt.gtimg.cn 批量报价 18 字段全覆盖、含北交所、时间戳含日期可过 #78
+    日期防线，需股票清单驱动（默认 akshare 交易所官网清单 → 库内兜底）；
+    rank 榜单免清单但缺 OHLC/pre_close（涨跌家数口径改由 zdf 判定）；新浪
+    直连绕过 akshare 封装（其丢弃 7 字段）。东财链路（efinance/akshare
+    spot_em）退出快照。详见 docs/research/2026-10-20-snapshot-alternatives.md。
+    """
+    from .sina_adapter import SinaSnapshotAdapter
+    from .tencent_adapter import TencentRankAdapter, TencentSnapshotAdapter
+
+    return [TencentSnapshotAdapter(), TencentRankAdapter(), SinaSnapshotAdapter()]
 
 
 def default_daily_adapters() -> list[DailyAdapter]:
