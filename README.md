@@ -20,7 +20,7 @@
   - `sepa`：SEPA 方法论判断，经 MCP 取数 + indicator-tools 管道算指标
   - `limit-up-analysis`：涨停/连板分析——涨停归因（板块/大小票/业绩题材粗分）+ 连板梯队与晋级率 + 龙头点评，结论落库 `limit_up.close`，可单独调用
   - `daily-review`：每日复盘编排（总体立场 ≤5 行递进摘要 + 六节：指数表现/板块轮动（含 5/10 日趋势）/涨停连板与龙虎榜（含严重异动偏离值监控）/成交额前 75 结构/归因与量价复盘/风险提示），执行入口先确认复盘日、交易时段禁跑当日；数据源故障走中止分支并输出异常报告（不产出残缺复盘），取数优先走服务端聚合、备有 stdio 落盘通道脚本；结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
-- **数据源**：多源 fallback——个股日线 腾讯 → 新浪 → baostock（issue #112，收盘后当晚含当日行、北交所 920xxx 可取）；盘面/快照/清单 efinance → akshare → baostock；基本面链 akshare → efinance → baostock。失败明确报错，绝不伪造数据；连接级故障（上游不可达）按三态错误契约结构化上报并附重试建议（ADR 0007）
+- **数据源**：多源 fallback——个股日线 腾讯 → 新浪 → baostock（issue #112，收盘后当晚含当日行、北交所 920xxx 可取）；全市场快照 腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连（issue #116，主源 18 字段全覆盖、含北交所、时间戳含日期）；盘面/清单 efinance → akshare → baostock；基本面链 akshare → efinance → baostock。失败明确报错，绝不伪造数据；连接级故障（上游不可达）按三态错误契约结构化上报并附重试建议（ADR 0007）
 - **数据库**：PostgreSQL 独立新库（14 张表，DDL 在 `src/qstock_mcp/sql/`），连接只读 `PG_DSN` 环境变量
 
 ## 安装与接入
@@ -110,6 +110,7 @@ MCP server 只提供工具，**自己不会按点采集**。日常数据靠独�
 | `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
 | `backfill [--start D] [--end D]` | 板块历史回补：push2his 板块 K 线回补 `market_boards`（重操作，回补行带 `source='push2his'` 标注） | 手动/灾难恢复，非定时任务 |
 | `daily --codes A,B [--date D]` / `daily --all` | 个股日线固定入口（issue #112）：腾讯 → 新浪 → baostock 抓取落库；`--check` 三源直取对拍不落库；北交所旧码自动归一化 | 收盘后 19:30 左右的当日行（T+0）补采；`--all` 全市场刷新建议配 `--throttle 1` |
+| `snapshot [--date D] [--check]` | 全市场快照固定入口（issue #116）：腾讯批量报价 → 腾讯 rank → 新浪三层链抓取落库；`--check` 三源直取对拍不落库；主源 18 字段全覆盖、含北交所 | 收盘后（15:30 之后）；盘中勿高频 |
 
 耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求）；`close` 数分钟到十几分钟（cons 成分积累逐概念板块抓取）；`backfill` 取决于板块数 × 窗口，全量（约千板块）默认 3 个月窗口通常几十分钟；`daily --codes` 每只约 1–2 秒（腾讯单请求），`daily --all` 约 5900 只 × 节流间隔（缺省 1 秒/只，约 1.5–2 小时）。
 

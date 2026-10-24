@@ -154,6 +154,46 @@ def test_breadth_no_price_bucket_reconciles_with_row_count(pg_test):
     assert sum(sum(b.values()) for b in by_market.values()) == len(rows)
 
 
+def _row_zdf(stock_code, name, latest, change_percent, amount):
+    """rank 榜单形态行：pre_close/振幅等缺省，涨跌由 change_percent（zdf）判定。"""
+    return {
+        "stock_code": stock_code,
+        "stock_name": name,
+        "latest_price": latest,
+        "pre_close": None,
+        "change_percent": change_percent,
+        "amount": amount,
+        "volume": 100,
+    }
+
+
+def test_breadth_falls_back_to_change_percent_when_pre_close_missing(pg_test):
+    """issue #116：rank 榜单行不带 pre_close，涨跌家数改由 zdf 判定。
+
+    有昨收仍按 最新价 vs 昨收；昨收缺失按 change_percent 符号（>0 涨、
+    <0 跌、=0 平）；最新价与涨跌幅双双缺失才进 no_price 桶。
+    """
+    rows = [
+        _row("600519", "有昨收涨", 11.0, 10.0, 10.0),  # 沪：昨收分支 up
+        _row("601398", "有昨收平", 10.0, 10.0, 10.0),  # 沪：昨收分支 flat
+        _row_zdf("600001", "zdf涨", 5.0, 2.5, 10.0),  # 沪：zdf 分支 up
+        _row_zdf("000001", "zdf跌", 5.0, -1.2, 10.0),  # 深：zdf 分支 down
+        _row_zdf("300750", "zdf零", 5.0, 0.0, 10.0),  # 深：zdf=0 flat
+        _row_zdf("920001", "北zdf涨", 5.0, 3.0, 10.0),  # 北：zdf 分支 up
+        _row_zdf("920002", "双缺", None, None, 10.0),  # 北：无法判定 no_price
+    ]
+    _seed(pg_test, DAY2, rows)
+    result = query_snapshot(trade_date=DAY2, aggregate="breadth")
+    assert result["status"] == "ok"
+    total = result["aggregates"]["breadth"]["total"]
+    assert total == {"up": 3, "down": 1, "flat": 2, "no_price": 1}
+    assert sum(total.values()) == len(rows)
+    by_market = result["aggregates"]["breadth"]["by_market"]
+    assert by_market["sh"] == {"up": 2, "down": 0, "flat": 1, "no_price": 0}
+    assert by_market["sz"] == {"up": 0, "down": 1, "flat": 1, "no_price": 0}
+    assert by_market["bj"] == {"up": 1, "down": 0, "flat": 0, "no_price": 1}
+
+
 # ---------------------------------------------------------------- 排序取前 N
 
 

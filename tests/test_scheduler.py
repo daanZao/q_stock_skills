@@ -13,7 +13,7 @@ import pytest
 
 from qstock_mcp import scheduler
 from qstock_mcp.db import ensure_schema
-from fakes import FakeAdapter, FakeBoardAdapter
+from fakes import FakeAdapter, FakeBoardAdapter, FakeSnapshotAdapter, SNAPSHOT_ROWS
 
 TODAY = date.today().strftime("%Y%m%d")
 
@@ -242,3 +242,107 @@ def test_daily_fetch_rerun_reports_zero_gap(pg_ready, capsys):
     assert out["results"][0]["source"] is None
     assert out["results"][0]["rows_upserted"] == 0
     assert "零抓取" in out["results"][0]["note"]
+
+
+# ---------------------------------------------------------------- 全市场快照固定入口（issue #116）
+
+
+def _snapshot_run(capsys, argv, adapters):
+    rc = scheduler.main(argv, snapshot_adapters=adapters)
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_snapshot_fetch_writes_rows_and_ledger(pg_ready, capsys):
+    adapters = [FakeSnapshotAdapter("tencent", trade_date="20261021")]
+    rc, out = _snapshot_run(capsys, ["snapshot"], adapters)
+    assert rc == 0
+    assert out["job"] == "snapshot" and out["mode"] == "fetch"
+    assert out["status"] == "ok"
+    assert out["source"] == "tencent"
+    assert out["trade_date"] == "20261021"
+    assert out["rows_upserted"] > 0
+
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date, section, status, source FROM collection_log"
+                " WHERE section = 'market_snapshot'"
+            )
+            assert cur.fetchone() == ("20261021", "market_snapshot", "ok", "tencent")
+            cur.execute("SELECT count(*) FROM market_snapshot WHERE trade_date = '20261021'")
+            assert cur.fetchone()[0] == out["rows_upserted"]
+    finally:
+        conn.close()
+
+
+def test_snapshot_fetch_falls_back_to_rank(pg_ready, capsys):
+    adapters = [
+        FakeSnapshotAdapter("tencent", fail_times=99),
+        FakeSnapshotAdapter("tencent_rank", trade_date=None),
+    ]
+    rc, out = _snapshot_run(capsys, ["snapshot"], adapters)
+    assert rc == 0
+    assert out["source"] == "tencent_rank"
+    assert out["trade_date_origin"] == "today"  # rank 无时间戳 → 回退当天
+    assert [a["source"] for a in out["attempted_sources"]] == ["tencent"]
+
+
+def test_snapshot_fetch_all_sources_fail_exit_1(pg_ready, capsys):
+    conn_err = ConnectionResetError("Connection aborted")
+    adapters = [
+        FakeSnapshotAdapter("tencent", fail_times=99, exc=conn_err),
+        FakeSnapshotAdapter("tencent_rank", fail_times=99, exc=conn_err),
+        FakeSnapshotAdapter("sina", fail_times=99, exc=conn_err),
+    ]
+    rc, out = _snapshot_run(capsys, ["snapshot"], adapters)
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "upstream_unreachable"
+    assert out["retry_advice"]
+
+
+def test_snapshot_fetch_date_mismatch_guard_zero_writes(pg_ready, capsys):
+    """issue #78 防线在 CLI 路径同样生效：API 生效日期与 --date 不符零落库。"""
+    adapters = [FakeSnapshotAdapter("tencent", trade_date="20261021")]
+    rc, out = _snapshot_run(capsys, ["snapshot", "--date", "20261020"], adapters)
+    assert rc == 1
+    assert out["detail"] == "date_mismatch"
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM market_snapshot")
+            assert cur.fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_snapshot_check_ok_exit_0(capsys):
+    adapters = [
+        FakeSnapshotAdapter("tencent", trade_date="20261021"),
+        FakeSnapshotAdapter("tencent_rank", trade_date=None),
+    ]
+    rc, out = _snapshot_run(capsys, ["snapshot", "--check"], adapters)
+    assert rc == 0
+    assert out["job"] == "snapshot" and out["mode"] == "check"
+    assert out["status"] == "ok"
+    assert out["reference_source"] == "tencent"
+
+
+def test_snapshot_check_mismatch_exit_1(capsys):
+    changed = [dict(r, latest_price=r["latest_price"] + 1.0) for r in SNAPSHOT_ROWS]
+    adapters = [
+        FakeSnapshotAdapter("tencent", trade_date="20261021"),
+        FakeSnapshotAdapter("sina", rows=changed, trade_date=None),
+    ]
+    rc, out = _snapshot_run(capsys, ["snapshot", "--check"], adapters)
+    assert rc == 1
+    assert out["status"] == "mismatch"
+    assert out["diff_total"] > 0
+
+
+def test_snapshot_check_bad_limit_exit_1(capsys):
+    rc, out = _snapshot_run(capsys, ["snapshot", "--check", "--limit", "0"], [])
+    assert rc == 1
+    assert out["status"] == "error"
+    assert "codes_limit" in out["error"]
