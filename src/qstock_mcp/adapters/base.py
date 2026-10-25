@@ -1,7 +1,7 @@
 """数据源适配层接缝：协议 + 错误类型 + 代码工具。
 
-真实适配器（tencent/sina/efinance/akshare/baostock）与测试注入的 fake 都实现
-同一协议：
+真实适配器（tencent/sina/akshare/baostock 及 lhb/ths/sw 专用适配器）与测试
+注入的 fake 都实现同一协议：
     name: str
     fetch_daily(stock_code, start, end, adj) -> list[bar]
 bar 为 dict，键见 BAR_FIELDS；trade_date 为 yyyymmdd 字符串，数值缺失为 None。
@@ -58,7 +58,7 @@ STOCK_LIST_FIELDS = ("stock_code", "stock_name")
 
 # 盘面快照（issue #5）：各 section 行 dict 的键集，与落库表列一一对应（日期列除外，
 # 见 repository.BOARD_SECTION_TABLES）。行可自带日期键（trade_date/fetch_date）覆盖
-# 工具层传入的日期（如 lhb_basic 的"上榜日"、efinance 指数的"最新交易日"）。
+# 工具层传入的日期（如 lhb_basic 的"上榜日"、指数快照源的"最新交易日"列）。
 INDEX_FIELDS = (
     "index_code",
     "index_name",
@@ -334,20 +334,6 @@ class IndexDailyAdapter(Protocol):
     ) -> list[dict]: ...
 
 
-class BoardHistoryAdapter(Protocol):
-    """板块历史 K 线（issue #84 回补）协议：start/end 为 yyyymmdd 闭区间。
-
-    不复权（板块行情无复权语义）；空区间返回 [] 而非错误；by-design 不支持
-    该能力的源抛 FetchError(kind="unsupported")（不参与 fallback 故障判定）。
-    """
-
-    name: str
-
-    def fetch_board_history(
-        self, board_type: str, board_name: str, start: str, end: str
-    ) -> list[dict]: ...
-
-
 class AStockDailyAdapter(Protocol):
     """全市场单日 A 股日线一把抓（issue #83 次晨批）协议：trade_date 为 yyyymmdd。
 
@@ -398,11 +384,11 @@ class DataAdapter(
     FundamentalsAdapter,
     ListAdapter,
     IndexDailyAdapter,
-    BoardHistoryAdapter,
     Protocol,
 ):
-    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单、指数日线与
-    板块历史的适配器（fallback 链元素类型）。"""
+    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单与指数日线的
+    适配器（fallback 链元素类型；板块历史回补协议随东财 push2his 回补退役，
+    issue #121，已从本复合协议摘除）。"""
 
 
 def is_bse_code(stock_code: str) -> bool:

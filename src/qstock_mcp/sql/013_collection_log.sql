@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS collection_log (
     trade_date  char(8) NOT NULL,   -- 采集目标交易日 yyyymmdd（区间采集记区间尾日，区间见 detail）
     section     text NOT NULL,      -- 采集对象：盘面 section 名（indices/boards/...）或表名（stock_daily/market_snapshot/...）
     status      text NOT NULL CHECK (status IN ('ok', 'empty', 'error', 'planned_absent')),
-    source      text,               -- 实际数据源（efinance/akshare/baostock/file）；失败为 NULL
+    source      text,               -- 实际数据源（tencent/sina/baostock/akshare/ths/exchange/selfcalc/file 等）；失败为 NULL
     rows        integer,            -- 本次写库行数
     error_kind  text,               -- ADR 0007：upstream_unreachable / fetch_failed / no_data_for_date
     detail      text,               -- 摘要：逐源明细 / 区间 / 部分失败计数等

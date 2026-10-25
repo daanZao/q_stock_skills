@@ -21,7 +21,7 @@ _SEED_START, _SEED_END = "20240102", "20240112"
 def _seed(pg_test):
     conn = psycopg2.connect(pg_test)
     ensure_schema(conn)
-    upsert_index_daily(conn, "000001", weekday_rows(_SEED_START, _SEED_END), "efinance")
+    upsert_index_daily(conn, "000001", weekday_rows(_SEED_START, _SEED_END), "tencent")
     upsert_index_daily(conn, "399006", weekday_rows(_SEED_START, "20240105"), "akshare")
     conn.close()
 
@@ -35,7 +35,7 @@ def test_select_filters_by_range_and_orders_ascending(pg_test):
     rows = select_index_daily(conn, "000001", start="20240105", end="20240109")
     assert [r["trade_date"] for r in rows] == ["20240105", "20240108", "20240109"]
     assert rows[0]["index_code"] == "000001"
-    assert rows[0]["source"] == "efinance"
+    assert rows[0]["source"] == "tencent"
     assert "id" not in rows[0] and "created_at" not in rows[0]  # 内部列不外泄
     conn.close()
 
@@ -88,7 +88,7 @@ def test_query_default_limit_caps_at_120(pg_test):
     conn = psycopg2.connect(pg_test)
     ensure_schema(conn)
     # 约 174 个工作日行，验证缺省 120 限量取最近
-    upsert_index_daily(conn, "399001", weekday_rows("20240101", "20240831"), "efinance")
+    upsert_index_daily(conn, "399001", weekday_rows("20240101", "20240831"), "tencent")
     conn.close()
     result = query_index_daily("399001")
     assert result["status"] == "ok"

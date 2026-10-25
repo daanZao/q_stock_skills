@@ -27,18 +27,18 @@ def _conn(pg_test):
 
 def test_upsert_then_select_roundtrip(pg_test):
     conn = _conn(pg_test)
-    upsert_daily(conn, "600519", "qfq", ROWS, "efinance")
+    upsert_daily(conn, "600519", "qfq", ROWS, "tencent")
     rows = select_daily(conn, "600519", "qfq", "20240101", "20240131")
     assert [r["trade_date"] for r in rows] == ["20240102", "20240103"]
     assert rows[0]["close"] == 10.2
-    assert rows[0]["source"] == "efinance"
+    assert rows[0]["source"] == "tencent"
     conn.close()
 
 
 def test_upsert_is_idempotent_no_duplicate_rows(pg_test):
     conn = _conn(pg_test)
-    upsert_daily(conn, "600519", "qfq", ROWS, "efinance")
-    upsert_daily(conn, "600519", "qfq", ROWS, "efinance")
+    upsert_daily(conn, "600519", "qfq", ROWS, "tencent")
+    upsert_daily(conn, "600519", "qfq", ROWS, "tencent")
     rows = select_daily(conn, "600519", "qfq", "20240101", "20240131")
     assert len(rows) == 2
     conn.close()
@@ -46,7 +46,7 @@ def test_upsert_is_idempotent_no_duplicate_rows(pg_test):
 
 def test_upsert_updates_existing_row_and_source(pg_test):
     conn = _conn(pg_test)
-    upsert_daily(conn, "600519", "qfq", ROWS, "efinance")
+    upsert_daily(conn, "600519", "qfq", ROWS, "tencent")
     corrected = [dict(ROWS[0], close=99.9)]
     upsert_daily(conn, "600519", "qfq", corrected, "akshare")
     rows = select_daily(conn, "600519", "qfq", "20240101", "20240131")
@@ -58,7 +58,7 @@ def test_upsert_updates_existing_row_and_source(pg_test):
 
 def test_select_dates_only_returns_trade_dates(pg_test):
     conn = _conn(pg_test)
-    upsert_daily(conn, "600519", "qfq", ROWS, "efinance")
+    upsert_daily(conn, "600519", "qfq", ROWS, "tencent")
     assert select_dates(conn, "600519", "qfq", "20240101", "20240131") == {
         "20240102",
         "20240103",
@@ -70,6 +70,6 @@ def test_select_dates_only_returns_trade_dates(pg_test):
 
 def test_adj_isolates_rows(pg_test):
     conn = _conn(pg_test)
-    upsert_daily(conn, "600519", "qfq", ROWS, "efinance")
+    upsert_daily(conn, "600519", "qfq", ROWS, "tencent")
     assert select_daily(conn, "600519", "hfq", "20240101", "20240131") == []
     conn.close()

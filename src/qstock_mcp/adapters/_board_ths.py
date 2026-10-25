@@ -15,7 +15,7 @@ latest/change_rate。THS 不提供：所属行业、总市值、成交额、成�
 import re
 from datetime import datetime, timedelta, timezone
 
-from ._eastmoney import _num
+from ._num import _num
 
 _TZ8 = timezone(timedelta(hours=8))
 

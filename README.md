@@ -20,7 +20,7 @@
   - `sepa`：SEPA 方法论判断，经 MCP 取数 + indicator-tools 管道算指标
   - `limit-up-analysis`：涨停/连板分析——涨停归因（板块/大小票/业绩题材粗分）+ 连板梯队与晋级率 + 龙头点评，结论落库 `limit_up.close`，可单独调用
   - `daily-review`：每日复盘编排（总体立场 ≤5 行递进摘要 + 六节：指数表现/板块轮动（含 5/10 日趋势）/涨停连板与龙虎榜（含严重异动偏离值监控）/成交额前 75 结构/归因与量价复盘/风险提示），执行入口先确认复盘日、交易时段禁跑当日；数据源故障走中止分支并输出异常报告（不产出残缺复盘），取数优先走服务端聚合、备有 stdio 落盘通道脚本；结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
-- **数据源**：多源 fallback——个股日线 腾讯 → 新浪 → baostock（issue #112，收盘后当晚含当日行、北交所 920xxx 可取）；全市场快照 腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连（issue #116，主源 18 字段全覆盖、含北交所、时间戳含日期）；指数快照 腾讯批量报价 → 新浪（issue #117，腾讯为唯一含量比源、含科创50）；指数日线 腾讯 K 线 → baostock（issue #117，腾讯 T+0 当晚含当日行、覆盖科创50，baostock 次晨权威复核）；盘面/清单 efinance → akshare → baostock；基本面链 akshare → baostock（issue #115）；zt_pool 涨跌停/炸板三池由同花顺涨停揭秘单源承载（issue #120，低频纪律：每日每池一次 + 长退避 + 封禁探测），strong_stocks 库内自算（60 日新高 ∪ 近 10 日多次涨停）。失败明确报错，绝不伪造数据；连接级故障（上游不可达）按三态错误契约结构化上报并附重试建议（ADR 0007）
+- **数据源**（issue #121 定稿，spec #111 剔东财收口；efinance 已整体退役、东财运行时代码面清零）：多源 fallback——个股日线 腾讯 → 新浪 → baostock（issue #112，收盘后当晚含当日行、北交所 920xxx 可取）；全市场快照 腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连（issue #116，主源 18 字段全覆盖、含北交所、时间戳含日期）；指数快照 腾讯批量报价 → 新浪（issue #117，腾讯为唯一含量比源、含科创50）；指数日线 腾讯 K 线 → baostock（issue #117，腾讯 T+0 当晚含当日行、覆盖科创50，baostock 次晨权威复核）；boards 行业段 申万官网单源（issue #118，申万故障时复盘降级库内自算 `query_sw_board_daily`）；lhb 交易所官方单源（issue #114/#121：深所 JSON + 上所定宽文本 + 北所 bseinfo.net；新浪互补校验走 `lhb --check` 对拍）；zt_pool 涨跌停/炸板三池由同花顺涨停揭秘单源承载（issue #120，低频纪律：每日每池一次 + 长退避 + 封禁探测），strong_stocks 库内自算（60 日新高 ∪ 近 10 日多次涨停）；股票清单 交易所官网源（akshare `stock_info_a_code_name`）→ baostock；基本面链 akshare（新浪财务摘要 + 百度股市通估值，issue #115）→ baostock。失败明确报错，绝不伪造数据；连接级故障（上游不可达）按三态错误契约结构化上报并附重试建议（ADR 0007）
 - **数据库**：PostgreSQL 独立新库（14 张表，DDL 在 `src/qstock_mcp/sql/`），连接只读 `PG_DSN` 环境变量
 
 ## 安装与接入
@@ -28,7 +28,7 @@
 要求 Python ≥ 3.11 与一个 PostgreSQL 实例。
 
 ```bash
-pip install -e ".[sources,dev]"   # sources = efinance/akshare/baostock 真实数据源库
+pip install -e ".[sources,dev]"   # sources = akshare/baostock/curl_cffi 真实数据源库（efinance 已退役，issue #121）
 ```
 
 注意 `qstock-mcp` 入口只装在执行 `pip install` 的那个环境里（本仓库即 `.venv/`），因此 `command` 应写成该环境内的**绝对路径**；或改用 `python -m` 形式指向同一解释器：
@@ -108,7 +108,7 @@ MCP server 只提供工具，**自己不会按点采集**。日常数据靠独�
 | --- | --- | --- |
 | `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集（boards 行业段申万官网单源，issue #118） | 交易日 15:30 之后 |
 | `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 + 申万板块分析报表估值维度（sw_board_valuation part，T+1） | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
-| `backfill [--start D] [--end D] [--source em\|sw]` | 板块历史回补：`--source em`（缺省）push2his 板块 K 线回补 `market_boards`；`--source sw` 申万官网 trend 全历史回补申万双级口径行（深至 1999，回补行带 `source='swsresearch'` 标注） | 手动/灾难恢复，非定时任务 |
+| `backfill [--start D] [--end D] [--source sw]` | 板块历史回补（issue #121 定稿申万单源）：申万官网 trend 全历史回补申万双级口径行（深至 1999，回补行带 `source='swsresearch'` 标注）；东财 push2his 回补已随 issue #121 摘除 | 手动/灾难恢复，非定时任务 |
 | `sw-boards [--date D] [--check]` | 申万板块固定入口（issue #118）：双级实时快照落库（收盘后=当日收盘截面）；`--check` 官网 vs 库内 vs 自算三方位对拍不落库 | 收盘后；对拍按需 |
 | `sw-dict [--url U]` | 申万成分字典在线刷新（issue #118）：官网分类 xls 清空重载 'sw' 体系（含北交所归属），幂等 | 每周一次 |
 | `daily --codes A,B [--date D]` / `daily --all` | 个股日线固定入口（issue #112）：腾讯 → 新浪 → baostock 抓取落库；`--check` 三源直取对拍不落库；北交所旧码自动归一化 | 收盘后 19:30 左右的当日行（T+0）补采；`--all` 全市场刷新建议配 `--throttle 1` |
@@ -116,7 +116,7 @@ MCP server 只提供工具，**自己不会按点采集**。日常数据靠独�
 | `snapshot [--date D] [--check]` | 全市场快照固定入口（issue #116）：腾讯批量报价 → 腾讯 rank → 新浪三层链抓取落库；`--check` 三源直取对拍不落库；主源 18 字段全覆盖、含北交所 | 收盘后（15:30 之后）；盘中勿高频 |
 | `index [--codes A,B] [--date D \| --start D --end D] [--verify]` | 指数日线固定入口（issue #117）：腾讯 → baostock 抓取落库（断档回填如科创50 2026-10-13 起缺口 / 收盘后当晚 T+0 当日行）；`--verify` 覆盖核验对照交易日历列缺口，不写库；缺省代码 = 7 大指数白名单 | 收盘后 19:30 左右的指数当日行（T+0）补采；`--verify` 复盘前巡检 |
 
-耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求 + 申万估值报表 2 次分页调用）；`close` 数分钟到十几分钟（cons 成分积累随东财概念退役不再触发）；`limitpool` 约 40 秒（THS 三池 × 池间 20s 长退避 + 库内自算秒级）；`backfill --source em` 取决于板块数 × 窗口，全量（约千板块）默认 3 个月窗口通常几十分钟；`backfill --source sw` 155 板块 × trend 全历史（1999 起，单请求/板块）约 2~3 分钟（0.4s/请求限速内）；`daily --codes` 每只约 1–2 秒（腾讯单请求），`daily --all` 约 5900 只 × 节流间隔（缺省 1 秒/只，约 1.5–2 小时）。
+耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求 + 申万估值报表 2 次分页调用）；`close` 数分钟到十几分钟；`limitpool` 约 40 秒（THS 三池 × 池间 20s 长退避 + 库内自算秒级）；`backfill --source sw` 155 板块 × trend 全历史（1999 起，单请求/板块）约 2~3 分钟（0.4s/请求限速内）；`daily --codes` 每只约 1–2 秒（腾讯单请求），`daily --all` 约 5900 只 × 节流间隔（缺省 1 秒/只，约 1.5–2 小时）。
 
 重复执行幂等（各业务键 upsert），每次执行落采集台账（可用 MCP 工具 `query_collection_log` 查询）；退出码 0=全部成功，1=任一部分失败（明细在 stdout JSON），2=参数错误。长时间运行的批（backfill 全量约千个板块）按双阈值向 **stderr** 打进度（每 50 个板块或距上条 ≥60s，先到先打），stdout 始终只留给最终结构化 JSON。backfill 韧性（spec #86）：连续 10 个板块全源失败即熔断中止（输出 `aborted` + exit 1，落整体 error 台账）；重跑自动跳过台账中同窗口已 ok 的板块（断点续跑，只补缺口）。全链路另有统一韧性：上游请求 60s 全局超时（挂死有界）、同源重试 0.5/1/2s 退避、by-design 不支持的源不重试。
 
@@ -129,8 +129,6 @@ qstock-scheduler morning --date 20261016
 
 # 补 10-14~10-16 的板块行情（market_boards）；申万口径 155 板块全历史回补
 qstock-scheduler backfill --source sw
-# 存量东财口径行回补（em 约 1000 个板块 × 3 日，重操作）
-qstock-scheduler backfill --start 20261014 --end 20261016
 
 # 收盘后当晚补个股日线当日行（T+0；沪/深/北代表股，北交所旧码自动归一化）
 qstock-scheduler daily --codes 600519,000001,920001 --date 20261020
@@ -148,6 +146,21 @@ qstock-scheduler limitpool --date 20261020
 注意可补性边界：`zt_pool`/`strong_stocks`/`lhb` 也可直接走 MCP `fetch_board_snapshot` 补历史日期（zt_pool 为 THS 源、回溯深度有限，见 `docs/limitpool-cli.md`）；`indices` 快照与 `boards` 属实时语义 section，**MCP 路径对历史日期硬拒绝**（issue #78，防"把最新数据写成历史日期"），板块只能经上面的 `backfill` CLI 补；指数日线（`index_daily`）可经上面的 `index` CLI 补任意历史区间（腾讯 K 线全历史，`--verify` 可定位缺口首日）；`market_snapshot`（涨跌家数/两市成交额）没有历史 API，漏采即永久缺失。因此定时任务的当日告警比事后补录更重要。
 
 launchd/cron 安装样例见 [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)（用户自行安装；非交易日触发产生 empty 台账行，属正常语义）。
+
+### 各源当日数据就绪时间线
+
+挂定时任务与决定复盘时点前，先了解各承载源当日数据何时就绪（issue #121 落档，spec #111）：
+
+| 数据面 | 承载源 | 当日数据就绪时间 |
+| --- | --- | --- |
+| 指数快照 / 全市场快照 / 个股日线 / 指数日线当日行 | 腾讯（qt.gtimg.cn / K 线） | **T+0**——收盘后即可得当日行（个股日线收盘后当晚即含当日行，已实证） |
+| boards 行业段实时快照 | 申万官网 | **盘中实时**——收盘后末次快照即当日收盘截面 |
+| zt_pool 涨停三池 | THS 涨停揭秘 | **盘后**——建议 19:30 后采集（低频纪律：每日每池一次） |
+| 个股日线（全市场）/ 复权序列 | baostock | 日 K 约 **17:30** 就绪、复权数据约 **18:00** 就绪（次晨批角色：权威复核兜底） |
+| lhb 龙虎榜 | 交易所官方（深所/上所/北所） | 约 **16:30–18:00** 陆续发布（待 #122 对拍确认精确窗口） |
+| 申万板块估值维度 | 申万分析报表 | **T+1**——次晨批 `morning` 落 `sw_board_valuation` |
+
+**最佳复盘窗口：19:30 之后**——THS 涨停池、baostock 复权序列均已就绪，收盘后批（`close`）与各 T+0 补采都已完成；15:30–19:30 之间可出报告但涨停/连板章节可能缺 zt_pool 数据（核心 section 缺失会走故障中止分支，详见 daily-review skill）。
 
 ## 输出契约
 

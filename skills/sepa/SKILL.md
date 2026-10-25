@@ -21,7 +21,7 @@ Minervini SEPA 框架的 A 股分析指引。本 skill 为方法论 skill，主�
    - `ma --on volume --periods 20`（20 日均量，VCP 量能判断）
    - `diff1 --on ma200`（200 日线方向判断，判定口径见判断逻辑第一/二步）
    - 指标返回 `insufficient_data` 时按数据缺口处理（加大 `days` 重新 `query_daily` 后重算；仍不足则报告缺口）。
-3. **基本面数据**：MCP `get_fundamentals(stock_code)`（proxy 透传，字段名保留上游，需自行解读）。需要：最近 4 个季度 EPS、营收、毛利率、扣非净利润、ROE。各数据源 section 不同（akshare：`financial_abstract` 新浪财务摘要 / `valuation` 百度股市通估值日序列；baostock：`profit`/`growth` 单季；efinance `base_info` 已弃用，见响应 `planned_absent` 键），`data` 中可能带 `errors` 键列出失败 section。E 维度五字段（EPS/营收/毛利率/扣非/ROE）全部在 `financial_abstract`（新浪幸存源）；**`status=error`（全部数据源失败）或所需字段缺失时，E 维度明确降级标注缺失，不臆断计分，绝不编造**（计分口径见输出契约第 3 条；兜底态 baostock 缺扣非净利润/营收同比，"加速/4 季度"类判断不可做，按降级规则标注）。
+3. **基本面数据**：MCP `get_fundamentals(stock_code)`（proxy 透传，字段名保留上游，需自行解读）。需要：最近 4 个季度 EPS、营收、毛利率、扣非净利润、ROE。各数据源 section 不同（akshare：`financial_abstract` 新浪财务摘要 / `valuation` 百度股市通估值日序列；baostock：`profit`/`growth` 单季；`base_info` 已随东财链路退役（弃用声明见响应 `planned_absent` 键，issue #121）），`data` 中可能带 `errors` 键列出失败 section。E 维度五字段（EPS/营收/毛利率/扣非/ROE）全部在 `financial_abstract`（新浪幸存源）；**`status=error`（全部数据源失败）或所需字段缺失时，E 维度明确降级标注缺失，不臆断计分，绝不编造**（计分口径见输出契约第 3 条；兜底态 baostock 缺扣非净利润/营收同比，"加速/4 季度"类判断不可做，按降级规则标注）。
 4. **指数基线**：沪深300 等指数日线不在 `query_daily` 覆盖范围（仅个股）。RS 对比与大盘阶段判断的降级路径：`query_board_data("market_indices")` 盘面指数快照做近期表现近似（该表为盘面落库数据，查不到时先 `fetch_board_snapshot` 补抓当日盘面）；需要指数 250 日序列而无法经 MCP 获得时，RS 与大盘阶段标注"近似/降级"并说明置信度影响。
 5. **催化剂/风险信息**：近期公告、新闻（会话中由用户提供或检索获得；不可得则标注缺失）。
 
@@ -102,7 +102,7 @@ SEPA 选股结论可经妙想 mx-data（东财官方口径）抽样复核后落�
 ### 消费方守则（mx-data 实测陷阱；server 只透传不解析，解析责任全在消费方）
 
 - **口径先换算**：mx 默认返回**单季**，三源财务接口默认**累计**——比对前把三源累计换算为单季（本期累计 − 上期累计）。
-- **指标名不等于口径**：mx"净利润"是含少数股东损益的总净利润（`field.returnSourceCode=NETPROFIT_S`），efinance"净利润"实为归母净利润——跨源对齐时显式区分归母 vs 总额；取值走 `rawTable` 原始精度，并用 `field` 元信息（`returnSourceCode`/`dateGranularity`/`unitName`）核对口径。
+- **指标名不等于口径**：mx"净利润"是含少数股东损益的总净利润（`field.returnSourceCode=NETPROFIT_S`）；已退役的 efinance 源"净利润"实为归母净利润（历史注记，issue #121 摘除后仅作跨源对齐提醒）——跨源对齐时显式区分归母 vs 总额；取值走 `rawTable` 原始精度，并用 `field` 元信息（`returnSourceCode`/`dateGranularity`/`unitName`）核对口径。
 - **未披露期间静默回退**：问未披露期间不报错，返回最近已披露期的旧值，且单期响应的 `headName` 只显示证券名、不带报告期标签。先以三源或披露日历确认该期已披露，再采信 mx 数值；宽问句下未披露期直接从结果表缺席，可据此辨识。
 - **过滤港股行**：实体识别会顺带返回港股行（如潍柴动力带 02338.HK），按 `entityTagDTO.secuCode` 锁定 A 股代码，不信任行序。
 - **响应两种变体分派解析**：指标类查询 `table` 键为数字指标码（需 `nameMap` 解码，附 `field` 元信息）；分红类查询直接用中文列名、无 `field`。按键型与 `headName` 语义分派，不写死单一结构。

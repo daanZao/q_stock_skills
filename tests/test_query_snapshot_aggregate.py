@@ -48,7 +48,7 @@ def _seed(pg_test, trade_date, rows):
     ensure_schema(conn)
     conn.close()
     fetch_market_snapshot(
-        adapters=[FakeSnapshotAdapter("efinance", rows=rows, trade_date=trade_date)]
+        adapters=[FakeSnapshotAdapter("tencent", rows=rows, trade_date=trade_date)]
     )
 
 
@@ -213,7 +213,7 @@ def test_topn_by_amount_desc_returns_full_rows(pg_test):
     top = result["rows"][0]  # 行字段与整表查询一致，不裁剪列
     assert top["trade_date"] == DAY2
     assert top["stock_name"] == "宁德时代"
-    assert top["source"] == "efinance"
+    assert top["source"] == "tencent"
     assert top["amount"] == 400.0
     assert "latest_price" in top and "market_cap" in top
 

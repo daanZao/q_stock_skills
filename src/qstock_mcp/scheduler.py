@@ -13,19 +13,18 @@
                              planned_absent（第四态，issue #113）的 section
                              占位通过：响应
                              status=planned_absent、不计失败、不影响退出码。
-                             lhb section 走专用链（交易所官方 → akshare 东财
-                             legacy，issue #114）。
+                             lhb section 走专用链（交易所官方单源，issue #114/
+                             #121；新浪互补校验走 lhb --check 对拍）。
   morning [--date YYYYMMDD]  次晨批：baostock 一把抓前一交易日全市场日线
                              + 7 大指数尾行补漏 + 申万板块分析报表估值维度
                              （sw_board_valuation part，issue #118，T+1），
                              默认目标日为前一交易日。
-  backfill [--start D] [--end D] [--source em|sw]
-                             板块历史回补：em（缺省）= 东财 push2his 板块
-                             K 线回补 market_boards（默认窗口 = 前一交易日
-                             前推约 3 个月）；sw = 申万官网 trend 指数全历史
-                             回补申万双级口径行（issue #118，默认窗口
-                             19990101~前一交易日，历史深至 1999），回补行
-                             source='swsresearch'。CLI 专用路径，不经历史
+  backfill [--start D] [--end D] [--source sw]
+                             板块历史回补（issue #121 定稿申万单源）：申万官网
+                             trend 指数全历史回补申万双级口径行（issue #118，
+                             默认窗口 19990101~前一交易日，历史深至 1999），
+                             回补行 source='swsresearch'。东财 push2his 回补
+                             已随 issue #121 摘除。CLI 专用路径，不经历史
                              日期防线。
   sw-boards [--date D] [--check] [--level 1|2|all] [--limit N]
                              申万板块固定入口（issue #118）：默认抓申万
@@ -113,7 +112,6 @@ from .repository import select_stock_codes, upsert_stock_list
 from .snapshot_parity import compare_snapshot_sources
 from .stock_list_parity import compare_stock_list_sources
 from .sw_board_parity import compare_sw_board_sources
-from .tools_backfill import fetch_boards_backfill
 from .tools_backfill import fetch_sw_boards_backfill
 from .tools_board import fetch_board_snapshot
 from .tools_daily import fetch_daily
@@ -166,17 +164,18 @@ def cmd_morning(date_arg: str | None) -> int:
 
 
 def cmd_backfill(start: str | None, end: str | None,
-                 source: str = "em") -> int:
-    """板块历史回补：非全 ok（partial_error/error）exit 1。
-
-    source=em（缺省）：东财 push2his 同口径回补行业+概念板块；
-    source=sw（issue #118）：申万官网 trend 指数全历史回补申万双级口径行
-    （默认窗口 19990101~前一交易日，历史深至 1999）。
+                 source: str = "sw") -> int:
+    """板块历史回补（申万官网 trend，issue #118/#121 定稿单源）：
+    非全 ok（partial_error/error）exit 1。默认窗口
+    19990101~前一交易日，历史深至 1999；东财 push2his 回补已随 issue #121
+    摘除（--source 仅 sw）。
     """
-    if source == "sw":
-        result = fetch_sw_boards_backfill(start=start, end=end)
-    else:
-        result = fetch_boards_backfill(start=start, end=end)
+    if source != "sw":
+        _emit({"status": "error", "job": "backfill",
+               "error": f"未知 source: {source}（可选: sw；东财 push2his 回补"
+                        "已随 issue #121 摘除）"})
+        return 2
+    result = fetch_sw_boards_backfill(start=start, end=end)
     out = {"job": "backfill", "source": source, **result}
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
@@ -686,13 +685,14 @@ def main(argv: list[str] | None = None,
     p_morning.add_argument("--date", default=None,
                            help="目标交易日 yyyymmdd，缺省前一交易日")
     p_backfill = sub.add_parser(
-        "backfill", help="板块历史回补：push2his（默认）/ 申万官网 trend（--source sw）")
+        "backfill", help="板块历史回补：申万官网 trend（issue #118/#121 定稿单源）")
     p_backfill.add_argument("--start", default=None,
-                            help="回补起点 yyyymmdd；缺省 em=end 前推约 3 个月，sw=19990101")
+                            help="回补起点 yyyymmdd；缺省 19990101")
     p_backfill.add_argument("--end", default=None,
                             help="回补终点 yyyymmdd，缺省前一交易日")
-    p_backfill.add_argument("--source", default="em", choices=("em", "sw"),
-                            help="回补源：em=东财 push2his（缺省），sw=申万官网（issue #118）")
+    p_backfill.add_argument("--source", default="sw", choices=("sw",),
+                            help="回补源：sw=申万官网 trend（issue #118）；"
+                                 "东财 push2his 回补已随 issue #121 摘除")
     p_sw_boards = sub.add_parser(
         "sw-boards", help="申万板块：双级实时快照落库 / 三方位对拍（--check）")
     p_sw_boards.add_argument("--date", default=None,

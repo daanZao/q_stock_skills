@@ -499,9 +499,10 @@ ON CONFLICT (trade_date, board_type, board_name) DO UPDATE SET
 
 
 def upsert_board_history(conn, rows: list[dict], source: str) -> int:
-    """板块历史回补落库（issue #84）：行自带 trade_date/board_type/board_name，
-    按业务键幂等 upsert 并写 source 标注（'push2his'，与实时采集行的 NULL 区分）。
-    """
+    """板块历史回补落库（issue #84，issue #121 起仅申万 sw 源使用）：行自带
+    trade_date/board_type/board_name，按业务键幂等 upsert 并写 source 标注
+    （'swsresearch'，与实时采集行的 NULL 区分；存量 'push2his' 行为东财回补
+    退役前产物，保留只读）。"""
     values = [[row.get(c) for c in _BOARD_HISTORY_COLS] + [source] for row in rows]
     if not values:
         return 0
@@ -514,30 +515,6 @@ def upsert_board_history(conn, rows: list[dict], source: str) -> int:
         )
     conn.commit()
     return len(values)
-
-
-def select_distinct_boards(conn, trade_date: str | None = None) -> list[dict]:
-    """market_boards 去重板块清单（board_type/board_code/board_name），
-    供回补与成分积累确定目标集；trade_date 给定时只取当日出现过的板块。
-
-    去重键为 (board_type, board_name)：backfill 回补行无 board_code（push2his
-    K 线不带板块代码），与同板块实时行（有 code）并存，按 (type, name) 去重
-    并优先取有 code 的行（issue #91）。"""
-    sql = (
-        "SELECT DISTINCT ON (board_type, board_name)"
-        " board_type, board_code, board_name FROM market_boards"
-    )
-    args: tuple = ()
-    if trade_date is not None:
-        sql += " WHERE trade_date = %s"
-        args = (trade_date,)
-    sql += " ORDER BY board_type, board_name, board_code NULLS LAST"
-    with conn.cursor() as cur:
-        cur.execute(sql, args)
-        return [
-            {"board_type": t, "board_code": c, "board_name": n}
-            for t, c, n in cur.fetchall()
-        ]
 
 
 # 可查询的盘面表 → (日期列, 代码列)；表名/列名为内部常量。lhb_stock_detail 无业务

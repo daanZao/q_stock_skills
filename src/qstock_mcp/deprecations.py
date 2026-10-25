@@ -9,7 +9,8 @@
 
 PLANNED_ABSENT_SECTIONS: dict[str, str] = {
     "base_info": (
-        "efinance get_base_info 随东财链路退役（spec #111 剔东财），估值快照"
-        "（PE/PB/市值）改由 akshare 百度股市通估值序列承载（valuation section）"
+        "base_info 估值快照随东财链路退役（spec #111 剔东财，efinance 适配器"
+        " issue #121 摘除），PE/PB/市值改由 akshare 百度股市通估值序列承载"
+        "（valuation section）"
     ),
 }

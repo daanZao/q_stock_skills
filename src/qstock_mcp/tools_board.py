@@ -15,17 +15,18 @@ fetch_failed（非连接级）与 no_data_for_date（上游正常响应空结果
 （status error + error_kind + 逐源明细），与"未发布"可区分；
 lhb 子项部分失败落已得数据并报 partial_error。
 
-indices 段白名单定点补漏（issue #49）：主源 efinance「沪深系列指数」口径系统性
-排除科创板系列指数（缺 000688），备选 akshare 含 000688 但主源成功时轮不到。
-indices 段抓取后对照 MAJOR_INDICES 白名单（复用 tools_init 清单，单一事实来源）
-检查覆盖，缺谁按单 code 补抓补落库（fetch_index_spot_with_fallback）。补漏失败
-不静默也不触发核心 section fail-fast——section 维持 ok，失败按三态分类进
-patch failed 明细（复用 ADR 0007 命名：upstream_unreachable 带 retry_advice /
-fetch_failed / 全源口径不含该指数 no_data_for_date）。
+indices 段白名单定点补漏（issue #49）：生产链腾讯批量报价口径已全量覆盖
+7 大指数白名单（含科创50 000688），全命中时零补抓请求；补漏机制为口径性
+缺失的兜底保留。indices 段抓取后对照 MAJOR_INDICES 白名单（复用 tools_init
+清单，单一事实来源）检查覆盖，缺谁按单 code 补抓补落库
+（fetch_index_spot_with_fallback）。补漏失败不静默也不触发核心 section
+fail-fast——section 维持 ok，失败按三态分类进 patch failed 明细（复用
+ADR 0007 命名：upstream_unreachable 带 retry_advice / fetch_failed /
+全源口径不含该指数 no_data_for_date）。
 
-承载源（issue #117，spec #111）：indices section 自 #117 起由腾讯批量报价承载
-（唯一覆盖量比字段、含 000688），fallback 链 腾讯 → 新浪（default_index_spot_
-adapters）；efinance/akshare 东财口径退出指数快照面，白名单补漏机制保留
+承载源（issue #117/#121，spec #111）：indices section 由腾讯批量报价承载
+（唯一覆盖量比字段、含 000688），fallback 链 腾讯 → 新浪
+（default_index_spot_adapters）；东财口径已随 #121 摘除，白名单补漏机制保留
 （腾讯 7 指数全命中时零补抓请求）。注入适配器时（测试）全 section 沿用注入。
 
 服务端防线（issue #78，ADR 0007 补记）：boards/indices 为实时语义 section
@@ -330,10 +331,10 @@ def fetch_board_snapshot(
 ) -> dict:
     """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。
 
-    lhb section 专用链（issue #114，spec #111）：默认走 default_lhb_adapters()
-    （交易所官方主源 → akshare 东财 legacy 兜底），其余 section 用 adapters。
-    调用方显式传 adapters 而未传 lhb_adapters 时，lhb 随 adapters（测试 fake
-    注入的既有接缝保持兼容）；显式传 lhb_adapters 时 lhb 以它为准。
+    lhb section 专用链（issue #114/#121，spec #111 定稿）：默认走
+    default_lhb_adapters()（交易所官方单源，东财 legacy 兜底已摘除），其余
+    section 用 adapters。调用方显式传 adapters 而未传 lhb_adapters 时，lhb 随
+    adapters（测试 fake 注入的既有接缝保持兼容）；显式传 lhb_adapters 时 lhb 以它为准。
     """
     tool = "fetch_board_snapshot"
     params = {"trade_date": trade_date, "sections": sections}
@@ -350,9 +351,10 @@ def fetch_board_snapshot(
         return _error(tool, params, str(e))
     # adapters 为 None 保留到循环内按 section 解析生产链（indices 走腾讯→新浪，
     # issue #117；boards 行业段走申万官网单源链，issue #118；lhb 走交易所官方链，
-    # issue #114；zt_pool/strong_stocks 生产路径走 THS 低频纪律与库内自算，
-    # issue #120，见循环内分支；其余走 default_adapters）；注入适配器（测试）
-    # 时全 section 沿用注入
+    # issue #114/#121；zt_pool/strong_stocks 生产路径走 THS 低频纪律与库内自算，
+    # issue #120，见循环内分支；其余走 default_adapters——清单链，issue #121
+    # 定稿后盘面 section 均已各有专用链，本链仅兜底未来新增 section）；
+    # 注入适配器（测试）时全 section 沿用注入
     injected = adapters is not None  # 测试注入走原 fetch 路径；生产路径见下
     conn, err = connect()
     if err:
@@ -403,8 +405,8 @@ def fetch_board_snapshot(
                 continue
             # 生产链按 section 解析：indices 走腾讯→新浪指数快照链（issue #117），
             # boards 行业段走申万官网单源链（issue #118，申万故障时 daily-review
-            # 降级用库内自算 query_sw_board_daily），lhb 走交易所官方链
-            # （issue #114）；注入适配器（测试）时全 section 沿用注入，显式传
+            # 降级用库内自算 query_sw_board_daily），lhb 走交易所官方单源链
+            # （issue #114/#121）；注入适配器（测试）时全 section 沿用注入，显式传
             # lhb_adapters 时 lhb 以它为准
             if name == "zt_pool" and not injected:
                 # 生产路径：THS 涨停揭秘低频纪律抓取（issue #120）
@@ -461,7 +463,7 @@ def fetch_board_snapshot(
             if name == "indices":
                 data, patch = _patch_major_indices(chain, data)
                 # 行级日期校验（issue #78）：行级日期与请求日期不符即拒收零落库，
-                # 防止上游返回陈旧交易日数据被静默计入请求日（efinance 行级"最新交易日"）
+                # 防止上游返回陈旧交易日数据被静默计入请求日
                 mismatched = sorted(
                     {
                         row["trade_date"]

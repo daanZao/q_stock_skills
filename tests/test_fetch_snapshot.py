@@ -35,7 +35,7 @@ def test_passed_date_mismatching_api_date_is_rejected(pg_test):
     （旧契约"API 日期优先于传入日期"被防线取代：日期假设错误必须显式暴露，
     不把执行日数据静默写成历史日期，#45 型污染）。"""
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", trade_date="20240105")
+    ef = FakeSnapshotAdapter("tencent", trade_date="20240105")
     result = fetch_market_snapshot(trade_date="20240101", adapters=[ef])
     assert result["status"] == "error"
     assert result["tool"] == "fetch_market_snapshot"
@@ -46,11 +46,11 @@ def test_passed_date_mismatching_api_date_is_rejected(pg_test):
 
 def test_fetch_repeated_is_idempotent_and_updates_values(pg_test):
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", trade_date="20240105")
+    ef = FakeSnapshotAdapter("tencent", trade_date="20240105")
     fetch_market_snapshot(adapters=[ef])
     # 第二次执行：同一交易日，价格变化 → 更新原行，不产生重复行
     changed = [dict(r, latest_price=r["latest_price"] + 1.0) for r in SNAPSHOT_ROWS]
-    ef2 = FakeSnapshotAdapter("efinance", rows=changed, trade_date="20240105")
+    ef2 = FakeSnapshotAdapter("tencent", rows=changed, trade_date="20240105")
     second = fetch_market_snapshot(adapters=[ef2])
     assert second["status"] == "ok"
     assert _snapshot_count(pg_test, "20240105") == len(SNAPSHOT_ROWS)
@@ -68,7 +68,7 @@ def test_fetch_api_silent_with_passed_date_is_rejected(pg_test):
     """issue #78：API 未报告交易日而调用方传了日期——无法自证数据归属，
     date_mismatch 零落库（旧契约"回退传入日期"会把执行日数据静默写成历史日期）。"""
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", trade_date=None)  # API 未报告交易日
+    ef = FakeSnapshotAdapter("tencent", trade_date=None)  # API 未报告交易日
     result = fetch_market_snapshot(trade_date="2024-01-05", adapters=[ef])
     assert result["status"] == "error"
     assert result["detail"] == "date_mismatch"
@@ -79,7 +79,7 @@ def test_fetch_falls_back_to_today_when_api_silent_and_no_param(pg_test, monkeyp
     _init(pg_test)
     # 固定"今天"使测试确定性（today_str 为东八区当日口径）
     monkeypatch.setattr(ts, "today_str", lambda: "20240105")
-    ef = FakeSnapshotAdapter("efinance", trade_date=None)
+    ef = FakeSnapshotAdapter("tencent", trade_date=None)
     result = fetch_market_snapshot(adapters=[ef])
     assert result["status"] == "ok"
     assert result["trade_date"] == "20240105"
@@ -90,15 +90,15 @@ def test_fetch_falls_back_to_today_when_api_silent_and_no_param(pg_test, monkeyp
 def test_fetch_all_sources_failed_returns_error_without_writes(pg_test):
     _init(pg_test)
     adapters = [
-        FakeSnapshotAdapter(n, fail_times=99) for n in ("efinance", "akshare", "baostock")
+        FakeSnapshotAdapter(n, fail_times=99) for n in ("tencent", "tencent_rank", "sina")
     ]
     result = fetch_market_snapshot(adapters=adapters)
     assert result["status"] == "error"
     assert result["tool"] == "fetch_market_snapshot"
     assert [a["source"] for a in result["attempted_sources"]] == [
-        "efinance",
-        "akshare",
-        "baostock",
+        "tencent",
+        "tencent_rank",
+        "sina",
     ]
     assert all(a["attempts"] == 3 for a in result["attempted_sources"])  # 每源最多重试 2 次
     assert "rows_upserted" not in result  # 不返回任何疑似成果
@@ -107,18 +107,18 @@ def test_fetch_all_sources_failed_returns_error_without_writes(pg_test):
 
 def test_fetch_fallback_to_next_source(pg_test):
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", fail_times=99)
+    ef = FakeSnapshotAdapter("tencent", fail_times=99)
     ak = FakeSnapshotAdapter("akshare", trade_date="20240105")
     result = fetch_market_snapshot(adapters=[ef, ak])
     assert result["status"] == "ok"
     assert result["source"] == "akshare"
-    assert [a["source"] for a in result["attempted_sources"]] == ["efinance"]
+    assert [a["source"] for a in result["attempted_sources"]] == ["tencent"]
     assert _snapshot_count(pg_test, "20240105") == len(SNAPSHOT_ROWS)
 
 
 def test_fetch_rejects_bad_date_param(pg_test):
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance")
+    ef = FakeSnapshotAdapter("tencent")
     result = fetch_market_snapshot(trade_date="2024-13-45", adapters=[ef])
     assert result["status"] == "error"
     assert ef.calls == 0  # 参数错误时不触发抓取

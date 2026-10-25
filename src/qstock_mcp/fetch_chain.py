@@ -1,9 +1,8 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
 只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section> /
-fetch_fundamentals / fetch_index_daily / fetch_board_history），
-不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖
-fallback 顺序、重试次数、全失败报错。
+fetch_fundamentals / fetch_index_daily），不感知具体数据库/第三方库，
+测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数、错误与
@@ -20,7 +19,6 @@ from typing import Callable, Sequence
 
 from .adapters.base import (
     BoardAdapter,
-    BoardHistoryAdapter,
     DailyAdapter,
     FundamentalsAdapter,
     IndexDailyAdapter,
@@ -222,10 +220,10 @@ def fetch_index_spot_with_fallback(
     """单 code 指数行情补抓（issue #49 白名单定点补漏），成功返回
     {rows, source, attempted_sources}。
 
-    与 fetch_section_with_fallback 不同：空结果（源口径不含该指数，如 efinance
-    沪深系列指数口径系统性排除科创板系列）不视为成功，立即转下一源并记
-    failure_kind "empty"（口径性缺失，重试无意义）；异常仍按每源最多重试 2 次。
-    全源无果抛 AllSourcesFailed，error_kind 由 aggregate_patch_error_kind 判定。
+    与 fetch_section_with_fallback 不同：空结果（源口径不含该指数）不视为
+    成功，立即转下一源并记 failure_kind "empty"（口径性缺失，重试无意义）；
+    异常仍按每源最多重试 2 次。全源无果抛 AllSourcesFailed，error_kind 由
+    aggregate_patch_error_kind 判定。
     """
     attempted: list[dict] = []
     for adapter in adapters:
@@ -283,27 +281,6 @@ def fetch_index_daily_with_fallback(
     r = _with_fallback(
         adapters,
         lambda a: a.fetch_index_daily(index_code, start, end),
-        max_retries,
-    )
-    return {
-        "rows": r["result"],
-        "source": r["source"],
-        "attempted_sources": r["attempted_sources"],
-    }
-
-
-def fetch_board_history_with_fallback(
-    adapters: Sequence[BoardHistoryAdapter],
-    board_type: str,
-    board_name: str,
-    start: str,
-    end: str,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-) -> dict:
-    """板块历史 K 线抓取（issue #84 回补），成功返回 {rows, source, attempted_sources}。"""
-    r = _with_fallback(
-        adapters,
-        lambda a: a.fetch_board_history(board_type, board_name, start, end),
         max_retries,
     )
     return {

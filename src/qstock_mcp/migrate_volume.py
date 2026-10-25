@@ -5,8 +5,9 @@
     python -m qstock_mcp.migrate_volume --apply            # 分批迁移（判定"手"的行 ×100）
 
 机检口径：amount（万元，ADR 0006）×1万 ÷ volume 反推单价，与价格列比值 ≈1 判股、
-≈100 判手，与 source 列互证（efinance/akshare 迁移前为手、baostock 原生为股；
-market_indices 无 source 列——盘面 section 实为东财系单源，按东财系计）。
+≈100 判手，与 source 列互证（存量行历史来源值 efinance/akshare 迁移前为手、
+baostock 原生为股——efinance 已随 issue #121 退役，仅存量行含该值；
+market_indices 无 source 列——历史盘面 section 实为东财系单源，按东财系计）。
 互证矛盾（source 说手口径但数据像股，或反之）与比值落不出区间的行进异常清单；
 缺列/零值行无法判定归 unknown。迁移只动判定为"手"且互证一致的行，已迁移行
 复核为股不再命中，天然幂等。生产执行前人工确认机检清单（spec #71 Testing）。
@@ -28,7 +29,9 @@ _VOLUME_TABLES = (
     ("market_indices", "index_code", "latest_price"),
 )
 
-# 东财系源：迁移前 volume 为手口径；baostock 原生为股
+# 东财系源：迁移前 volume 为手口径；baostock 原生为股。
+# 值为存量行历史来源标注——efinance 已随 issue #121（spec #111 收口）退役，
+# 现网链路不再产生该值，审计须继续识别存量行。
 _EM_SOURCES = ("efinance", "akshare")
 
 # 反推单价 / 价格 的比值区间：≈1 判股、≈100 判手（区间留足价格日内波动余量）

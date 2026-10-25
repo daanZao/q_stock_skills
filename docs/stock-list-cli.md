@@ -1,10 +1,10 @@
 # 股票清单固定入口操作手册（`qstock-scheduler stock-list`）
 
-issue #122（spec #111 长尾验收）：股票清单链（efinance → akshare 交易所
-官网 → baostock）的健康巡检与冒烟固定入口。清单承载链之外，本入口同时是
-迁移期清单面多源互证的留证工具（东财不可达 / bse.cn WAF / baostock 兜底
-的当前真实分工由此可查）。本手册是该能力的 CLI 入口说明——可重复运行、
-可挂定时任务；不使用一次性临时脚本。
+issue #122（spec #111 长尾验收）：股票清单链（akshare 交易所官网 →
+baostock，efinance 已随 issue #121 退役）的健康巡检与冒烟固定入口。清单
+承载链之外，本入口同时是迁移期清单面多源互证的留证工具（bse.cn WAF /
+baostock 兜底的当前真实分工由此可查）。本手册是该能力的 CLI 入口说明——
+可重复运行、可挂定时任务；不使用一次性临时脚本。
 
 ## 适用场景
 
@@ -12,7 +12,7 @@ issue #122（spec #111 长尾验收）：股票清单链（efinance → akshare 
 | --- | --- |
 | 清单例行刷新落库（巡检/初始化补清单） | `stock-list`（按 code 幂等 upsert stock_list 并落台账） |
 | 清单链多源互证（不落库） | `stock-list --check`（逐源独立抓取比对行数/代码集/北交所覆盖） |
-| 迁移期清单链分工留证 | `stock-list --check`（efinance 连接失败 / akshare WAF / baostock 兜底逐源记录） |
+| 迁移期清单链分工留证 | `stock-list --check`（akshare WAF / baostock 兜底逐源记录） |
 
 ## 前置条件
 
@@ -25,7 +25,7 @@ issue #122（spec #111 长尾验收）：股票清单链（efinance → akshare 
 ## 命令
 
 ```bash
-# 1. 清单抓取落库（fallback 链：efinance → akshare 交易所官网 → baostock；
+# 1. 清单抓取落库（fallback 链：akshare 交易所官网 → baostock；
 #    按 stock_code 幂等 upsert；落采集台账 section=stock_list）
 PG_DSN=postgresql://localhost/qstock_test_122 qstock-scheduler stock-list
 
@@ -61,11 +61,10 @@ check 模式无任何写副作用，无需回滚。
 
 ## 已知现状（迁移期）
 
-- efinance（东财）本机连接级不可达（spec #111 前提）：链首腿恒失败，
-  逐源明细如实记录，不拖垮 fallback。
+- efinance（东财）适配器本机连接级不可达（spec #111 前提），已随
+  issue #121 整体退役，清单链定稿为 akshare → baostock；退役前链首腿
+  恒失败的逐源记录在 #121 前的 `--check` 输出中留证。
 - akshare 交易所官网源（`stock_info_a_code_name`）内含北交所腿（bse.cn），
   其 WAF 拦截 python 客户端导致整函数失败（issue #108）——修复前清单链
   实际降级为 baostock 单源兜底（#100 调研结论），`--check` 的
   `bse_coverage` 使该现状逐源可见。
-- efinance 适配器的整体移除是 spec #111 的独立清理 ticket；本入口的链序
-  随该 ticket 定稿后收敛。

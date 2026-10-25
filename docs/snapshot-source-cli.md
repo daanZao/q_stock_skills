@@ -1,8 +1,7 @@
 # 全市场快照固定入口操作手册（`qstock-scheduler snapshot`）
 
 issue #116（spec #111）：market_snapshot 承载链迁移为 **腾讯批量报价（主源）→
-腾讯 rank 榜单 → 新浪直连** 三层 fallback，东财链路（efinance/akshare
-spot_em）退出快照。本手册是该能力的固定 CLI 入口说明——抓取、三源对拍都走
+腾讯 rank 榜单 → 新浪直连** 三层 fallback，东财链路（akshare spot_em）退出快照。本手册是该能力的固定 CLI 入口说明——抓取、三源对拍都走
 同一入口，可重复运行、可挂定时任务；不使用一次性临时脚本。
 
 ## 适用场景

@@ -100,7 +100,7 @@ _Avoid_: 定时任务（不加限定时）
 _Avoid_: 早盘补抓
 
 **板块回补**:
-`qstock-scheduler backfill` 执行的板块历史补数入 `market_boards`，按源分两种：`--source em`（缺省）为东财 push2his 板块 K 线回补行业+概念板块（默认窗口 = 前一交易日前推约 3 个月）；`--source sw`（issue #118，spec #111）为申万官网 trend 指数全历史回补申万双级口径行（默认窗口 = 19990101 起、历史深至 1999，解除 5/10 日涨跌"自落库日起积累"限制）。回补行带 source 标注（'push2his'/'swsresearch'）与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。概念维度已永久退役（issue #119：THS 概念成分端点准入闸未过，#106 弃用方案）——收盘后批的概念成分积累（'em' 体系）已摘除，存量 'em' 行保留只读，无任何采集路径再写概念板块。
+`qstock-scheduler backfill` 执行的板块历史补数入 `market_boards`，申万官网 trend 指数全历史回补申万双级口径行（issue #118，spec #111；issue #121 定稿单源——东财 push2his 回补与概念板块回补已整体摘除，BoardHistoryAdapter 协议随之退役）：默认窗口 = 19990101 起、历史深至 1999，解除 5/10 日涨跌"自落库日起积累"限制。回补行带 source 标注（'swsresearch'）与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。存量 'push2his' 回补行为东财退役前产物，保留只读。概念维度已永久退役（issue #119：THS 概念成分端点准入闸未过，#106 弃用方案）——收盘后批的概念成分积累（'em' 体系）已摘除，存量 'em' 行保留只读，无任何采集路径再写概念板块。
 
 **个股日线入口**:
 `qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
