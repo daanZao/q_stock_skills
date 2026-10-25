@@ -70,6 +70,19 @@
                              strong_stocks 库内自算（60日新高 ∪ 近10日多次
                              涨停）。--probe 只做封禁探测（单次页面请求，不打
                              dataapi），不落库。
+  parity [--date D] [--faces LIST] [--window N] [--limit N] [--no-probe]
+                             迁移总验收对拍（issue #122，spec #111）：五核心面
+                             （boards/snapshot/indices/lhb/zt_pool）逐面对拍 +
+                             库内历史连续性检查，全程不落库（纯读 + 逐源直取 +
+                             THS 页面级探测）。复用各面 parity 工具；zt_pool
+                             跨源对拍不可行（ADR 0012）以探测 + 连续性为证据；
+                             手册见 docs/parity-cli.md。
+  stock-list [--check]       股票清单固定入口（issue #122 长尾验收）：默认经
+                             fallback 链（efinance → akshare 交易所官网 →
+                             baostock）抓取按 code 幂等落 stock_list 并落台账
+                             （清单链健康巡检/冒烟）；--check 逐源独立抓取互证
+                             （行数/代码集合差集/北交所覆盖），不落库；手册见
+                             docs/stock-list-cli.md。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -81,15 +94,24 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, SnapshotAdapter
 from .daily_parity import compare_daily_sources
 from .dates import normalize_date, today_str
 from .db import connect
+from .fetch_chain import (
+    AllSourcesFailed,
+    aggregate_error_kind,
+    fetch_stock_list_with_fallback,
+)
+from .ledger import record_collection, summarize_attempted
 from .output import aggregate_batch_status
-from .repository import select_stock_codes
+from .parity_acceptance import run_parity_acceptance
+from .repository import select_stock_codes, upsert_stock_list
 from .snapshot_parity import compare_snapshot_sources
+from .stock_list_parity import compare_stock_list_sources
 from .sw_board_parity import compare_sw_board_sources
 from .tools_backfill import fetch_boards_backfill
 from .tools_backfill import fetch_sw_boards_backfill
@@ -534,13 +556,123 @@ def cmd_limitpool(date_arg: str | None, probe: bool = False) -> int:
     return 0 if not failed else 1
 
 
+def cmd_parity(
+    date_arg: str | None = None,
+    faces_arg: str | None = None,
+    window_days: int = 120,
+    limit: int | None = None,
+    no_probe: bool = False,
+    sw_adapters: Sequence | None = None,
+    snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
+    index_adapters: Sequence | None = None,
+    lhb_exchange=None,
+    lhb_sina=None,
+) -> int:
+    """迁移总验收对拍（issue #122，spec #111）：五核心面逐面对拍 + 库内
+    历史连续性，全程不落库（纯读 + 逐源直取 + THS 页面级探测）。
+
+    逐面复用各面 parity 工具（boards=sw_boards / snapshot / indices /
+    lhb），zt_pool 跨源对拍不可行（ADR 0012）以探测 + 连续性为证据；
+    --no-probe 跳过 THS 封禁探测（离线/网络受限环境）。任一面对拍源失败
+    exit 1（差异与 infeasible 为对拍产出，非失败）。
+    """
+    tool = "parity"
+    probe = None
+    if not no_probe:
+        from .adapters.ths_adapter import probe as ths_probe
+
+        probe = ths_probe
+    result = run_parity_acceptance(
+        trade_date=date_arg,
+        faces=faces_arg,
+        window_days=window_days,
+        limit=limit,
+        probe=probe,
+        sw_adapters=sw_adapters,
+        snapshot_adapters=snapshot_adapters,
+        index_adapters=index_adapters,
+        lhb_exchange=lhb_exchange,
+        lhb_sina=lhb_sina,
+    )
+    _emit({"job": tool, **result})
+    return 0 if result.get("status") == "ok" else 1
+
+
+def cmd_stock_list(
+    check: bool = False,
+    list_adapters: Sequence | None = None,
+) -> int:
+    """股票清单固定入口（issue #122 长尾验收）：抓取落库 / 多源互证。
+
+    默认（fetch）经清单 fallback 链（efinance → akshare 交易所官网 →
+    baostock）抓取并按 stock_code 幂等 upsert stock_list，落采集台账
+    （section=stock_list，与 init 清单 part 同语义）——清单链健康巡检与
+    长尾冒烟的固定入口；--check 逐源独立抓取互证（行数 + 代码集合差集 +
+    北交所覆盖），不落库不写台账。
+    """
+    tool = "stock-list"
+    if check:
+        result = compare_stock_list_sources(adapters=list_adapters)
+        _emit({"job": tool, "mode": "check", **result})
+        return 0 if result.get("status") in ("ok", "mismatch") else 1
+    if list_adapters is None:
+        from .adapters import default_adapters
+
+        list_adapters = default_adapters()
+    today = today_str()
+    started = datetime.now(timezone.utc)
+    conn, db_err = connect()
+    if db_err:
+        _emit({"status": "error", "job": tool, "error": db_err})
+        return 1
+    try:
+        try:
+            r = fetch_stock_list_with_fallback(list_adapters)
+        except AllSourcesFailed as e:
+            kind = aggregate_error_kind(e.attempted)
+            record_collection(
+                conn, trade_date=today, section="stock_list", status="error",
+                error_kind=kind, detail=summarize_attempted(e.attempted),
+                started_at=started,
+            )
+            _emit({"status": "error", "job": tool, "mode": "fetch",
+                   "error": str(e), "error_kind": kind,
+                   "attempted_sources": e.attempted})
+            return 1
+        n = upsert_stock_list(conn, r["rows"], r["source"])
+        record_collection(
+            conn, trade_date=today, section="stock_list",
+            status="ok" if n > 0 else "empty", source=r["source"], rows=n,
+            error_kind=None if n > 0 else "no_data_for_date",
+            detail=summarize_attempted(r["attempted_sources"]), started_at=started,
+        )
+        bse = sum(
+            1 for row in r["rows"]
+            if str(row.get("stock_code") or "")[:1] in ("4", "8", "9")
+        )
+        _emit({
+            "status": "ok" if n > 0 else "empty",
+            "job": tool,
+            "mode": "fetch",
+            "source": r["source"],
+            "rows_upserted": n,
+            "bse_rows": bse,
+            "attempted_sources": r["attempted_sources"],
+        })
+        # empty 为上游确认无数据的正常语义（非故障），退出码 0
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None,
          adapters: Sequence[BoardAdapter] | None = None,
          daily_adapters: Sequence | None = None,
          fundamentals_adapters: Sequence | None = None,
          snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
          index_adapters: Sequence | None = None,
-         lhb_adapters: Sequence[BoardAdapter] | None = None) -> int:
+         lhb_adapters: Sequence[BoardAdapter] | None = None,
+         list_adapters: Sequence | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -639,6 +771,26 @@ def main(argv: list[str] | None = None,
                         help="交易日 yyyymmdd，缺省当日")
     p_pool.add_argument("--probe", action="store_true",
                         help="只做封禁探测（单次页面请求，不打 dataapi），不落库")
+    p_parity = sub.add_parser(
+        "parity",
+        help="迁移总验收对拍（issue #122）：五核心面逐面对拍 + 库内历史连续性，不落库")
+    p_parity.add_argument("--date", default=None,
+                          help="对拍交易日 yyyymmdd，缺省当日"
+                               "（非交易日上游数据停留最近交易日）")
+    p_parity.add_argument("--faces", default=None,
+                          help="逗号分隔面集，缺省 all = "
+                               "boards,snapshot,indices,lhb,zt_pool")
+    p_parity.add_argument("--window", type=int, default=120,
+                          help="连续性检查窗口自然日（缺省 120）")
+    p_parity.add_argument("--limit", type=int, default=None,
+                          help="快照/板块对拍抽样只数（冒烟用）")
+    p_parity.add_argument("--no-probe", action="store_true",
+                          help="跳过 THS 封禁探测（离线/网络受限环境）")
+    p_slist = sub.add_parser(
+        "stock-list",
+        help="股票清单：fallback 链抓取落库（巡检/冒烟）/ --check 多源互证")
+    p_slist.add_argument("--check", action="store_true",
+                         help="互证模式：逐源独立抓取比对（行数/代码集/北交所覆盖），不落库")
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
     # stderr"同契约）
@@ -706,6 +858,21 @@ def main(argv: list[str] | None = None,
             )
         if args.command == "limitpool":
             return cmd_limitpool(args.date, probe=args.probe)
+        if args.command == "parity":
+            return cmd_parity(
+                date_arg=args.date,
+                faces_arg=args.faces,
+                window_days=args.window,
+                limit=args.limit,
+                no_probe=args.no_probe,
+                sw_adapters=adapters,
+                snapshot_adapters=snapshot_adapters,
+                index_adapters=index_adapters,
+                lhb_exchange=None,
+                lhb_sina=None,
+            )
+        if args.command == "stock-list":
+            return cmd_stock_list(check=args.check, list_adapters=list_adapters)
     except Exception as e:  # 零例外：异常收敛为结构化错误输出
         _emit({"status": "error", "job": args.command,
                "error": f"{type(e).__name__}: {e}"})
