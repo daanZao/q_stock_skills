@@ -77,8 +77,9 @@
                              跨源对拍不可行（ADR 0012）以探测 + 连续性为证据；
                              手册见 docs/parity-cli.md。
   stock-list [--check]       股票清单固定入口（issue #122 长尾验收）：默认经
-                             fallback 链（efinance → akshare 交易所官网 →
-                             baostock）抓取按 code 幂等落 stock_list 并落台账
+                             fallback 链（akshare 交易所官网 →
+                             baostock，efinance 已随 issue #121 退役）
+                             抓取按 code 幂等落 stock_list 并落台账
                              （清单链健康巡检/冒烟）；--check 逐源独立抓取互证
                              （行数/代码集合差集/北交所覆盖），不落库；手册见
                              docs/stock-list-cli.md。
@@ -603,8 +604,9 @@ def cmd_stock_list(
 ) -> int:
     """股票清单固定入口（issue #122 长尾验收）：抓取落库 / 多源互证。
 
-    默认（fetch）经清单 fallback 链（efinance → akshare 交易所官网 →
-    baostock）抓取并按 stock_code 幂等 upsert stock_list，落采集台账
+    默认（fetch）经清单 fallback 链（akshare 交易所官网 →
+    baostock，efinance 已随 issue #121 退役）抓取并按 stock_code 幂等
+    upsert stock_list，落采集台账
     （section=stock_list，与 init 清单 part 同语义）——清单链健康巡检与
     长尾冒烟的固定入口；--check 逐源独立抓取互证（行数 + 代码集合差集 +
     北交所覆盖），不落库不写台账。

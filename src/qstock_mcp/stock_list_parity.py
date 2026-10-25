@@ -1,10 +1,12 @@
 """股票清单多源互证（issue #122，spec #111 长尾验收）：逐源直取、不落库。
 
-与 fallback 不同，清单链每个源（efinance → akshare 交易所官网 → baostock）
-都被独立调用：失败只记入该源，不中断其他源。用途是迁移期的清单链质量验证
-——东财不可达（efinance 腿失败）、akshare 交易所官网源含北交所腿（bse.cn
+与 fallback 不同，清单链每个源（akshare 交易所官网 →
+baostock，efinance 已随 issue #121 退役）都被独立调用：失败只记入该源，
+不中断其他源。用途是迁移期的清单链质量验证
+——akshare 交易所官网源含北交所腿（bse.cn
 WAF 拦截见 issue #108）、baostock 兜底（#100 调研：清单链实际已降级为
-baostock 单源在跑）都如实呈现。固定 CLI 入口
+baostock 单源在跑）都如实呈现（退役前链首腿 efinance 恒失败的逐源记录为
+迁移期留证）。固定 CLI 入口
 `qstock-scheduler stock-list --check`（手册 `docs/stock-list-cli.md`）。
 
 比对口径：行数、代码集合双向差集（A 股代码为稳定标识，名称不作为差异——
