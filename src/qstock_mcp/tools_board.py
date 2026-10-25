@@ -91,6 +91,7 @@ from .output import error as _error
 from .repository import (
     BOARD_QUERY_TABLES,
     BOARD_SECTION_TABLES,
+    recompute_lhb_statistic,
     select_board_rows,
     select_latest_board_date,
     upsert_board_rows,
@@ -510,6 +511,10 @@ def fetch_board_snapshot(
                 if not r["data"]["lhb_basic"]:
                     res["empty_kind"] = "no_data_for_date"
                     res["note"] = _LHB_EMPTY_NOTE
+                # statistic 子表不在适配器承载（issue #114 定稿，spec 冲突修正）：
+                # lhb_basic 落库后由库内近 60 日历日窗口滚动自算（DELETE+INSERT
+                # 幂等，窗口滑出/上游修订自愈）；新浪 ggtj 回归 --check 对拍校验位
+                res["rows"] += recompute_lhb_statistic(conn, effective)
             elif not data:
                 res["empty_kind"] = "no_data_for_date"
             detail = summarize_attempted(r["attempted_sources"])

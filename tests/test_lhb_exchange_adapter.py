@@ -1,5 +1,6 @@
 """ExchangeLhbAdapter 组合层测试（issue #114，spec #111）：monkeypatch 子所客户端
-与 akshare 入口，验证三所合并、金额口径（万元）、子项容错与四表契约；不触网。
+与 akshare 入口，验证三所合并、金额口径（万元）、子项容错与三表契约
+（statistic 由库内自算承载，不在适配器范围——见 test_lhb_tools）；不触网。
 """
 
 import pytest
@@ -85,17 +86,9 @@ def _patch_markets(monkeypatch):
 
 
 def _patch_akshare(monkeypatch):
-    """akshare 懒加载替换：ggtj 统计 + 同花顺 yyb 两函数。"""
+    """akshare 懒加载替换：同花顺 yyb 两函数（statistic 已由库内自算承载，
+    适配器不再触碰 ggtj——issue #114 定稿）。"""
     class FakeAK:
-        @staticmethod
-        def stock_lhb_ggtj_sina(symbol="60"):
-            assert symbol == "60"
-            return _FakeDF([
-                {"股票代码": "2281", "股票名称": "光迅科技", "上榜次数": 3,
-                 "累积购买额": 912693.89, "累积卖出额": 533110.91, "净额": 379582.98,
-                 "买入席位数": 6, "卖出席位数": 5},
-            ])
-
         @staticmethod
         def stock_lh_yyb_capital():
             return _FakeDF([
@@ -122,13 +115,14 @@ class _FakeDF:
         return list(self._records)
 
 
-def test_fetch_lhb_merges_three_exchanges_and_four_tables(monkeypatch):
+def test_fetch_lhb_merges_three_exchanges_and_tables(monkeypatch):
     _patch_markets(monkeypatch)
     _patch_akshare(monkeypatch)
     adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
     out = adapter.fetch_lhb(TODAY)
-    assert set(out) >= {"lhb_basic", "lhb_stock_statistic",
-                        "lhb_yyb_capital", "lhb_yyb_most"}
+    # statistic 不在适配器承载（issue #114 定稿）：库内 lhb_basic 自算
+    assert set(out) >= {"lhb_basic", "lhb_yyb_capital", "lhb_yyb_most"}
+    assert "lhb_stock_statistic" not in out
     assert "errors" not in out
 
     basic = {r["stock_code"]: r for r in out["lhb_basic"]}
@@ -153,14 +147,6 @@ def test_fetch_lhb_merges_three_exchanges_and_four_tables(monkeypatch):
     # 北交所旧码 833454 归一化到 920 新码（官方对照表）
     assert "920454" in basic and "833454" not in basic
     assert basic["920454"]["buy_amount"] == pytest.approx(100.0)
-
-    # statistic：新浪 ggtj 近 60 日窗口，trade_date=采集执行日快照语义
-    (stat,) = out["lhb_stock_statistic"]
-    assert stat["trade_date"] == TODAY
-    assert stat["stock_code"] == "002281"  # 新浪丢前导零 → zfill
-    assert stat["appear_count_3m"] == 3
-    assert stat["buy_amount_3m"] == pytest.approx(912693.89)  # 万元原生
-    assert stat["net_buy_3m"] == pytest.approx(379582.98)
 
     # yyb 两表：同花顺接口委托 akshare 适配器映射（中文金额 → 万元）
     assert out["lhb_yyb_capital"][0]["buy_amount"] == pytest.approx(9785.87)
@@ -194,11 +180,12 @@ def test_all_subitems_failed_raises_fetch_error(monkeypatch):
 
     class BoomAK:
         @staticmethod
-        def stock_lhb_ggtj_sina(symbol="60"):
-            raise FetchError("sina boom")
+        def stock_lh_yyb_capital():
+            raise FetchError("ths boom")
 
-        stock_lh_yyb_capital = staticmethod(lambda: (_ for _ in ()).throw(FetchError("ths boom")))
-        stock_lh_yyb_most = staticmethod(lambda: (_ for _ in ()).throw(FetchError("ths boom")))
+        @staticmethod
+        def stock_lh_yyb_most():
+            raise FetchError("ths boom")
 
     monkeypatch.setattr(mod, "import_akshare", lambda: BoomAK)
     adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
@@ -206,22 +193,25 @@ def test_all_subitems_failed_raises_fetch_error(monkeypatch):
         adapter.fetch_lhb(TODAY)
 
 
-def test_statistic_failure_keeps_basic_with_partial_error(monkeypatch):
+def test_yyb_failure_keeps_basic_with_partial_error(monkeypatch):
+    """yyb 子项失败：basic 照常拿到并记 errors（工具层报 partial_error）；
+    statistic 不受适配器子项失败影响（库内自算，见 tools_lhb 测试）。"""
     _patch_markets(monkeypatch)
 
     class BoomAK:
         @staticmethod
-        def stock_lhb_ggtj_sina(symbol="60"):
-            raise RuntimeError("sina 改版")
+        def stock_lh_yyb_capital():
+            raise RuntimeError("同花顺改版")
 
-        stock_lh_yyb_capital = BoomAK_stub = staticmethod(lambda: _FakeDF([]))
-        stock_lh_yyb_most = staticmethod(lambda: _FakeDF([]))
+        @staticmethod
+        def stock_lh_yyb_most():
+            return _FakeDF([])
 
     monkeypatch.setattr(mod, "import_akshare", lambda: BoomAK)
     adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
     out = adapter.fetch_lhb(TODAY)
-    assert out["lhb_basic"] and out["lhb_stock_statistic"] == []
-    assert any("lhb_stock_statistic" in e for e in out["errors"])
+    assert out["lhb_basic"] and out["lhb_yyb_capital"] == []
+    assert any("lhb_yyb_capital" in e for e in out["errors"])
 
 
 def test_basic_row_semantics():

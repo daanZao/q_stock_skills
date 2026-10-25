@@ -21,10 +21,12 @@ from .adapters import (
     fetch_failure_kind,
 )
 from .adapters.base import INDEX_FIELDS
+from .daily_parity import _within_tolerance
 from .output import error as _error
 from .tools_init import MAJOR_INDICES
 
-# 对拍容差（与 daily_parity._PARITY_TOLERANCES 同口径）
+# 对拍容差（比较函数 _within_tolerance 复用 daily_parity，同 tools_lhb 先例；
+# 本表字段集为指数面定制，不下放 daily_parity）
 _PARITY_TOLERANCES: dict[str, tuple[str, float]] = {
     "latest_price": ("abs", 0.011),
     "pre_close": ("abs", 0.011),
@@ -45,14 +47,6 @@ STRUCTURAL_GAPS: dict[str, tuple[str, ...]] = {
 }
 
 _DIFF_SAMPLE_LIMIT = 20  # 差异样本上限（供人工核读）
-
-
-def _within_tolerance(reference: float, value: float, kind: str, tol: float) -> bool:
-    if kind == "abs":
-        return abs(value - reference) <= tol
-    if reference == 0:
-        return abs(value) <= tol
-    return abs(value - reference) / abs(reference) <= tol
 
 
 def compare_index_spot_sources(

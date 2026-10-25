@@ -1,14 +1,15 @@
-"""新浪龙虎榜客户端（issue #114，spec #111）：主路径统计子表 + 手动对拍源。
+"""新浪龙虎榜客户端（issue #114，spec #111）：纯对拍校验源（`lhb --check`）。
 
 定位（#97 调研）：交易所官方为主源，新浪五函数为**互补校验/可手动触发对拍**。
-本模块两处用途：
-1. `map_ggtj_statistic_rows`：lhb_stock_statistic 承载映射——akshare
-   `stock_lhb_ggtj_sina(symbol="60")`（近 60 日滚动窗口，字段与表一一对应：
-   上榜次数/累积购买额/累积卖出额/净额/买入席位数/卖出席位数，金额万元）。
-   窗口口径从东财"近三月"变为"近 60 日"，trade_date 为**采集执行日**（ggtj
-   无行级上榜日），逐日快照语义（与 yyb 两表 fetch_date 同构）。
-2. `SinaLhbClient`：对拍客户端——每日详情 HTML（含收盘价/成交额/席位 type）
-   + 席位 JSONP `getLHBComBSData`（买/卖各五，万元，实测有重复行需去重）。
+issue #114 code-review 修正后本模块不再承载任何落库面——lhb_stock_statistic
+改由库内 lhb_basic 滚动自算（repository.recompute_lhb_statistic），新浪侧
+三处用途全在对拍路径（`tools_lhb.compare_lhb_sources`，不落库）：
+1. `SinaLhbClient.daily_detail`：每日详情 HTML（含收盘价/成交额/席位 type）；
+2. `SinaLhbClient.seat_detail`：席位 JSONP `getLHBComBSData`（买/卖各五，
+   万元，实测有重复行需去重）；
+3. `SinaLhbClient.ggtj`：近 60 日统计窗口（akshare `stock_lhb_ggtj_sina`，
+   万元原生，字段与 statistic 表一一对应）——与库内自算快照逐股对照。
+`map_ggtj_statistic_rows` 为其承载映射（中文列 → LHB_STATISTIC_FIELDS）。
 
 解析器为纯函数（HTML/JSONP 文本进、记录出），测试喂录制 fixture，不触网；
 pandas 懒加载（akshare 同依赖族）。
@@ -19,7 +20,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from .base import FetchError
+from .base import FetchError, import_akshare
 from ._lhb_bse import unwrap_jsonp
 
 log = logging.getLogger(__name__)
@@ -195,3 +196,18 @@ class SinaLhbClient:
                 f"新浪龙虎榜席位请求失败（{stock_code} {trade_date}）: {e}"
             ) from e
         return parse_seat_jsonp(text)
+
+    def ggtj(self) -> list[dict]:
+        """近 60 日统计窗口（ggtj）→ LHB_STATISTIC_FIELDS 行（万元原生）。
+
+        仅对拍用（不落库）：与库内 lhb_basic 自算快照逐股对照；窗口锚定采集
+        执行日（ggtj 无行级上榜日），与目标交易日非同日时差异含窗口滑移成分，
+        输出侧带 note 说明（tools_lhb.compare_lhb_sources）。"""
+        ak = import_akshare()
+        try:
+            df = ak.stock_lhb_ggtj_sina(symbol="60")
+        except Exception as e:
+            raise FetchError(f"新浪龙虎榜统计窗口抓取失败: {e}") from e
+        if df is None or df.empty:
+            return []
+        return map_ggtj_statistic_rows(df.to_dict("records"))

@@ -10,12 +10,14 @@ lhb_basic 金额口径：buy/sell/net 由席位明细自算（买前五合计/�
 （万元）随行携带 day_amount 元数据键供对拍使用（repository 落库忽略非列键）。
 close_price/change_percent 官方汇总不提供（偏离值≠涨跌幅，不伪造置 null；
 可与 stock_daily join 补齐）；换手率仅在披露原因为"换手率达到X%"时从文本提取。
-lhb_stock_statistic：akshare 新浪 ggtj（近 60 日窗口，万元原生，trade_date=
-采集执行日的快照语义）。lhb_yyb_*：akshare 同花顺接口（非东财，#97 勘误幸存）
-——子项委托原 akshare 适配器映射，保持四表契约。
+lhb_stock_statistic 不在本适配器承载（issue #114 code-review 修正，spec 冲突
+修正）：由库内 lhb_basic 近 60 日历日窗口滚动自算（repository.
+recompute_lhb_statistic，交易所官方数据派生），新浪 ggtj 回归 `lhb --check`
+对拍校验位。lhb_yyb_*：akshare 同花顺接口（非东财，#97 勘误幸存）——子项
+委托原 akshare 适配器映射，保持表契约。
 
 子项容错：单所/单个子项失败记入 errors（工具层报 partial_error），拿到什么落
-什么；basic/statistic/yyb 全空且全部失败才抛 FetchError 触发链上回退
+什么；basic/yyb 全空且全部失败才抛 FetchError 触发链上回退
 （default_lhb_adapters 交易所官方单源，issue #121 摘除东财 legacy 兜底；
 新浪互补校验走 `qstock-scheduler lhb --check` 对拍，不落库）。
 盘中/非交易日三所全空是正常语义（rows 0 + empty_kind，非失败）。
@@ -75,7 +77,11 @@ def _basic_row(trade_date, code, name, reason, buy_seats, sell_seats,
 
 
 class ExchangeLhbAdapter:
-    """沪深北交易所官方龙虎榜适配器（BoardAdapter.fetch_lhb 契约，四表全键）。"""
+    """沪深北交易所官方龙虎榜适配器（BoardAdapter.fetch_lhb 契约）。
+
+    返回 lhb_basic + lhb_yyb_capital + lhb_yyb_most 三子表；lhb_stock_statistic
+    由库内自算（见模块 docstring），不在本适配器抓取范围。
+    """
 
     name = "exchange"
 
@@ -86,8 +92,8 @@ class ExchangeLhbAdapter:
     # ---------------------------------------------------------------- 入口
 
     def fetch_lhb(self, trade_date: str) -> dict:
-        """四子表抓取；子项/单所级失败记入 errors（工具层报 partial_error），
-        拿到什么落什么；basic/statistic/yyb 全空且全部失败才抛 FetchError。"""
+        """三子表抓取；子项/单所级失败记入 errors（工具层报 partial_error），
+        拿到什么落什么；basic/yyb 全空且全部失败才抛 FetchError。"""
         result: dict[str, list] = {}
         errors: list[str] = []
         try:
@@ -97,7 +103,6 @@ class ExchangeLhbAdapter:
             errors.append(f"lhb_basic: {e}")
             result["lhb_basic"] = []
         for table, fn in [
-            ("lhb_stock_statistic", self._fetch_statistic),
             ("lhb_yyb_capital", self._fetch_yyb_capital),
             ("lhb_yyb_most", self._fetch_yyb_most),
         ]:
@@ -206,26 +211,6 @@ class ExchangeLhbAdapter:
                     day_amount=r["day_amount_wan"],
                 )
             )
-        return rows
-
-    # ---------------------------------------------------------------- lhb_stock_statistic
-
-    def _fetch_statistic(self, trade_date: str) -> list[dict]:
-        """新浪 ggtj 近 60 日滚动窗口（#97 落地要点：窗口"近三月"→"近 60 日"，
-        trade_date=采集执行日的快照语义——ggtj 无行级上榜日，不伪造）。"""
-        ak = import_akshare()
-        try:
-            df = ak.stock_lhb_ggtj_sina(symbol="60")
-        except Exception as e:
-            raise FetchError(f"新浪龙虎榜统计抓取失败: {e}") from e
-        if df is None or df.empty:
-            return []
-        rows = []
-        from ._lhb_sina import map_ggtj_statistic_rows
-
-        for row in map_ggtj_statistic_rows(df.to_dict("records")):
-            row["trade_date"] = trade_date
-            rows.append(row)
         return rows
 
     # ---------------------------------------------------------------- lhb_yyb_*（同花顺，委托 akshare 适配器映射）

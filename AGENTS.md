@@ -1,6 +1,6 @@
 # q_stock_skills
 
-证券数据 MCP 服务 + agent skill 家族。核心交付物是 `src/qstock_mcp` 的 stdio MCP server（`server.py` 只做 17 个工具的薄包装，逻辑全在 `tools_*` 核心层），数据落 PostgreSQL 独立库，`skills/` 下是交付给外部 agent 的 skill（indicator-tools / sepa / daily-review / limit-up-analysis）。
+证券数据 MCP 服务 + agent skill 家族。核心交付物是 `src/qstock_mcp` 的 stdio MCP server（`server.py` 只做 18 个工具的薄包装，逻辑全在 `tools_*` 核心层），数据落 PostgreSQL 独立库，`skills/` 下是交付给外部 agent 的 skill（indicator-tools / sepa / daily-review / limit-up-analysis）。
 
 ## Commands
 

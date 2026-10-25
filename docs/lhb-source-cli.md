@@ -25,7 +25,8 @@ issue #114（spec #111）：龙虎榜迁移交易所官方源——深交所 Sho
 - 已完成 editable 安装：`.venv/bin/pip install -e ".[sources,dev]"`（`sources`
   extras 含 curl_cffi——北交所 bseinfo.net WAF 需 Chrome TLS 指纹，未装时北交所
   子项报明确错误、沪深不受影响）；
-- 环境变量 `PG_DSN` 指向业务库（写库模式必需；`--check` 不连库）；
+- 环境变量 `PG_DSN` 指向业务库（写库模式必需；`--check` 只需只读连库——
+  读取 statistic 自算快照与新浪 ggtj 对照，不落库不落台账）；
 - 数据库表已初始化（`init_database` 或此前已运行过任一写库批）。
 
 ## 命令
@@ -47,12 +48,18 @@ qstock-scheduler lhb --date 20261020 --check
   **正常语义**（status ok + `empty_kind=no_data_for_date` + note，非失败）。
 - `--start/--end`：回溯闭区间（自然日），区间内逐交易日抓取；缺省无（不传即
   单日模式）。进度经 stderr 双阈值报（每 20 日或 ≥60s，issue #89）。
-- `--check`：对拍模式（不落库、不连库、不落台账）。逐股比对：
+- `--check`：对拍模式（不落库、不落台账；只读连库读取 statistic 自算快照）。
+  逐股比对：
   - 股票集合双向差集（`stock_set_diff`，信息级——两源归类口径不同，差集供
     人工核对，不算失败）；
   - 全日成交额（交易所明细精确值 vs 新浪每日详情，rel 容差 0.005）；
   - 席位净买额（交易所席位明细自算 vs 新浪 getLHBComBSData 去重后 Σnet，
     万元，rel 容差 0.005；新浪席位缺失的只标注 note 不判差异）。
+  - statistic 校验位（`statistic` 段）：库内 lhb_basic 自算快照 vs 新浪 ggtj
+    近 60 日窗口，逐股比对上榜次数（精确）与买/卖/净额（rel 0.005）；
+    `buy/sell_seat_count` 自算恒 NULL（官方汇总无席位计数来源，不伪造）
+    不参与比对；ggtj 窗口锚定采集执行日，与 `--date` 非同日时差异含窗口
+    滑移成分，供人工核对。
   - 指标（上榜原因）文案两源口径不同（交易所披露原文 vs 新浪归类），
     **不逐条比对**（输出 note 说明）。
 
@@ -67,11 +74,13 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
 
 - fetch：`lhb.status` ok / error（三态结构化：`error_kind` +
   `attempted_sources`，lhb 永不进核心集、不触发整批中止）；子项部分失败
-  （如新浪统计/同花顺 yyb 单挂）时 status 仍 ok 但带 `partial_error`。
+  （同花顺 yyb 子表单挂）时 status 仍 ok 但带 `partial_error`。statistic
+  由库内自算（见数据口径），无子项失败语义。
 - backfill：`status` ok / partial_error / error（`aggregate_batch_status`
   批次口径）；`results` 逐日成败/行数/来源；`empty_days` 统计上游确认无
   数据日（非故障）。
-- check：`status` ok / mismatch / error；`mismatch_count` 为差异股数；
+- check：`status` ok / mismatch / error；`mismatch_count` 为差异股数
+  （basic 对拍 + statistic 校验位差异都计入整体 status）；
   `results` 携带双方原值供人工核对。
 - 退出码：0 = ok（含 empty 无数据）；1 = 失败/差异/输入非法；2 = 参数错误。
 
@@ -86,25 +95,31 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
   `stock_daily` 按 (stock_code, trade_date) join 补齐。
 - **turnover_rate**：仅披露原因为"日/当日换手率达到X%"时可从文本提取实际
   值；其余情形（振幅/偏离值等）置 null。
-- **lhb_stock_statistic**：新浪 `stock_lhb_ggtj_sina(symbol="60")` 近 **60 日**
-  滚动窗口快照（万元原生，字段一一对应）；窗口口径自东财"近三月"变为
-  "近 60 日"（DDL 表头注同步）；`trade_date` 为**采集执行日**（ggtj 无行级
-  上榜日，快照语义与 yyb 两表 fetch_date 同构），业务键
-  (trade_date, stock_code) 逐日快照幂等 upsert。
+- **lhb_stock_statistic**：**库内自算**（issue #114 定稿，spec 冲突修正）——
+  `fetch_board_snapshot(lhb 段)` 落 lhb_basic 后由
+  `repository.recompute_lhb_statistic` 以**近 60 日历日窗口**（含当日，
+  承接原新浪 ggtj「近 60 日」窗口语义）按股聚合：appear=窗口行数（业务键含
+  lhb_reason，同股当日多榜单各计一次）、买/卖/净额=窗口合计（万元）。
+  DELETE+INSERT 幂等可重跑，窗口滑出/上游修订自愈（旧快照股票不再入窗即
+  删除）。`buy_seat_count`/`sell_seat_count` 恒 NULL：交易所官方汇总无席位
+  计数来源、不伪造（lhb_stock_detail 接线后才可派生）。新浪 ggtj 回归
+  `--check` 对拍校验位（不落库）。`trade_date` 为快照交易日，业务键
+  (trade_date, stock_code)。
 - **lhb_stock_detail（席位级表）**：本期未接线（schema 在、写路径未挂；研究
   报告定位"能力增量非恢复"）。席位数据已用于金额自算与对拍。
 - **北交所**：历史行旧码自动归一化 920 新码（官方 248 条对照表，未覆盖的
   极少数旧码原样保留）；北交所特有的严重异常波动分类资金（yzycbdList）本期
   不接线。
-- **链序**：`default_lhb_adapters()` = exchange → akshare（东财 EM lhb
-  函数 legacy 兜底，spec 清理 ticket 退役后移除）；单所/单子项失败降级为
+- **链序**：`default_lhb_adapters()` = **交易所官方单源**（`ExchangeLhbAdapter`，
+  issue #121 摘除东财 legacy 兜底后定稿）；单所/单子项失败降级为
   partial_error，拿到什么落什么。
 
 ## 落库与回滚
 
-CLI 写 `lhb_basic` / `lhb_stock_statistic` / `lhb_yyb_capital` / `lhb_yyb_most`
-（业务键 upsert）与 append-only 台账 `collection_log`；无 schema 变更。
-回滚按日期/代码段删除即可（幂等可重跑覆盖）：
+CLI 写 `lhb_basic` / `lhb_yyb_capital` / `lhb_yyb_most`（业务键 upsert）
+与 `lhb_stock_statistic`（库内自算快照，DELETE+INSERT 幂等）及 append-only
+台账 `collection_log`；无 schema 变更。回滚按日期/代码段删除即可（幂等可重跑
+覆盖）：
 
 ```sql
 DELETE FROM lhb_basic WHERE trade_date = '20261020';
@@ -112,7 +127,8 @@ DELETE FROM lhb_stock_statistic WHERE trade_date = '20261020';
 -- 台账 collection_log 为审计表，append-only，不回滚
 ```
 
-注意：statistic 为逐日快照语义，删除某执行日的快照不影响其他日期。
+注意：statistic 为逐日快照语义，删除某日的 basic 行后重跑当日抓取即可重建
+该日快照（窗口聚合只读历史）；删除某执行日的快照不影响其他日期。
 
 ## 定时任务示例（launchd）
 

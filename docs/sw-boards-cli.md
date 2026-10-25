@@ -22,7 +22,7 @@ issue #118（spec #111）：boards 行业维度迁移申万官网（swsresearch.
 - 环境变量 `PG_DSN` 指向目标库（**业务库执行前请阅读下方"回滚方法"**；
   验证/冒烟用测试库，如 `postgresql://localhost/qstock_test_118`）；
 - 数据库表已初始化（`init_database` 或任一写库批执行过，幂等建表含
-  sql/017 sw_board_valuation）。
+  sql/018 sw_board_valuation）。
 
 ## 命令
 

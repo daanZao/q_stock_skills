@@ -22,8 +22,10 @@ from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
 from .dates import add_days, is_trading_day, normalize_date, today_str
 from .daily_parity import _within_tolerance
+from .db import connect
 from .output import aggregate_batch_status
 from .output import error as _error
+from .repository import select_lhb_statistic
 from .tools_board import fetch_board_snapshot
 
 log = logging.getLogger(__name__)
@@ -33,6 +35,21 @@ PROGRESS_LOG_INTERVAL_S = 60  # 距上条 ≥N 秒也报（慢路径可观测，
 
 _AMOUNT_TOL = ("rel", 0.005)  # 成交额/净买额相对容差（daily_parity 同口径）
 _PARITY_FIELDS = ("day_amount", "net_buy_amount")
+
+# statistic 对拍字段（issue #114 定稿：库内自算 vs 新浪 ggtj 校验位）——
+# 上榜次数精确对齐；金额万元 rel 0.005（daily_parity 同口径）。buy/sell_seat_count
+# 自算恒 NULL（官方汇总无席位计数来源，不伪造），不参与比对
+_STATISTIC_PARITY_FIELDS: dict[str, tuple[str, float]] = {
+    "appear_count_3m": ("abs", 0.0),
+    "buy_amount_3m": ("rel", 0.005),
+    "sell_amount_3m": ("rel", 0.005),
+    "net_buy_3m": ("rel", 0.005),
+}
+_STATISTIC_NOTE = (
+    "自算快照窗口=[交易日-60日历日, 交易日]，ggtj 窗口锚定采集执行日——"
+    "非同日对拍差异含窗口滑移成分，供人工核对；buy/sell_seat_count 自算恒 "
+    "NULL（官方汇总无席位计数来源）不参与比对"
+)
 
 
 def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
@@ -156,6 +173,70 @@ def _compare_one(code, ex, si, seat_net_wan):
     return entry
 
 
+def _compare_statistic_snapshot(trade_date: str, sina) -> tuple[dict, int]:
+    """statistic 校验位对拍（不落库）：库内 lhb_basic 自算快照 vs 新浪 ggtj。
+
+    issue #114 定稿：statistic 由交易所官方数据（lhb_basic）派生自算，新浪
+    ggtj 回归 `--check` 对拍校验位。库侧只读（连库失败只记该侧，不判整体
+    失败）；ggtj 缺失（旧版对拍客户端未实现）记 unsupported。返回
+    (报告, 差异股数)；集合差信息级（窗口锚点不同会制造边界差），不算失败。
+    """
+    report: dict = {
+        "compared_fields": list(_STATISTIC_PARITY_FIELDS),
+        "note": _STATISTIC_NOTE,
+    }
+    db_by_code: dict[str, dict] = {}
+    conn, err = connect()
+    if err:
+        report["db"] = {"status": "error", "error": err}
+    else:
+        try:
+            for row in select_lhb_statistic(conn, trade_date):
+                db_by_code[row["stock_code"]] = row
+            report["db"] = {"status": "ok", "row_count": len(db_by_code)}
+        except Exception as e:  # noqa: BLE001 - 对拍库侧失败只记该侧
+            report["db"] = {"status": "error", "error": str(e)}
+            db_by_code = {}
+        finally:
+            conn.close()
+    si_by_code: dict[str, dict] = {}
+    ggtj_fn = getattr(sina, "ggtj", None)
+    if ggtj_fn is None:
+        report["sina_ggtj"] = {"status": "unsupported",
+                               "note": "对拍客户端未实现 ggtj（旧版 fake 客户端）"}
+    else:
+        try:
+            for row in ggtj_fn():
+                si_by_code[row["stock_code"]] = row
+            report["sina_ggtj"] = {"status": "ok", "row_count": len(si_by_code)}
+        except Exception as e:  # noqa: BLE001 - 对拍单源失败只记该源
+            report["sina_ggtj"] = {"status": "error", "error": str(e)}
+    db_codes, si_codes = set(db_by_code), set(si_by_code)
+    report["stock_set_diff"] = {
+        "db_only": sorted(db_codes - si_codes),
+        "sina_only": sorted(si_codes - db_codes),
+    }
+    results = []
+    mismatched = 0
+    for code in sorted(db_codes & si_codes):
+        db_r, si_r = db_by_code[code], si_by_code[code]
+        entry = {"stock_code": code, "db": db_r, "sina": si_r, "diffs": []}
+        for field, (kind, tol) in _STATISTIC_PARITY_FIELDS.items():
+            dv, sv = db_r.get(field), si_r.get(field)
+            if dv is None or sv is None:
+                continue
+            if not _within_tolerance(float(dv), float(sv), kind, tol):
+                entry["diffs"].append({"field": field, "db": dv, "sina": sv})
+        entry["status"] = "mismatch" if entry["diffs"] else "ok"
+        if entry["diffs"]:
+            mismatched += 1
+        results.append(entry)
+    report["results"] = results
+    report["mismatch_count"] = mismatched
+    report["single_source_count"] = len(db_codes ^ si_codes)
+    return report, mismatched
+
+
 def compare_lhb_sources(
     trade_date: str | None = None,
     exchange: ExchangeLhbAdapter | None = None,
@@ -164,8 +245,10 @@ def compare_lhb_sources(
     """新浪互补对拍（不落库）：交易所官方 vs 新浪转载面。
 
     逐股比对股票集合（双向差集报 info 级）、全日成交额（双方披露口径一致，
-    rel 0.005）、席位净买额（新浪 seat JSONP 去重后 Σnet，可得时）。对拍
-    失败/无数据只记该侧，不中断另一侧；两侧均无数据才 error。
+    rel 0.005）、席位净买额（新浪 seat JSONP 去重后 Σnet，可得时）；另有
+    statistic 校验位对拍（库内自算快照 vs 新浪 ggtj，见
+    _compare_statistic_snapshot）。对拍失败/无数据只记该侧，不中断另一侧；
+    两侧 basic 均无数据才 error。
     """
     tool = "compare_lhb_sources"
     params = {"trade_date": trade_date}
@@ -177,6 +260,8 @@ def compare_lhb_sources(
         exchange = ExchangeLhbAdapter()
     if sina is None:
         sina = SinaLhbClient()
+
+    stat_report, stat_mismatched = _compare_statistic_snapshot(effective, sina)
 
     ex_entry: dict = {"source": exchange.name, "status": None, "basic_count": 0}
     ex_by_code: dict[str, dict] = {}
@@ -213,6 +298,7 @@ def compare_lhb_sources(
             "error": "交易所与新浪两侧均抓取失败",
             "exchange": ex_entry,
             "sina": si_entry,
+            "statistic": stat_report,
         }
 
     ex_codes, si_codes = set(ex_by_code), set(si_by_code)
@@ -245,7 +331,7 @@ def compare_lhb_sources(
         if entry["status"] == "mismatch":
             mismatched += 1
     single = sum(1 for r in results if r["status"] == "single_source")
-    status = "mismatch" if mismatched else "ok"
+    status = "mismatch" if (mismatched or stat_mismatched) else "ok"
     return {
         "tool": tool,
         "status": status,
@@ -253,6 +339,7 @@ def compare_lhb_sources(
         "compared_fields": list(_PARITY_FIELDS),
         "exchange": ex_entry,
         "sina": si_entry,
+        "statistic": stat_report,
         "stock_set_diff": {
             "exchange_only": only_ex,
             "sina_only": only_si,

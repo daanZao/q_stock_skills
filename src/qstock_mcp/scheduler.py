@@ -175,7 +175,7 @@ def cmd_backfill(start: str | None, end: str | None,
         _emit({"status": "error", "job": "backfill",
                "error": f"未知 source: {source}（可选: sw；东财 push2his 回补"
                         "已随 issue #121 摘除）"})
-        return 2
+        return 1  # 输入非法（退出码定义见模块 docstring：2 仅 argparse 参数错误）
     result = fetch_sw_boards_backfill(start=start, end=end)
     out = {"job": "backfill", "source": source, **result}
     _emit(out)

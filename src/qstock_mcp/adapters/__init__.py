@@ -150,10 +150,12 @@ def default_lhb_adapters() -> list[BoardAdapter]:
     """lhb section 专用链（issue #114/#121，spec #111 定稿）：交易所官方单源。
 
     主源为沪深北交易所一手披露（深交所 ShowReport JSON + 上交所定宽文本 +
-    北交所 bseinfo.net JSONP，见 lhb_exchange_adapter）；子表含新浪 ggtj 统计
-    （akshare 幸存函数）与同花顺营业部榜。akshare 东财 lhb legacy 兜底随
-    issue #121 摘除；新浪互补校验为对拍通道（`qstock-scheduler lhb --check`，
-    不落库），不入 fallback 链。其余 section 不走本链。
+    北交所 bseinfo.net JSONP，见 lhb_exchange_adapter），承载 lhb_basic 与
+    同花顺营业部榜两子表；lhb_stock_statistic 由库内 lhb_basic 滚动自算
+    （repository.recompute_lhb_statistic），不在链上。akshare 东财 lhb legacy
+    兜底随 issue #121 摘除；新浪互补校验（含 ggtj 统计窗口）为对拍通道
+    （`qstock-scheduler lhb --check`，不落库），不入 fallback 链。
+    其余 section 不走本链。
     """
     from .lhb_exchange_adapter import ExchangeLhbAdapter
 

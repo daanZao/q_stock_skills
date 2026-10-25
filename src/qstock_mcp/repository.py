@@ -427,7 +427,8 @@ BOARD_SECTION_TABLES: dict[str, list[tuple[str, str, tuple, tuple]]] = {
     ],
     "lhb": [
         ("lhb_basic", "trade_date", ("stock_code", "lhb_reason"), LHB_BASIC_FIELDS),
-        ("lhb_stock_statistic", "trade_date", ("stock_code",), LHB_STATISTIC_FIELDS),
+        # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内
+        # lhb_basic 滚动自算，见 recompute_lhb_statistic（tools_board 落库后调用）
         ("lhb_yyb_capital", "fetch_date", ("seat_name",), LHB_YYB_CAPITAL_FIELDS),
         ("lhb_yyb_most", "fetch_date", ("seat_name",), LHB_YYB_MOST_FIELDS),
     ],
@@ -478,6 +479,60 @@ def upsert_board_rows(
         )
     conn.commit()
     return len(values)
+
+
+# ---------------------------------------------------------------- lhb 统计子表（库内自算）
+
+# statistic 滚动窗口：近 60 日历日（承接原新浪 ggtj「近 60 日」窗口语义；
+# issue #114 code-review 修正：交易所官方源覆盖 statistic 两表口径，
+# 新浪 ggtj 回归 --check 对拍校验位，不再承载落库）
+LHB_STATISTIC_WINDOW_DAYS = 60
+
+_LHB_STATISTIC_INSERT_SQL = """
+INSERT INTO lhb_stock_statistic (
+    trade_date, stock_code, stock_name,
+    appear_count_3m, buy_amount_3m, sell_amount_3m, net_buy_3m,
+    buy_seat_count, sell_seat_count, updated_at
+)
+SELECT %s, stock_code, MAX(stock_name), COUNT(*),
+       SUM(buy_amount), SUM(sell_amount), SUM(net_buy_amount),
+       NULL, NULL, CURRENT_TIMESTAMP
+FROM lhb_basic
+WHERE trade_date >= %s AND trade_date <= %s
+GROUP BY stock_code
+"""
+
+
+def recompute_lhb_statistic(conn, trade_date: str) -> int:
+    """lhb_stock_statistic 库内滚动自算（issue #114 定稿口径）：以 lhb_basic
+    近 60 日历日窗口（含当日）按股聚合——appear=行数（业务键含 lhb_reason，
+    同股当日多榜单各计一次）、buy/sell/net=窗口合计（万元，ADR 0006）。
+    先删当日快照再插入：幂等可重跑，窗口滑出/上游修订自愈（旧快照股票不再
+    入窗即删除，不残留）。buy/sell_seat_count 恒 NULL：官方汇总无席位计数
+    来源、不伪造（lhb_stock_detail 接线后才可派生）。返回写入行数。"""
+    window_start = add_days(trade_date, -LHB_STATISTIC_WINDOW_DAYS)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM lhb_stock_statistic WHERE trade_date = %s",
+                    (trade_date,))
+        cur.execute(
+            _LHB_STATISTIC_INSERT_SQL,
+            (trade_date, window_start, trade_date),
+        )
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
+def select_lhb_statistic(conn, trade_date: str) -> list[dict]:
+    """读某日 statistic 自算快照（`lhb --check` 对拍的库内侧；纯读）。"""
+    cols = ("trade_date",) + LHB_STATISTIC_FIELDS
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(cols)} FROM lhb_stock_statistic"
+            " WHERE trade_date = %s ORDER BY stock_code",
+            (trade_date,),
+        )
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 _BOARD_HISTORY_COLS = ("trade_date",) + BOARD_FIELDS

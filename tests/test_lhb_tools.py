@@ -41,14 +41,8 @@ EXCHANGE_LHB = {
             "day_amount": 4461.78,
         },
     ],
-    "lhb_stock_statistic": [
-        {
-            "trade_date": TODAY, "stock_code": "002281", "stock_name": "光迅科技",
-            "appear_count_3m": 3, "buy_amount_3m": 912693.89,
-            "sell_amount_3m": 533110.91, "net_buy_3m": 379582.98,
-            "buy_seat_count": 6, "sell_seat_count": 5,
-        }
-    ],
+    # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内 lhb_basic
+    # 近 60 日历日窗口滚动自算
     "lhb_yyb_capital": [],
     "lhb_yyb_most": [],
 }
@@ -64,8 +58,8 @@ class FakeLhbAdapter:
     def fetch_lhb(self, trade_date):
         if self._exc is not None:
             raise self._exc
-        # 行级 trade_date 以请求日为准（生产语义：上榜日=请求交易日；statistic
-        # 快照日=采集执行日）——深度复制后盖戳，避免跨日用例互相污染
+        # 行级 trade_date 以请求日为准（生产语义：上榜日=请求交易日）——
+        # 深度复制后盖戳，避免跨日用例互相污染
         return {
             table: [
                 dict(row, trade_date=trade_date) if isinstance(row, dict) else row
@@ -79,12 +73,15 @@ class FakeLhbAdapter:
 class FakeSina:
     name = "sina_lhb_fake"
 
-    def __init__(self, rows=None, exc=None, seat_exc=None, seat_nets=None):
+    def __init__(self, rows=None, exc=None, seat_exc=None, seat_nets=None,
+                 ggtj_rows=None, ggtj_exc=None):
         self._rows = rows if rows is not None else []
         self._exc = exc
         self._seat_exc = seat_exc
         # {code: 净买额万元}：脚本化席位净额，驱动 net_buy 对拍的 ok/diff 路径
         self._seat_nets = seat_nets or {}
+        self._ggtj_rows = ggtj_rows
+        self._ggtj_exc = ggtj_exc
         self.seat_calls = []
 
     def daily_detail(self, trade_date):
@@ -103,6 +100,12 @@ class FakeSina:
                     "sell": [{"buy_wan": 0.0, "sell_wan": 0.0}]}
         return {"buy": [{"buy_wan": 0.0, "sell_wan": 0.0}],
                 "sell": [{"buy_wan": 0.0, "sell_wan": -net}]}
+
+    def ggtj(self):
+        """ggtj 统计窗口（对拍校验位）；None 缺省 = 上游无数据。"""
+        if self._ggtj_exc is not None:
+            raise self._ggtj_exc
+        return list(self._ggtj_rows or [])
 
 
 def _matched_sina():
@@ -150,14 +153,20 @@ def _ledger(dsn):
 def test_fetch_lhb_day_lands_all_tables(pg_ready):
     r = fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter()])
     assert r["status"] == "ok" and r["lhb"]["status"] == "ok"
-    assert r["lhb"]["rows"] == 3  # basic 2 + statistic 1
+    assert r["lhb"]["rows"] == 4  # basic 2 + statistic 自算 2
     assert _count(pg_ready, "lhb_basic") == 2
-    assert _count(pg_ready, "lhb_stock_statistic") == 1
-    # 业务键含 lhb_reason：同股当日多榜单多行；day_amount 为适配器元数据键，
-    # 非落库列（upsert 只写 LHB_BASIC_FIELDS，列不存在即证明被忽略）
+    # statistic 库内自算（issue #114 定稿）：近 60 日历日窗口按股聚合；
+    # day_amount 为适配器元数据键，非落库列（upsert 只写 LHB_BASIC_FIELDS，
+    # 列不存在即证明被忽略）；业务键含 lhb_reason：同股当日多榜单多行
     conn = psycopg2.connect(pg_ready)
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stock_code, appear_count_3m, buy_amount_3m,"
+                "       sell_amount_3m, net_buy_3m, buy_seat_count"
+                " FROM lhb_stock_statistic ORDER BY stock_code"
+            )
+            stat = cur.fetchall()
             cur.execute(
                 "SELECT stock_code, buy_amount FROM lhb_basic ORDER BY stock_code"
             )
@@ -169,12 +178,18 @@ def test_fetch_lhb_day_lands_all_tables(pg_ready):
             assert cur.fetchone()[0] == 0
     finally:
         conn.close()
+    assert stat == [
+        ("000530", 1, pytest.approx(3601.5072), pytest.approx(5168.9716),
+         pytest.approx(-1567.4644), None),  # 席位计数自算恒 NULL（不伪造）
+        ("600302", 1, pytest.approx(293.5474), pytest.approx(352.2574),
+         pytest.approx(-58.71), None),
+    ]
     assert got == [
         ("000530", pytest.approx(3601.5072)),
         ("600302", pytest.approx(293.5474)),
     ]
     # 台账：lhb section 由 tools_board 内联记录
-    assert ("lhb", "ok", "exchange_fake", 3) in _ledger(pg_ready)
+    assert ("lhb", "ok", "exchange_fake", 4) in _ledger(pg_ready)
 
 
 def test_fetch_lhb_day_empty_is_ok_with_note(pg_ready):
@@ -183,6 +198,7 @@ def test_fetch_lhb_day_empty_is_ok_with_note(pg_ready):
     assert r["lhb"]["status"] == "ok"
     assert r["lhb"]["empty_kind"] == "no_data_for_date"
     assert _count(pg_ready, "lhb_basic") == 0
+    assert _count(pg_ready, "lhb_stock_statistic") == 0  # 窗口无历史，自算零行
     assert ("lhb", "empty", "exchange_fake", 0) in _ledger(pg_ready)
 
 
@@ -197,14 +213,15 @@ def test_fetch_lhb_day_failure_structured(pg_ready):
 def test_fetch_lhb_day_partial_error_lands_rows(pg_ready):
     partial = {
         **EXCHANGE_LHB,
-        "lhb_stock_statistic": [],  # 子项失败：无行 + errors 记录原因
-        "errors": ["lhb_stock_statistic: sina 改版"],
+        "lhb_yyb_capital": [],  # 子项失败：无行 + errors 记录原因
+        "errors": ["lhb_yyb_capital: 同花顺改版"],
     }
     r = fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter(payload=partial)])
     assert r["lhb"]["status"] == "ok"
-    assert "sina 改版" in r["lhb"]["partial_error"]
+    assert "同花顺改版" in r["lhb"]["partial_error"]
     assert _count(pg_ready, "lhb_basic") == 2
-    assert _count(pg_ready, "lhb_stock_statistic") == 0
+    # statistic 自算不受 yyb 子项失败影响（由 lhb_basic 派生）
+    assert _count(pg_ready, "lhb_stock_statistic") == 2
 
 
 # ---------------------------------------------------------------- backfill
@@ -451,3 +468,139 @@ def test_parity_multi_reason_code_noted_not_mismatch(pg_ready):
     (entry,) = r["results"]
     assert entry["status"] == "ok" and "多榜单同股" in entry["note"]
     assert entry["exchange"]["net_buy_amount"] == pytest.approx(-1567.4644)  # 首行原值仍在
+
+
+# ---------------------------------------------------------------- statistic 库内自算
+
+
+def test_statistic_selfcalc_rolling_window(pg_ready):
+    """自算口径（issue #114 定稿）：近 60 日历日窗口（含当日）按股聚合——
+    appear=窗口行数（同股当日多榜单各计一次），金额=窗口合计；回溯逐日快照
+    各自独立；重跑幂等（DELETE+INSERT 自愈）。"""
+    r = fetch_lhb_backfill("2026-08-03", "2026-08-07",
+                           lhb_adapters=[FakeLhbAdapter()])
+    assert r["status"] == "ok" and r["total_days"] == 5
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date, stock_code, appear_count_3m"
+                " FROM lhb_stock_statistic ORDER BY trade_date, stock_code"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    # 逐日快照：08-03 起每日窗口含全部回溯日，appear 按日累计 1→5
+    assert len(rows) == 5 * 2  # 5 日 × 2 股
+    by_day = {}
+    for d, code, n in rows:
+        by_day.setdefault(d, {})[code] = n
+    for i, d in enumerate(["20260803", "20260804", "20260805", "20260806",
+                           "20260807"]):
+        assert by_day[d] == {"000530": i + 1, "600302": i + 1}
+    # 重跑末日：快照行数不变、计数不变（幂等自愈）
+    fetch_lhb_day("2026-08-07", lhb_adapters=[FakeLhbAdapter()])
+    assert _count(pg_ready, "lhb_stock_statistic") == 10
+    assert _count(pg_ready, "lhb_basic") == 10
+
+
+def test_statistic_selfcalc_window_excludes_old_history(pg_ready):
+    """窗口滑出：早于 [交易日-60 日历日] 的上榜记录不入当日快照。"""
+    fetch_lhb_day("20260820", lhb_adapters=[FakeLhbAdapter()])  # >TODAY-60 之外
+    fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter()])
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date, appear_count_3m FROM lhb_stock_statistic"
+                " WHERE stock_code = '000530' ORDER BY trade_date"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    assert rows == [("20260820", 1), (TODAY, 1)]  # 0820 行不入 TODAY 窗口
+
+
+def test_statistic_selfcalc_multi_reason_counts_each_row(pg_ready):
+    """业务键含 lhb_reason：同股当日多榜单，appear 按行数各计一次。"""
+    base = EXCHANGE_LHB["lhb_basic"][0]
+    multi = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [
+            dict(base, lhb_reason="日价格振幅达到20.33%"),
+            dict(base, lhb_reason="日换手率达到38.59%"),
+            EXCHANGE_LHB["lhb_basic"][1],
+        ],
+    }
+    fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter(payload=multi)])
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stock_code, appear_count_3m, buy_amount_3m"
+                " FROM lhb_stock_statistic ORDER BY stock_code"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        ("000530", 2, pytest.approx(3601.5072 * 2)),
+        ("600302", 1, pytest.approx(293.5474)),
+    ]
+
+
+# ---------------------------------------------------------------- statistic 对拍（ggtj 校验位）
+
+
+def _ggtj_rows():
+    return [
+        {"stock_code": "000530", "stock_name": "冰山冷热",
+         "appear_count_3m": 1, "buy_amount_3m": 3601.5072,
+         "sell_amount_3m": 5168.9716, "net_buy_3m": -1567.4644,
+         "buy_seat_count": 2, "sell_seat_count": 2},
+        {"stock_code": "600302", "stock_name": "ST标准",
+         "appear_count_3m": 1, "buy_amount_3m": 293.5474,
+         "sell_amount_3m": 352.2574, "net_buy_3m": -58.71,
+         "buy_seat_count": 1, "sell_seat_count": 1},
+        {"stock_code": "002281", "stock_name": "光迅科技",
+         "appear_count_3m": 3, "buy_amount_3m": 912693.89,
+         "sell_amount_3m": 533110.91, "net_buy_3m": 379582.98,
+         "buy_seat_count": 6, "sell_seat_count": 5},
+    ]
+
+
+def test_statistic_parity_match_and_set_diff(pg_ready):
+    """ggtj 校验位对拍：库内自算快照 vs 新浪 ggtj 逐股对照；集合差信息级。"""
+    fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter()])
+    r = compare_lhb_sources(TODAY, exchange=FakeLhbAdapter(),
+                            sina=FakeSina(ggtj_rows=_ggtj_rows()))
+    st = r["statistic"]
+    assert st["db"] == {"status": "ok", "row_count": 2}
+    assert st["sina_ggtj"] == {"status": "ok", "row_count": 3}
+    assert st["mismatch_count"] == 0 and r["status"] == "ok"
+    # ggtj 有 002281 而库内无（该股未落库）→ sina_only 信息级，不算失败
+    assert st["stock_set_diff"]["sina_only"] == ["002281"]
+    assert st["stock_set_diff"]["db_only"] == []
+    # 席位计数 ggtj 侧有值、自算恒 NULL：不参与比对（note 声明）
+    assert "seat_count" in st["note"]
+
+
+def test_statistic_parity_mismatch_counts_into_overall(pg_ready):
+    fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter()])
+    ggtj = _ggtj_rows()
+    ggtj[0] = {**ggtj[0], "appear_count_3m": 2}  # 上榜次数不符
+    r = compare_lhb_sources(TODAY, exchange=FakeLhbAdapter(),
+                            sina=FakeSina(ggtj_rows=ggtj))
+    assert r["statistic"]["mismatch_count"] == 1
+    assert r["status"] == "mismatch"  # 整体状态吸收 statistic 差异
+    (entry,) = [x for x in r["statistic"]["results"]
+                if x["stock_code"] == "000530"]
+    assert entry["diffs"][0]["field"] == "appear_count_3m"
+
+
+def test_statistic_parity_ggtj_failure_not_overall_error(pg_ready):
+    """校验位单侧失败只记该侧（与 basic 对拍同构），不判整体失败。"""
+    r = compare_lhb_sources(TODAY, exchange=FakeLhbAdapter(),
+                            sina=FakeSina(ggtj_exc=FetchError("ggtj boom")))
+    assert r["statistic"]["sina_ggtj"]["status"] == "error"
+    assert r["status"] == "ok"

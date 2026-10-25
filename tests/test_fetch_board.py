@@ -49,7 +49,8 @@ def test_fetch_all_sections_land_and_report(pg_test):
         "boards": len(BOARD_ROWS),
         "zt_pool": len(ZT_POOL_ROWS),
         "strong_stocks": len(STRONG_ROWS),
-        "lhb": sum(len(v) for v in LHB_ROWS.values()),
+        # lhb：适配器三子表 + statistic 库内自算 1 行（basic 1 股入 60 日窗）
+        "lhb": sum(len(v) for v in LHB_ROWS.values()) + 1,
     }
     for section, n in expected_rows.items():
         expected = {
@@ -67,7 +68,8 @@ def test_fetch_all_sections_land_and_report(pg_test):
     assert _count(pg_test, "zt_pool") == len(ZT_POOL_ROWS)
     assert _count(pg_test, "strong_stocks") == len(STRONG_ROWS)
     assert _count(pg_test, "lhb_basic") == len(LHB_ROWS["lhb_basic"])
-    assert _count(pg_test, "lhb_stock_statistic") == len(LHB_ROWS["lhb_stock_statistic"])
+    # statistic 库内自算（issue #114 定稿）：basic 1 股入窗 → 1 快照行
+    assert _count(pg_test, "lhb_stock_statistic") == 1
     assert _count(pg_test, "lhb_yyb_capital") == len(LHB_ROWS["lhb_yyb_capital"])
     assert _count(pg_test, "lhb_yyb_most") == len(LHB_ROWS["lhb_yyb_most"])
 
@@ -216,7 +218,8 @@ def test_fetch_repeated_is_idempotent_and_updates_values(pg_test):
         ("zt_pool", len(ZT_POOL_ROWS)),
         ("strong_stocks", len(STRONG_ROWS)),
         ("lhb_basic", len(LHB_ROWS["lhb_basic"])),
-        ("lhb_stock_statistic", len(LHB_ROWS["lhb_stock_statistic"])),
+        # statistic 库内自算：basic 1 股入窗 → 1 快照行（重跑 DELETE+INSERT 仍 1）
+        ("lhb_stock_statistic", 1),
         ("lhb_yyb_capital", len(LHB_ROWS["lhb_yyb_capital"])),
         ("lhb_yyb_most", len(LHB_ROWS["lhb_yyb_most"])),
     ]:

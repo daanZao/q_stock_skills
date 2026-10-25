@@ -232,18 +232,8 @@ LHB_ROWS = {
             "total_amount": 3.0e8,
         }
     ],
-    "lhb_stock_statistic": [
-        {
-            "stock_code": "600519",
-            "stock_name": "贵州茅台",
-            "appear_count_3m": 3,
-            "buy_amount_3m": 5.0e8,
-            "sell_amount_3m": 3.0e8,
-            "net_buy_3m": 2.0e8,
-            "buy_seat_count": 2,
-            "sell_seat_count": 1,
-        }
-    ],
+    # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内 lhb_basic
+    # 滚动自算，fake 数据无需提供
     "lhb_yyb_capital": [
         {"rank": 1, "seat_name": "机构专用", "total_amount": 1.0e9, "buy_amount": 6.0e8}
     ],
