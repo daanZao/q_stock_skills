@@ -314,6 +314,3 @@ class BaostockAdapter:
         self, board_type: str, board_name: str, start: str, end: str
     ) -> list[dict]:
         self._unsupported_board("board_history")
-
-    def fetch_board_cons(self, board_name: str) -> list[dict]:
-        self._unsupported_board("board_cons")

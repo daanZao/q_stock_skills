@@ -10,7 +10,6 @@ import logging
 from ._board_em import (
     map_board_history_rows,
     map_board_rows,
-    map_cons_rows,
     map_index_rows,
     map_lhb_basic_rows,
     map_lhb_statistic_rows,
@@ -281,17 +280,6 @@ class AkshareAdapter:
         if df is None or df.empty:
             return []
         return map_board_history_rows(df.to_dict("records"), board_type, board_name)
-
-    def fetch_board_cons(self, board_name: str) -> list[dict]:
-        """概念板块成分（cons 接口）：stock_board_concept_cons_em 按板块名。"""
-        ak = import_akshare()
-        try:
-            df = ak.stock_board_concept_cons_em(symbol=board_name)
-        except Exception as e:
-            raise FetchError(f"akshare 概念成分抓取失败（{board_name}）: {e}") from e
-        if df is None or df.empty:
-            return []
-        return map_cons_rows(df.to_dict("records"))
 
 
 # ---------------------------------------------------------------- 百度股市通估值（issue #115）

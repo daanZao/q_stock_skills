@@ -1,10 +1,9 @@
-"""backfill 子命令与概念成分积累测试（issue #84，spec #71/W5）。
+"""backfill 子命令测试（issue #84，spec #71/W5）。
 
 backfill：push2his 板块 K 线同口径回补行业+概念板块历史入 market_boards
 （CLI 专用路径，不经 fetch 工具的历史日期防线）；回补行带 source='push2his'
 标注，与实时采集行（source 为 NULL）可区分；业务键幂等可重跑。
-概念成分积累：东财健康时概念板块成分（cons）积累入成分字典
-（sw_industry_class，source_system='em'），独立成败落台账、不拖垮主批。
+概念成分积累（accumulate_em_concepts）已随概念维度退役摘除（issue #119）。
 """
 
 import json
@@ -19,7 +18,7 @@ from qstock_mcp.adapters.base import FetchError
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.ledger import record_collection
 from qstock_mcp.repository import BOARD_SECTION_TABLES, upsert_board_rows
-from qstock_mcp.tools_backfill import accumulate_em_concepts, fetch_boards_backfill
+from qstock_mcp.tools_backfill import fetch_boards_backfill
 from fakes import FakeBoardAdapter, FakeBoardHistoryAdapter, _board_history_row
 
 _TZ8 = timezone(timedelta(hours=8))
@@ -110,19 +109,6 @@ def _record_backfill_ledger(dsn, btype, bname, start, end, status="ok"):
             source="push2his", rows=3,
             detail=f"backfill {btype}/{bname} {start}~{end} fetch_source=fake",
         )
-    finally:
-        conn.close()
-
-
-def _cons_rows(dsn):
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT source_system, stock_code, board_code, effective_date"
-                " FROM sw_industry_class ORDER BY stock_code"
-            )
-            return cur.fetchall()
     finally:
         conn.close()
 
@@ -323,53 +309,6 @@ class TestBackfill:
         assert sorted(out2["skipped_boards"]) == sorted(["酿酒行业", "白酒概念"])
 
 
-class TestConsAccumulation:
-    def test_cons_rows_land(self, pg_ready):
-        _seed_realtime_boards(pg_ready)
-        fake = FakeBoardHistoryAdapter(cons={"白酒概念": [
-            {"stock_code": "600519"}, {"stock_code": "000858"}]})
-        out = accumulate_em_concepts(
-            trade_date=END, adapters=[fake], now=NOW)
-        assert out["status"] == "ok"
-        assert out["boards"] == 1  # 仅概念板块
-        assert out["rows"] == 2
-        rows = _cons_rows(pg_ready)
-        assert rows == [
-            ("em", "000858", "BK0816", datetime(2026, 10, 16).date()),
-            ("em", "600519", "BK0816", datetime(2026, 10, 16).date()),
-        ]
-
-    def test_cons_rerun_idempotent(self, pg_ready):
-        _seed_realtime_boards(pg_ready)
-        fake = FakeBoardHistoryAdapter()
-        accumulate_em_concepts(trade_date=END, adapters=[fake], now=NOW)
-        out = accumulate_em_concepts(trade_date=END, adapters=[fake], now=NOW)
-        assert out["rows"] == 0  # ON CONFLICT DO NOTHING
-        assert len(_cons_rows(pg_ready)) == 1
-
-    def test_cons_failure_isolated(self, pg_ready):
-        _seed_realtime_boards(pg_ready)
-        fake = FakeBoardHistoryAdapter(fail_cons=("白酒概念",))
-        out = accumulate_em_concepts(trade_date=END, adapters=[fake], now=NOW)
-        assert out["status"] == "error"
-        assert _cons_rows(pg_ready) == []
-        ledger = _ledger(pg_ready, "sw_industry_class")
-        assert ledger[0][1] == "error"
-
-    def test_cons_progress_logged(self, pg_ready, caplog, monkeypatch):
-        """cons 循环与 backfill 同套进度语义（issue #89）：计数阈值触发。"""
-        import qstock_mcp.tools_backfill as tb
-
-        monkeypatch.setattr(tb, "PROGRESS_LOG_EVERY", 1)
-        _seed_realtime_boards(pg_ready)
-        with caplog.at_level(logging.INFO, logger="qstock_mcp.tools_backfill"):
-            accumulate_em_concepts(
-                trade_date=END, adapters=[FakeBoardHistoryAdapter()], now=NOW)
-        msgs = [r.getMessage() for r in caplog.records]
-        assert any("cons 开始：1 个概念板块" in m for m in msgs)
-        assert any("cons 进度 1/1" in m for m in msgs)
-
-
 class TestSchedulerIntegration:
     def test_backfill_subcommand(self, pg_ready, capsys, monkeypatch):
         monkeypatch.setattr(
@@ -399,38 +338,3 @@ class TestSchedulerIntegration:
         out = json.loads(capsys.readouterr().out)
         assert rc == 1
         assert out["aborted"] is True
-
-    def test_close_runs_cons_when_boards_ok(self, pg_ready, capsys):
-        rc = scheduler.main(
-            ["close"], adapters=[FakeBoardAdapter("fake")],
-            cons_adapters=[FakeBoardHistoryAdapter(
-                cons={"白酒概念": [{"stock_code": "600519"}]})])
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 0
-        assert out["cons"]["status"] == "ok"
-        assert out["cons"]["rows"] == 1
-        rows = _cons_rows(pg_ready)
-        assert rows == [("em", "600519", "BK0816",
-                         datetime.strptime(out["trade_date"], "%Y%m%d").date())]
-
-    def test_close_cons_failure_not_blocking(self, pg_ready, capsys):
-        """cons 失败不拖垮主批：主批 section 全 ok 时退出码仍为 0。"""
-        rc = scheduler.main(
-            ["close"], adapters=[FakeBoardAdapter("fake")],
-            cons_adapters=[FakeBoardHistoryAdapter(fail_cons=("白酒概念",))])
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 0
-        assert out["cons"]["status"] == "error"
-        assert out["failed_sections"] == []
-
-    def test_close_cons_skipped_when_boards_failed(self, pg_ready, capsys):
-        """东财不健康（boards 失败）时 cons 不执行。"""
-        cons = FakeBoardHistoryAdapter()
-        rc = scheduler.main(
-            ["close"],
-            adapters=[FakeBoardAdapter("fake", fail_sections=("boards",))],
-            cons_adapters=[cons])
-        out = json.loads(capsys.readouterr().out)
-        assert rc == 1
-        assert out["cons"]["status"] == "skipped"
-        assert cons.cons_calls == []

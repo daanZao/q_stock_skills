@@ -11,7 +11,7 @@ import pytest
 import qstock_mcp.adapters  # noqa: F401 - 导入即装配全局 socket 超时（issue #88）
 
 from qstock_mcp.adapters._eastmoney import _money_cn, map_eastmoney_rows, map_spot_rows, spot_trade_date
-from qstock_mcp.adapters._board_em import map_board_history_rows, map_cons_rows
+from qstock_mcp.adapters._board_em import map_board_history_rows
 from qstock_mcp.adapters.baostock_adapter import (
     BaostockAdapter,
     map_astock_daily_rows,
@@ -359,12 +359,6 @@ def test_board_history_mapping():
         "leading_stock": None,
         "leading_change": None,
     }
-
-
-def test_cons_mapping():
-    rows = map_cons_rows([{"代码": "60519", "名称": "贵州茅台"},
-                          {"代码": "-"}, {"代码": "000858"}])
-    assert rows == [{"stock_code": "060519"}, {"stock_code": "000858"}]
 
 
 def test_zt_pool_mapping_per_pool_type():

@@ -289,22 +289,18 @@ def _board_history_row(d, close=2000.0):
 
 
 class FakeBoardHistoryAdapter:
-    """板块历史回补（push2his）与概念成分（cons）的 fake 源（issue #84）。
+    """板块历史回补（push2his）的 fake 源（issue #84）。
 
     history: {(board_type, board_name): [逐日行]}，缺省回退 default_history；
-    cons: {board_name: [{"stock_code": ...}]}，缺省回退 default_cons；
-    fail_history/fail_cons: 指定板块名抓取即抛 FetchError。
+    fail_history: 指定板块名抓取即抛 FetchError。
     """
 
-    def __init__(self, name="akshare", *, history=None, cons=None,
-                 fail_history=(), fail_cons=()):
+    def __init__(self, name="akshare", *, history=None,
+                 fail_history=()):
         self.name = name
         self._history = history or {}
-        self._cons = cons or {}
         self._fail_history = set(fail_history)
-        self._fail_cons = set(fail_cons)
         self.history_calls = []
-        self.cons_calls = []
 
     def fetch_board_history(self, board_type, board_name, start, end):
         self.history_calls.append((board_type, board_name, start, end))
@@ -315,12 +311,6 @@ class FakeBoardHistoryAdapter:
             rows = [_board_history_row(end)]
         return [dict(r, board_type=board_type, board_name=board_name)
                 for r in rows]
-
-    def fetch_board_cons(self, board_name):
-        self.cons_calls.append(board_name)
-        if board_name in self._fail_cons:
-            raise FetchError(f"{self.name} cons {board_name} boom")
-        return list(self._cons.get(board_name, [{"stock_code": "600519"}]))
 
 
 class FakeBoardAdapter:

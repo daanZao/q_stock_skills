@@ -244,8 +244,7 @@ def test_existing_db_three_value_check_migrated_by_016(pg_test):
 
 
 def _run_close(capsys, adapters):
-    # cons_adapters 缺省空链：概念成分积累（#84）直接失败、不触网
-    rc = scheduler.main(["close"], adapters=adapters, cons_adapters=())
+    rc = scheduler.main(["close"], adapters=adapters)
     return rc, json.loads(capsys.readouterr().out)
 
 

@@ -1,6 +1,6 @@
-"""backfill 与概念成分积累核心层（issue #84，spec #71/W5）。
+"""backfill 核心层（issue #84，spec #71/W5）。
 
-CLI 专用路径（qstock-scheduler backfill / close 的 cons 部分），不经 MCP
+CLI 专用路径（qstock-scheduler backfill），不经 MCP
 协议层，也不经 fetch 工具的历史日期防线（spec 明示"与 W1 防线不冲突"）：
 
 - fetch_boards_backfill：push2his 板块 K 线同口径回补行业+概念板块历史入
@@ -10,17 +10,17 @@ CLI 专用路径（qstock-scheduler backfill / close 的 cons 部分），不经
   板块集；逐板先查台账断点续跑（同板块同窗口已有 ok 台账行则跳过，
   issue #91）；连续 CIRCUIT_BREAKER_CONSECUTIVE_FAILURES 板全源失败即熔断
   中止（issue #90）。盘中禁写延伸：显式 end=当日且交易时段内报错零落库。
-- accumulate_em_concepts：东财健康时（由调用方按 boards section 成败门控）
-  概念板块成分（cons 接口）积累入成分字典 sw_industry_class
-  （source_system='em'，effective_date=当日，ON CONFLICT DO NOTHING）。
-
-两者均逐板块独立成败、逐板块/整体落采集台账，单板块失败不中断。
-
 - fetch_sw_boards_backfill（issue #118，spec #111）：申万官网 trend 指数全
   历史（1999 起）回补申万双级口径行入 market_boards（source='swsresearch'），
   板块历史深度直达 1999、解除 5/10 日涨跌"自落库日起积累"限制；申万官网
   current 接口取板块清单，逐板断点续跑/熔断/进度与东财回补同机制，台账
   detail 前缀 sw-backfill 互不串扰。调度入口 scheduler backfill --source sw。
+
+两者均逐板块独立成败、逐板块/整体落采集台账，单板块失败不中断。
+
+概念成分积累（accumulate_em_concepts，issue #84）已随概念维度退役摘除
+（issue #119：THS 概念成分端点准入闸未过，按 #106 弃用方案实施；em 成分
+字典存量行保留只读）。
 """
 
 import logging
@@ -28,10 +28,9 @@ from datetime import datetime, timezone
 from time import monotonic
 from typing import Sequence
 
-from .adapters import BoardConsAdapter, BoardHistoryAdapter, default_adapters
+from .adapters import BoardHistoryAdapter, default_adapters
 from .dates import (
     add_days,
-    dash_date,
     is_trading_time,
     normalize_date,
     prev_trading_day,
@@ -41,7 +40,6 @@ from .db import connect
 from .fetch_chain import (
     AllSourcesFailed,
     aggregate_error_kind,
-    fetch_board_cons_with_fallback,
     fetch_board_history_with_fallback,
     fetch_sw_board_history_with_fallback,
     fetch_sw_board_list_with_fallback,
@@ -52,7 +50,6 @@ from .output import error as _error
 from .repository import (
     select_distinct_boards,
     upsert_board_history,
-    upsert_em_cons,
 )
 
 log = logging.getLogger(__name__)
@@ -242,74 +239,6 @@ def fetch_boards_backfill(
         out["aborted"] = True
         out["abort_reason"] = abort_reason
     return out
-
-
-def accumulate_em_concepts(
-    trade_date: str | None = None,
-    adapters: Sequence[BoardConsAdapter] | None = None,
-    now=None,
-) -> dict:
-    """概念成分积累：当日 market_boards 概念板块逐板抓成分，入成分字典
-    （source_system='em'）。逐板独立成败；整体落一行台账。"""
-    tool = "accumulate_em_concepts"
-    params = {"trade_date": trade_date}
-    try:
-        target = normalize_date(trade_date) if trade_date else today_str(now)
-    except ValueError as e:
-        return _error(tool, params, str(e))
-    if adapters is None:
-        adapters = default_adapters()
-    effective = dash_date(target)  # date 列
-    conn, err = connect()
-    if err:
-        return _error(tool, params, err)
-    started = datetime.now(timezone.utc)
-    try:
-        boards = [
-            b for b in select_distinct_boards(conn, trade_date=target)
-            if b["board_type"] == "concept" and b["board_code"]
-        ]
-        inserted = 0
-        failed: list[str] = []
-        log.info("cons 开始：%d 个概念板块", len(boards))
-        last_logged = monotonic()
-        for i, b in enumerate(boards, 1):
-            try:
-                r = fetch_board_cons_with_fallback(adapters, b["board_name"])
-            except AllSourcesFailed as e:
-                log.warning("概念成分抓取失败 %s: %s", b["board_name"], e)
-                failed.append(b["board_name"])
-            else:
-                inserted += upsert_em_cons(
-                    conn,
-                    [{"stock_code": m["stock_code"], "board_code": b["board_code"]}
-                     for m in r["rows"]],
-                    effective,
-                )
-            now_m = monotonic()
-            if _progress_due(i, len(boards), last_logged, now_m):
-                last_logged = now_m
-                log.info("cons 进度 %d/%d：失败 %d、累计写入 %d 行",
-                         i, len(boards), len(failed), inserted)
-        status = aggregate_batch_status(len(boards), len(failed))
-        record_collection(
-            conn, trade_date=target, section="sw_industry_class",
-            status="error" if status == "error" else "ok",
-            source="em", rows=inserted,
-            detail=f"cons boards={len(boards)} failed={len(failed)}",
-            started_at=started,
-        )
-    finally:
-        conn.close()
-    return {
-        "status": status,
-        "tool": tool,
-        "params": params,
-        "trade_date": target,
-        "boards": len(boards),
-        "rows": inserted,
-        **({"failed_boards": failed} if failed else {}),
-    }
 
 
 def fetch_sw_boards_backfill(
