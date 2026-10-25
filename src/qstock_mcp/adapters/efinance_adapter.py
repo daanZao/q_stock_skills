@@ -125,6 +125,3 @@ class EfinanceAdapter:
         self, board_type: str, board_name: str, start: str, end: str
     ) -> list[dict]:
         self._unsupported("board_history")
-
-    def fetch_board_cons(self, board_name: str) -> list[dict]:
-        self._unsupported("board_cons")

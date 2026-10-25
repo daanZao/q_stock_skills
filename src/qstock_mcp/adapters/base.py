@@ -348,18 +348,6 @@ class BoardHistoryAdapter(Protocol):
     ) -> list[dict]: ...
 
 
-class BoardConsAdapter(Protocol):
-    """板块成分（issue #84 概念成分积累）协议：按板块名取成分股列表。
-
-    返回行至少含 stock_code；空列表表示该板块无成分，不是错误；不支持的源
-    抛 FetchError(kind="unsupported")。
-    """
-
-    name: str
-
-    def fetch_board_cons(self, board_name: str) -> list[dict]: ...
-
-
 class AStockDailyAdapter(Protocol):
     """全市场单日 A 股日线一把抓（issue #83 次晨批）协议：trade_date 为 yyyymmdd。
 
@@ -411,11 +399,10 @@ class DataAdapter(
     ListAdapter,
     IndexDailyAdapter,
     BoardHistoryAdapter,
-    BoardConsAdapter,
     Protocol,
 ):
     """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单、指数日线与
-    板块历史/成分的适配器（fallback 链元素类型）。"""
+    板块历史的适配器（fallback 链元素类型）。"""
 
 
 def is_bse_code(stock_code: str) -> bool:

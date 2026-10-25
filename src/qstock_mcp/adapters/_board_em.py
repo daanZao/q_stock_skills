@@ -254,14 +254,3 @@ def map_board_history_rows(
             }
         )
     return rows
-
-
-def map_cons_rows(records: list[dict]) -> list[dict]:
-    """概念板块成分（cons 接口，issue #84）：提取 stock_code（补零 6 位）。"""
-    rows = []
-    for r in records:
-        code = _text(r.get("代码"))
-        if code is None:
-            continue
-        rows.append({"stock_code": code.zfill(6)})
-    return rows

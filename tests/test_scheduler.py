@@ -30,9 +30,8 @@ def pg_ready(pg_test):
     return pg_test
 
 
-def _run(capsys, argv, adapters=None, cons_adapters=()):
-    # cons_adapters 缺省空链：概念成分积累（#84）直接失败、不触网
-    rc = scheduler.main(argv, adapters=adapters, cons_adapters=cons_adapters)
+def _run(capsys, argv, adapters=None):
+    rc = scheduler.main(argv, adapters=adapters)
     out = json.loads(capsys.readouterr().out)
     return rc, out
 

@@ -540,33 +540,6 @@ def select_distinct_boards(conn, trade_date: str | None = None) -> list[dict]:
         ]
 
 
-def upsert_em_cons(conn, rows: list[dict], effective_date: str) -> int:
-    """概念成分积累入成分字典（issue #84）：source_system='em'，
-    ON CONFLICT DO NOTHING（point-in-time 行已存在则不动），返回新插入行数。
-
-    rows 元素：{"stock_code": ..., "board_code": ...}；effective_date 为
-    yyyy-mm-dd（PG date 列）。
-    """
-    values = [
-        ("em", row["stock_code"], row["board_code"], effective_date)
-        for row in rows
-    ]
-    if not values:
-        return 0
-    with conn.cursor() as cur:
-        execute_values(
-            cur,
-            "INSERT INTO sw_industry_class"
-            " (source_system, stock_code, board_code, effective_date)"
-            " VALUES %s ON CONFLICT DO NOTHING",
-            values,
-            template="(%s, %s, %s, %s)",
-        )
-        inserted = cur.rowcount
-    conn.commit()
-    return inserted
-
-
 # 可查询的盘面表 → (日期列, 代码列)；表名/列名为内部常量。lhb_stock_detail 无业务
 # 唯一键（忠于 appdb），仅随父表存在，供查询。
 BOARD_QUERY_TABLES: dict[str, tuple[str, str]] = {

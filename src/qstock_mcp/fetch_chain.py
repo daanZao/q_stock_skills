@@ -1,7 +1,7 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
 只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section> /
-fetch_fundamentals / fetch_index_daily / fetch_board_history / fetch_board_cons），
+fetch_fundamentals / fetch_index_daily / fetch_board_history），
 不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖
 fallback 顺序、重试次数、全失败报错。
 
@@ -20,7 +20,6 @@ from typing import Callable, Sequence
 
 from .adapters.base import (
     BoardAdapter,
-    BoardConsAdapter,
     BoardHistoryAdapter,
     DailyAdapter,
     FundamentalsAdapter,
@@ -305,24 +304,6 @@ def fetch_board_history_with_fallback(
     r = _with_fallback(
         adapters,
         lambda a: a.fetch_board_history(board_type, board_name, start, end),
-        max_retries,
-    )
-    return {
-        "rows": r["result"],
-        "source": r["source"],
-        "attempted_sources": r["attempted_sources"],
-    }
-
-
-def fetch_board_cons_with_fallback(
-    adapters: Sequence[BoardConsAdapter],
-    board_name: str,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-) -> dict:
-    """概念板块成分抓取（issue #84），成功返回 {rows, source, attempted_sources}。"""
-    r = _with_fallback(
-        adapters,
-        lambda a: a.fetch_board_cons(board_name),
         max_retries,
     )
     return {

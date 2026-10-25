@@ -7,11 +7,11 @@
                              tools_board 内联记录，本层不重复落账）。
                              boards 行业段走申万官网单源链（issue #118，
                              spec #111），申万不发布字段以
-                             planned_absent_fields 声明；概念成分积累
-                             （cons → 'em' 体系）随东财概念板块退役不再触发
-                             （申万行无概念板块，该步空转，THS 概念 ticket
-                             若过闸将自建积累）。在册 planned_absent（第四态，
-                             issue #113）的 section 占位通过：响应
+                             planned_absent_fields 声明；概念成分积累已摘除
+                             （概念维度退役，issue #119 准入闸未过，#106
+                             弃用方案：em 成分字典存量行保留只读）。在册
+                             planned_absent（第四态，issue #113）的 section
+                             占位通过：响应
                              status=planned_absent、不计失败、不影响退出码。
                              lhb section 走专用链（交易所官方 → akshare 东财
                              legacy，issue #114）。
@@ -91,7 +91,7 @@ from .output import aggregate_batch_status
 from .repository import select_stock_codes
 from .snapshot_parity import compare_snapshot_sources
 from .sw_board_parity import compare_sw_board_sources
-from .tools_backfill import accumulate_em_concepts, fetch_boards_backfill
+from .tools_backfill import fetch_boards_backfill
 from .tools_backfill import fetch_sw_boards_backfill
 from .tools_board import fetch_board_snapshot
 from .tools_daily import fetch_daily
@@ -108,9 +108,8 @@ def _emit(payload: dict) -> None:
 
 def cmd_close(date_arg: str | None,
               adapters: Sequence[BoardAdapter] | None = None,
-              cons_adapters: Sequence | None = None,
               lhb_adapters: Sequence[BoardAdapter] | None = None) -> int:
-    """收盘后批：五 section 盘面快照 + 概念成分积累。任一 section 失败 exit 1。"""
+    """收盘后批：五 section 盘面快照。任一 section 失败 exit 1。"""
     result = fetch_board_snapshot(
         trade_date=date_arg, sections=list(CLOSE_SECTIONS), adapters=adapters,
         lhb_adapters=lhb_adapters)
@@ -131,18 +130,6 @@ def cmd_close(date_arg: str | None,
         out["error"] = result["error"]
         if result.get("error_kind"):
             out["error_kind"] = result["error_kind"]
-    # 概念成分积累（issue #84）：boards 成功且有行时执行；独立成败落台账，
-    # 不拖垮主批（不影响退出码）。boards 行业段申万承接后（issue #118）
-    # 当日行无 concept 板块，该步空转（0 板块，ok）——东财概念维度已退役，
-    # THS 概念 ticket 若过闸将自建积累路径
-    boards = result["sections"].get("boards") or {}
-    if boards.get("status") == "ok" and boards.get("rows", 0) > 0:
-        cons = accumulate_em_concepts(
-            trade_date=result["trade_date"], adapters=cons_adapters)
-        out["cons"] = {k: v for k, v in cons.items() if k != "tool"}
-    else:
-        out["cons"] = {"status": "skipped",
-                       "reason": "boards section 未成功，跳过概念成分积累"}
     _emit(out)
     return 0 if not failed else 1
 
@@ -549,7 +536,6 @@ def cmd_limitpool(date_arg: str | None, probe: bool = False) -> int:
 
 def main(argv: list[str] | None = None,
          adapters: Sequence[BoardAdapter] | None = None,
-         cons_adapters: Sequence | None = None,
          daily_adapters: Sequence | None = None,
          fundamentals_adapters: Sequence | None = None,
          snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
@@ -560,7 +546,7 @@ def main(argv: list[str] | None = None,
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
     sub = ap.add_subparsers(dest="command", required=True)
     p_close = sub.add_parser(
-        "close", help="收盘后批：盘面五 section 快照采集并落台账（附概念成分积累）")
+        "close", help="收盘后批：盘面五 section 快照采集并落台账")
     p_close.add_argument("--date", default=None,
                          help="交易日 yyyymmdd，缺省当日")
     p_morning = sub.add_parser(
@@ -661,7 +647,6 @@ def main(argv: list[str] | None = None,
     try:
         if args.command == "close":
             return cmd_close(args.date, adapters=adapters,
-                             cons_adapters=cons_adapters,
                              lhb_adapters=lhb_adapters)
         if args.command == "morning":
             return cmd_morning(args.date)
