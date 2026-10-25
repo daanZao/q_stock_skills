@@ -20,6 +20,8 @@ import_sw_industry_meta（issue #74）：申万行业名称表（sw_industry_met
 """
 
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Sequence
 
@@ -31,6 +33,7 @@ from ._sw_classify import (
 from .adapters import (
     DailyAdapter,
     DataAdapter,
+    FetchError,
     SnapshotAdapter,
     default_adapters,
     default_daily_adapters,
@@ -457,6 +460,59 @@ def import_board_classification(source_system: str, file_path: str) -> dict:
         "params": params,
         "stocks": len({r["stock_code"] for r in rows}),
         **counts,
+    }
+
+
+# ------------------------------------------------- refresh_sw_dict（issue #118）
+
+
+def refresh_sw_dict(
+    url: str | None = None,
+    adapters: Sequence | None = None,
+) -> dict:
+    """成分字典在线刷新（issue #118，spec #111）：申万官网分类 xls 直链下载
+    → 解析 → 以文件为准清空重载成分字典 'sw' 体系（含北交所归属）。
+
+    把 issue #73 的"手工下载文件 → import_board_classification"升级为在线
+    刷新（调研结论 3：akshare stock_industry_clf_hist_sw 同一直链的薄封装，
+    本仓库自写下载经 SwBoardsAdapter 协议，复用同一导入入口与事务重载语义，
+    重复执行幂等）。台账由 import_board_classification 内联记录
+    （source='sw'，行数=重载后插入数）。
+    """
+    tool = "refresh_sw_dict"
+    params = {"url": url}
+    if adapters is None:
+        from .adapters.sw_adapter import CLASS_FILE_URL, SwSResearchAdapter
+
+        adapters = [SwSResearchAdapter()]
+        url = url or CLASS_FILE_URL
+    adapter = adapters[0]
+    try:
+        content = adapter.fetch_sw_class_file(url)
+    except FetchError as e:
+        return _error(tool, params, str(e))
+    if not content:
+        return _error(tool, params, "申万分类文件下载为空")
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".xls", prefix="sw_class_", delete=False
+    )
+    try:
+        tmp.write(content)
+        tmp.close()
+        result = import_board_classification("sw", tmp.name)
+    finally:
+        os.unlink(tmp.name)
+    if result.get("status") != "ok":
+        return {**result, "tool": tool, "params": params}
+    return {
+        "status": "ok",
+        "tool": tool,
+        "params": params,
+        "url": url,
+        "source": adapter.name,
+        "stocks": result["stocks"],
+        "deleted": result["deleted"],
+        "inserted": result["inserted"],
     }
 
 

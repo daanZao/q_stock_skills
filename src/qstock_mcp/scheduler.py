@@ -5,20 +5,39 @@
                              strong_stocks/lhb/indices）快照采集，各 section
                              独立成败报告、逐 section 落采集台账（台账由
                              tools_board 内联记录，本层不重复落账）。
-                             boards 成功时附带概念成分积累（cons → 成分字典
-                             'em' 体系）；cons 独立成败落台账、不拖垮主批
-                             （不影响退出码）。在册 planned_absent（第四态，
+                             boards 行业段走申万官网单源链（issue #118，
+                             spec #111），申万不发布字段以
+                             planned_absent_fields 声明；概念成分积累
+                             （cons → 'em' 体系）随东财概念板块退役不再触发
+                             （申万行无概念板块，该步空转，THS 概念 ticket
+                             若过闸将自建积累）。在册 planned_absent（第四态，
                              issue #113）的 section 占位通过：响应
                              status=planned_absent、不计失败、不影响退出码。
                              lhb section 走专用链（交易所官方 → akshare 东财
                              legacy，issue #114）。
   morning [--date YYYYMMDD]  次晨批：baostock 一把抓前一交易日全市场日线
-                             + 7 大指数尾行补漏（tools_morning），默认目标日
-                             为前一交易日。
-  backfill [--start D] [--end D]
-                             板块历史回补：push2his 板块 K 线回补
-                             market_boards（默认窗口 = 前一交易日前推约
-                             3 个月），CLI 专用路径，不经历史日期防线。
+                             + 7 大指数尾行补漏 + 申万板块分析报表估值维度
+                             （sw_board_valuation part，issue #118，T+1），
+                             默认目标日为前一交易日。
+  backfill [--start D] [--end D] [--source em|sw]
+                             板块历史回补：em（缺省）= 东财 push2his 板块
+                             K 线回补 market_boards（默认窗口 = 前一交易日
+                             前推约 3 个月）；sw = 申万官网 trend 指数全历史
+                             回补申万双级口径行（issue #118，默认窗口
+                             19990101~前一交易日，历史深至 1999），回补行
+                             source='swsresearch'。CLI 专用路径，不经历史
+                             日期防线。
+  sw-boards [--date D] [--check] [--level 1|2|all] [--limit N]
+                             申万板块固定入口（issue #118）：默认抓申万
+                             双级实时快照落 market_boards（收盘后调用即当日
+                             收盘截面；与 close 的 boards 段同链，供 boards
+                             单段重跑/冒烟）；--check 三方位对拍（申万官网
+                             vs 库内落库行 vs 库内自算，不落库），--limit
+                             只对拍前 N 个板块（冒烟用）。
+  sw-dict [--url U]          申万成分字典在线刷新（issue #118）：官网分类
+                             xls 直链下载 → 解析 → 清空重载 'sw' 体系
+                             （含北交所归属），复用 import_board_classification
+                             事务语义，幂等可重复。
   daily [--codes A,B] [--all] [--limit N] [--date D | --start D --end D]
         [--adj qfq|hfq|none] [--check] [--throttle SEC]
                              个股日线固定入口（issue #112，spec #111）：
@@ -71,7 +90,9 @@ from .db import connect
 from .output import aggregate_batch_status
 from .repository import select_stock_codes
 from .snapshot_parity import compare_snapshot_sources
+from .sw_board_parity import compare_sw_board_sources
 from .tools_backfill import accumulate_em_concepts, fetch_boards_backfill
+from .tools_backfill import fetch_sw_boards_backfill
 from .tools_board import fetch_board_snapshot
 from .tools_daily import fetch_daily
 from .tools_lhb import compare_lhb_sources, fetch_lhb_backfill, fetch_lhb_day
@@ -110,8 +131,10 @@ def cmd_close(date_arg: str | None,
         out["error"] = result["error"]
         if result.get("error_kind"):
             out["error_kind"] = result["error_kind"]
-    # 概念成分积累（issue #84）：东财健康（boards 成功且有行）时执行；
-    # 独立成败落台账，不拖垮主批（不影响退出码）
+    # 概念成分积累（issue #84）：boards 成功且有行时执行；独立成败落台账，
+    # 不拖垮主批（不影响退出码）。boards 行业段申万承接后（issue #118）
+    # 当日行无 concept 板块，该步空转（0 板块，ok）——东财概念维度已退役，
+    # THS 概念 ticket 若过闸将自建积累路径
     boards = result["sections"].get("boards") or {}
     if boards.get("status") == "ok" and boards.get("rows", 0) > 0:
         cons = accumulate_em_concepts(
@@ -119,7 +142,7 @@ def cmd_close(date_arg: str | None,
         out["cons"] = {k: v for k, v in cons.items() if k != "tool"}
     else:
         out["cons"] = {"status": "skipped",
-                       "reason": "boards section 未成功（东财不健康），跳过概念成分积累"}
+                       "reason": "boards section 未成功，跳过概念成分积累"}
     _emit(out)
     return 0 if not failed else 1
 
@@ -133,10 +156,19 @@ def cmd_morning(date_arg: str | None) -> int:
     return 0 if result.get("status") == "ok" else 1
 
 
-def cmd_backfill(start: str | None, end: str | None) -> int:
-    """板块历史回补：非全 ok（partial_error/error）exit 1。"""
-    result = fetch_boards_backfill(start=start, end=end)
-    out = {"job": "backfill", **result}
+def cmd_backfill(start: str | None, end: str | None,
+                 source: str = "em") -> int:
+    """板块历史回补：非全 ok（partial_error/error）exit 1。
+
+    source=em（缺省）：东财 push2his 同口径回补行业+概念板块；
+    source=sw（issue #118）：申万官网 trend 指数全历史回补申万双级口径行
+    （默认窗口 19990101~前一交易日，历史深至 1999）。
+    """
+    if source == "sw":
+        result = fetch_sw_boards_backfill(start=start, end=end)
+    else:
+        result = fetch_boards_backfill(start=start, end=end)
+    out = {"job": "backfill", "source": source, **result}
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
 
@@ -175,6 +207,60 @@ def cmd_lhb(
     _emit({"job": tool, "mode": "fetch", **result})
     lhb = result.get("lhb") or {}
     return 0 if lhb.get("status") == "ok" else 1
+
+
+def cmd_sw_boards(
+    date_arg: str | None = None,
+    check: bool = False,
+    level: str = "1",
+    limit: int | None = None,
+    adapters: Sequence[BoardAdapter] | None = None,
+) -> int:
+    """申万板块固定入口（issue #118）：快照落库 / 三方位对拍。
+
+    默认（fetch）：抓申万双级实时快照落 market_boards（收盘后调用即当日
+    收盘截面，收盘后批 boards 段同链——申万官网单源，东财已退出 boards 链）；
+    --check：申万官网 vs 库内落库行 vs 库内自算逐板块字段级对拍，不落库
+    （差异列于报告非失败；official 抓取失败才 exit 1）。
+    """
+    tool = "sw-boards"
+    lv: int | str = int(level) if str(level).isdigit() else level
+    if check:
+        result = compare_sw_board_sources(
+            trade_date=date_arg, level=lv, limit=limit, adapters=adapters
+        )
+        _emit({"job": tool, "mode": "check", **result})
+        return 0 if result.get("status") == "ok" else 1
+    result = fetch_board_snapshot(
+        trade_date=date_arg, sections=["boards"], adapters=adapters
+    )
+    failed = result.get("failed_sections")
+    if failed is None:
+        _emit({"status": "error", "job": tool,
+               "error": result.get("error", "未知错误")})
+        return 1
+    out = {
+        "status": "ok" if not failed else "error",
+        "job": tool,
+        "mode": "fetch",
+        "trade_date": result["trade_date"],
+        "boards": result["sections"].get("boards"),
+    }
+    if failed and result.get("error"):
+        out["error"] = result["error"]
+        if result.get("error_kind"):
+            out["error_kind"] = result["error_kind"]
+    _emit(out)
+    return 0 if not failed else 1
+
+
+def cmd_sw_dict(url: str | None = None) -> int:
+    """申万成分字典在线刷新（issue #118）：官网分类 xls → 清空重载 'sw'。"""
+    from .tools_init import refresh_sw_dict
+
+    result = refresh_sw_dict(url=url)
+    _emit({"job": "sw-dict", **result})
+    return 0 if result.get("status") == "ok" else 1
 
 
 def _parse_codes(codes_arg: str | None) -> list[str]:
@@ -423,6 +509,8 @@ def cmd_snapshot(
     out = {"job": tool, "mode": "fetch", **result}
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
+
+
 def cmd_limitpool(date_arg: str | None, probe: bool = False) -> int:
     """涨停池固定入口（issue #120）：zt_pool 三池 THS 抓取 + strong_stocks
     库内自算；--probe 只做封禁探测（不落库、不触库）。
@@ -480,11 +568,27 @@ def main(argv: list[str] | None = None,
     p_morning.add_argument("--date", default=None,
                            help="目标交易日 yyyymmdd，缺省前一交易日")
     p_backfill = sub.add_parser(
-        "backfill", help="板块历史回补：push2his 板块 K 线回补 market_boards")
+        "backfill", help="板块历史回补：push2his（默认）/ 申万官网 trend（--source sw）")
     p_backfill.add_argument("--start", default=None,
-                            help="回补起点 yyyymmdd，缺省 end 前推约 3 个月")
+                            help="回补起点 yyyymmdd；缺省 em=end 前推约 3 个月，sw=19990101")
     p_backfill.add_argument("--end", default=None,
                             help="回补终点 yyyymmdd，缺省前一交易日")
+    p_backfill.add_argument("--source", default="em", choices=("em", "sw"),
+                            help="回补源：em=东财 push2his（缺省），sw=申万官网（issue #118）")
+    p_sw_boards = sub.add_parser(
+        "sw-boards", help="申万板块：双级实时快照落库 / 三方位对拍（--check）")
+    p_sw_boards.add_argument("--date", default=None,
+                             help="交易日 yyyymmdd，缺省当日（收盘后调用即当日收盘截面）")
+    p_sw_boards.add_argument("--check", action="store_true",
+                             help="对拍模式：申万官网 vs 库内落库行 vs 库内自算，不落库")
+    p_sw_boards.add_argument("--level", default="1", choices=("1", "2", "all"),
+                             help="对拍层级（--check 时生效）：1=一级 / 2=二级 / all")
+    p_sw_boards.add_argument("--limit", type=int, default=None,
+                             help="只对拍前 N 个板块（按官网清单序，冒烟用；抓取模式忽略）")
+    p_sw_dict = sub.add_parser(
+        "sw-dict", help="申万成分字典在线刷新：官网分类 xls 清空重载 'sw' 体系")
+    p_sw_dict.add_argument("--url", default=None,
+                           help="分类 xls 直链，缺省申万官网 SwClass2021 文件")
     p_daily = sub.add_parser(
         "daily", help="个股日线：腾讯→新浪→baostock 抓取落库 / 三源对拍")
     p_daily.add_argument("--codes", default=None,
@@ -590,7 +694,17 @@ def main(argv: list[str] | None = None,
                 lhb_adapters=lhb_adapters,
             )
         if args.command == "backfill":
-            return cmd_backfill(args.start, args.end)
+            return cmd_backfill(args.start, args.end, source=args.source)
+        if args.command == "sw-boards":
+            return cmd_sw_boards(
+                date_arg=args.date,
+                check=args.check,
+                level=args.level,
+                limit=args.limit,
+                adapters=adapters,
+            )
+        if args.command == "sw-dict":
+            return cmd_sw_dict(url=args.url)
         if args.command == "fundamentals":
             return cmd_fundamentals(
                 codes_arg=args.codes,

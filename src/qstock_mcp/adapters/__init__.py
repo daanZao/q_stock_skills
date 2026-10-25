@@ -25,6 +25,7 @@ from .base import (
     IndexDailyAdapter,
     ListAdapter,
     SnapshotAdapter,
+    SwBoardsAdapter,
     fetch_failure_kind,
     is_bse_code,
     json_safe,
@@ -45,6 +46,7 @@ __all__ = [
     "IndexDailyAdapter",
     "ListAdapter",
     "SnapshotAdapter",
+    "SwBoardsAdapter",
     "fetch_failure_kind",
     "is_bse_code",
     "json_safe",
@@ -55,6 +57,7 @@ __all__ = [
     "default_index_daily_adapters",
     "default_index_spot_adapters",
     "default_lhb_adapters",
+    "default_boards_adapters",
 ]
 
 
@@ -161,3 +164,16 @@ def default_lhb_adapters() -> list[BoardAdapter]:
     from .lhb_exchange_adapter import ExchangeLhbAdapter
 
     return [ExchangeLhbAdapter(), AkshareAdapter()]
+
+
+def default_boards_adapters() -> list[BoardAdapter]:
+    """boards 行业段 fallback 链（issue #118，spec #111）：申万官网单源。
+
+    申万一级（31）+二级（124）双级实时快照（收盘后末次快照即当日收盘截面）；
+    东财 industry/concept 口径随剔东财退役（concept 维度退役见 #111，
+    行业口径断代不混排）。申万故障时 daily-review 降级用库内自算
+    query_sw_board_daily（spec 决策），故本链无第二承载源。
+    """
+    from .sw_adapter import SwSResearchAdapter
+
+    return [SwSResearchAdapter()]

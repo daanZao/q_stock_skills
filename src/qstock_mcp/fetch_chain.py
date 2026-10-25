@@ -330,3 +330,40 @@ def fetch_board_cons_with_fallback(
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
+
+
+def fetch_sw_board_list_with_fallback(
+    adapters: Sequence,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """申万双级板块清单抓取（issue #118），成功返回 {boards, source, attempted}。"""
+    r = _with_fallback(
+        adapters, lambda a: a.fetch_sw_board_list(), max_retries
+    )
+    return {
+        "boards": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
+
+
+def fetch_sw_board_history_with_fallback(
+    adapters: Sequence,
+    board: dict,
+    start: str,
+    end: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> dict:
+    """申万指数历史 K 线抓取（issue #118 回补），成功返回
+    {rows, source, attempted_sources}。board 为 board_code/board_name/level
+    的 dict（trend 接口按指数代码取数）；空区间返回 [] 视为成功。"""
+    r = _with_fallback(
+        adapters,
+        lambda a: a.fetch_sw_board_history(board, start, end),
+        max_retries,
+    )
+    return {
+        "rows": r["result"],
+        "source": r["source"],
+        "attempted_sources": r["attempted_sources"],
+    }
