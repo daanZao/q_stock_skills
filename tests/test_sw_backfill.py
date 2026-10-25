@@ -245,20 +245,22 @@ def test_cli_backfill_source_sw(pg_ready, capsys, monkeypatch):
     assert len(_board_rows(pg_ready)) == len(SW_BOARD_LIST) * len(WINDOW_DAYS)
 
 
-def test_cli_backfill_source_em_default_unchanged(pg_ready, capsys, monkeypatch):
-    """--source 缺省仍为 em：走东财回补入口（行为不回退）。"""
-    calls = []
-
-    def _spy(start=None, end=None, adapters=None, boards=None, now=None):
-        calls.append("em")
-        return {"status": "ok", "tool": "fetch_boards_backfill",
-                "params": {}, "window": {}, "boards": [],
-                "failed_boards": [], "skipped_boards": []}
-
-    monkeypatch.setattr(scheduler, "fetch_boards_backfill", _spy)
+def test_cli_backfill_default_is_sw(pg_ready, capsys, monkeypatch):
+    """--source 缺省 = sw（issue #121 定稿）：走申万回补入口，不再回落东财。"""
+    monkeypatch.setattr(
+        "qstock_mcp.adapters.sw_adapter.SwSResearchAdapter",
+        lambda *a, **k: _adapter_with_window(),
+    )
     rc = scheduler.main(["backfill", "--start", "20261001", "--end", END])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert out["source"] == "em"
-    assert calls == ["em"]
-    assert _board_rows(pg_ready) == []  # em 路径被 spy 替换，零落库
+    assert out["job"] == "backfill"
+    assert out["source"] == "sw"
+    assert len(_board_rows(pg_ready)) == len(SW_BOARD_LIST) * len(WINDOW_DAYS)
+
+
+def test_cli_backfill_source_em_rejected(pg_ready, capsys):
+    """--source em 已随 issue #121 摘除：argparse 参数错误 exit 2。"""
+    with pytest.raises(SystemExit) as ei:
+        scheduler.main(["backfill", "--source", "em"])
+    assert ei.value.code == 2

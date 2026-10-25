@@ -77,7 +77,7 @@ from typing import Sequence
 
 from ._bse_codes import to_market_code
 from ._daily_common import adjust_param, derive_change_fields
-from ._eastmoney import _int, _num
+from ._num import _int, _num
 from .base import FetchError
 
 log = logging.getLogger(__name__)

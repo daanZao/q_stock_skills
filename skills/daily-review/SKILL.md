@@ -10,6 +10,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 ## 触发与模式
 
 - 由用户手动触发；技能不内置调度，收盘后定时执行的现成配置见末节"调度配置"。
+- **最佳复盘窗口 19:30 之后**（issue #121 落档）：各源当日数据就绪时间线为——腾讯 T+0（收盘后即可得当日行）、申万盘中实时、THS 涨停池盘后、baostock 日 K 约 17:30·复权约 18:00、交易所 lhb 约 16:30–18:00（详见仓库根 README「各源当日数据就绪时间线」）。19:30 前执行 close 模式可能遇 zt_pool 尚未就绪——核心 section 缺数据会走故障中止分支（宁可今日无复盘，不产出残缺复盘）。
 - `mode` 仅两个取值：`close`（默认，收盘后全天复盘）、`midday`（午市盘中复盘，产物须标注午市时点）。
 - 结论类型与模式一一对应：`daily_review.close` / `daily_review.midday`；subject 固定为 `subject_type="market"`、`subject_code="_market"`。
 - 同日两个模式各自独立成行（业务键含 conclusion_type），同日同模式重复跑为 upsert，不产生重复结论；close 不覆盖 midday。
@@ -101,11 +102,22 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 ## 关键证据
 
 - 工具返回：`error_kind` / `retry_advice` / `attempted_sources` 逐源明细（含逐源 failure_kind）原样摘录，区分单源问题与集群性故障。
-- 主机侧可达性复测（在主机执行并附结果）：
+- 主机侧可达性复测（在主机执行并附结果；探针覆盖收盘后批五 section 的承载源与 fallback 链，issue #121 定稿——不再探测东财）：
   ```bash
+  # 腾讯（快照/指数/个股日线主源；200 即通）
+  curl -s -m 8 -o /dev/null -w "%{http_code}\n" "https://qt.gtimg.cn/q=sh000001"
+  # 新浪（快照/指数 fallback 第 2 位；上游校验 Referer，缺省 403）
+  curl -s -m 8 -o /dev/null -w "%{http_code}\n" -H "Referer: https://finance.sina.com.cn" "https://hq.sinajs.cn/list=sh000001"
+  # 申万官网（boards 行业段单源；WAF 要求浏览器 UA，裸 curl 可能 508——带 UA 复测）
+  curl -sk -m 8 -o /dev/null -w "%{http_code}\n" -H "User-Agent: Mozilla/5.0" -H "Referer: https://www.swsresearch.com/institute_sw/allIndex/releasedIndex" "https://www.swsresearch.com/institute-sw/api/index_publish/current/?indextype=%E4%B8%80%E7%BA%A7%E8%A1%8C%E4%B8%9A&page=1&page_size=1"
+  # THS 涨停揭秘 dataapi（zt_pool 单源；WAF 校验浏览器 UA，缺 UA 即 403 非封禁；
+  # 封禁口径 = 带 UA 仍 403/forbidden 页。连续探测会触发风控，仅各测一次）
   curl -s -m 8 -o /dev/null -w "%{http_code}\n" \
-    "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=3&fltt=2&invt=2&fid=f12&fs=m:1+s:2&fields=f12,f14,f2"
-  curl -s -m 8 -o /dev/null -w "%{http_code}\n" "https://quote.eastmoney.com/"
+    -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+    -H "Referer: https://data.10jqka.com.cn/datacenterph/limitup/limtupInfo.html" \
+    "https://data.10jqka.com.cn/dataapi/limit_up/limit_up_pool?page=1&limit=1&field=199112,10,9001"
+  # 交易所官方（lhb 主源，深所 JSON 零鉴权探活）
+  curl -s -m 8 -o /dev/null -w "%{http_code}\n" -H "Referer: https://www.szse.cn/disclosure/deal/public/" "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_xxpl&TABKEY=tab1&PAGENO=1&random=0.1"
   ```
 
 ## 已落库部分
@@ -208,7 +220,7 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），建议�
 
 ## 调度配置
 
-本技能**不内置调度**；本节是给用户自行安装定时任务的现成配置，按需选用其一。定时触发等价于手动触发 close 模式——交易日判断与数据就绪检查由技能自身流程兜底（核心缺失先补抓后重查、故障即中止，见"编排流程""故障中止分支"与"数据缺失红线"），调度侧无需判断交易日、无需等数据就绪。
+本技能**不内置调度**；本节是给用户自行安装定时任务的现成配置，按需选用其一。定时触发等价于手动触发 close 模式——交易日判断与数据就绪检查由技能自身流程兜底（核心缺失先补抓后重查、故障即中止，见"编排流程""故障中止分支"与"数据缺失红线"），调度侧无需判断交易日、无需等数据就绪。样例按收盘后 15:45 唤起给出；**数据最全的复盘窗口是 19:30 之后**（THS 涨停池与 baostock 复权此时均已就绪，见"触发与模式"），追求完整涨停/连板章节可把下方时刻改为 19:35 之后。
 
 ### macOS launchd
 

@@ -1,7 +1,7 @@
 """stock_daily tradestatus 列 + query_daily 停牌标注（issue #80，spec #71/W2 MCP 侧）。
 
 - stock_daily 加 tradestatus 列（DDL 迁移幂等、现库不丢数据）；
-- baostock 路径写入权威停牌状态（0 停牌/1 正常），efinance/akshare 路径为 null；
+- baostock 路径写入权威停牌状态（0 停牌/1 正常），腾讯/新浪/akshare 路径为 null；
 - query_daily 输出的停牌标注 tradestatus 优先、启发式（OHLC 全等且 volume/
   change_percent 为 null）兜底，停牌占位行与数据缺失行在数据层可区分。
 """
@@ -79,7 +79,7 @@ def test_existing_db_migration_keeps_data(pg_test):
         )
         cur.execute(
             "INSERT INTO stock_daily (stock_code, trade_date, close, adj, source)"
-            " VALUES ('600519', '20261013', 1700.0, 'qfq', 'efinance')"
+            " VALUES ('600519', '20261013', 1700.0, 'qfq', 'akshare')"
         )
     conn.commit()
     ensure_schema(conn)  # 幂等迁移：加列

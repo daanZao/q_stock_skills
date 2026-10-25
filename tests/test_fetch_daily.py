@@ -41,7 +41,7 @@ def test_params_required(pg_test):
 
 def test_fetch_into_empty_db(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     result = fetch_daily("600519", start="20240101", end="20240110", adapters=[ef])
     assert result["status"] == "ok"
     assert result["tool"] == "fetch_daily"
@@ -54,7 +54,7 @@ def test_fetch_into_empty_db(pg_test):
     }
     assert result["range"] == {"start": "20240101", "end": "20240110"}
     assert result["segments"] == [
-        {"start": "20240101", "end": "20240110", "source": "efinance", "rows": 8}
+        {"start": "20240101", "end": "20240110", "source": "tencent", "rows": 8}
     ]
     assert result["rows_upserted"] == 8
     assert len(_rows_in_db(pg_test)) == 8
@@ -62,20 +62,20 @@ def test_fetch_into_empty_db(pg_test):
 
 def test_fetch_fallback_records_actual_source(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance", fail_times=99)
-    ak = FakeAdapter("akshare")
-    result = fetch_daily("600519", start="20240101", end="20240110", adapters=[ef, ak])
+    ef = FakeAdapter("tencent", fail_times=99)
+    sn = FakeAdapter("sina")
+    result = fetch_daily("600519", start="20240101", end="20240110", adapters=[ef, sn])
     assert result["status"] == "ok"
-    assert result["segments"][0]["source"] == "akshare"
-    assert {r["source"] for r in _rows_in_db(pg_test)} == {"akshare"}
+    assert result["segments"][0]["source"] == "sina"
+    assert {r["source"] for r in _rows_in_db(pg_test)} == {"sina"}
 
 
 def test_fetch_only_fills_head_and_tail_gaps(pg_test):
     _init(pg_test)
     conn = psycopg2.connect(pg_test)
-    upsert_daily(conn, "600519", "qfq", weekday_rows("20240108", "20240112"), "efinance")
+    upsert_daily(conn, "600519", "qfq", weekday_rows("20240108", "20240112"), "tencent")
     conn.close()
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     result = fetch_daily("600519", start="20240101", end="20240119", adapters=[ef])
     assert result["status"] == "ok"
     # 只补头（01-01~01-07）尾（01-13~01-19）两段，已有中段不重抓
@@ -88,12 +88,12 @@ def test_fetch_only_fills_head_and_tail_gaps(pg_test):
 
 def test_fetch_all_sources_failed(pg_test):
     _init(pg_test)
-    adapters = [FakeAdapter(n, fail_times=99) for n in ("efinance", "akshare", "baostock")]
+    adapters = [FakeAdapter(n, fail_times=99) for n in ("tencent", "sina", "baostock")]
     result = fetch_daily("600519", start="20240101", end="20240110", adapters=adapters)
     assert result["status"] == "error"
     assert [a["source"] for a in result["attempted_sources"]] == [
-        "efinance",
-        "akshare",
+        "tencent",
+        "sina",
         "baostock",
     ]
     assert result["failed_segment"] == {"start": "20240101", "end": "20240110"}
@@ -102,7 +102,7 @@ def test_fetch_all_sources_failed(pg_test):
 
 def test_fetch_is_idempotent(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     kwargs = dict(start="20240101", end="20240110", adapters=[ef])
     first = fetch_daily("600519", **kwargs)
     second = fetch_daily("600519", **kwargs)
@@ -114,7 +114,7 @@ def test_fetch_is_idempotent(pg_test):
 
 def test_fetch_with_days_param(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     result = fetch_daily("600519", days=5, adapters=[ef])
     assert result["status"] == "ok"
     assert result["params"]["days"] == 5
@@ -136,12 +136,12 @@ def test_fetch_with_days_empty_db_start_aligned(pg_test, monkeypatch):
     """库空：days 换算落点 20260927（周日），start 向前对齐到交易日 20260928。"""
     _init(pg_test)
     _pin_today(monkeypatch, "20261014")
-    ef = FakeAdapter("efinance", rows_fn=trading_rows)
+    ef = FakeAdapter("tencent", rows_fn=trading_rows)
     result = fetch_daily("600519", days=5, adapters=[ef])
     assert result["status"] == "ok"
     assert result["range"] == {"start": "20260928", "end": "20261014"}
     assert result["segments"] == [
-        {"start": "20260928", "end": "20261014", "source": "efinance", "rows": 8}
+        {"start": "20260928", "end": "20261014", "source": "tencent", "rows": 8}
     ]
     assert result["data_range"] == {"start": "20260928", "end": "20261014"}
 
@@ -154,7 +154,7 @@ def test_fetch_with_days_partial_db_no_empty_head_segment(pg_test, monkeypatch):
     conn = psycopg2.connect(pg_test)
     upsert_daily(conn, "600519", "qfq", trading_rows("20260928", "20261014"), "baostock")
     conn.close()
-    ef = FakeAdapter("efinance", rows_fn=trading_rows)
+    ef = FakeAdapter("tencent", rows_fn=trading_rows)
     result = fetch_daily("600519", days=5, adapters=[ef])
     assert result["status"] == "ok"
     assert result["range"]["start"] == "20260928"
@@ -170,11 +170,11 @@ def test_fetch_with_days_head_gap_starts_on_trading_day(pg_test, monkeypatch):
     conn = psycopg2.connect(pg_test)
     upsert_daily(conn, "600519", "qfq", trading_rows("20261008", "20261014"), "baostock")
     conn.close()
-    ef = FakeAdapter("efinance", rows_fn=trading_rows)
+    ef = FakeAdapter("tencent", rows_fn=trading_rows)
     result = fetch_daily("600519", days=5, adapters=[ef])
     assert result["status"] == "ok"
     assert result["segments"] == [
-        {"start": "20260928", "end": "20261007", "source": "efinance", "rows": 3}
+        {"start": "20260928", "end": "20261007", "source": "tencent", "rows": 3}
     ]
     assert all(is_trading_day(s["start"]) for s in result["segments"])
 
@@ -182,7 +182,7 @@ def test_fetch_with_days_head_gap_starts_on_trading_day(pg_test, monkeypatch):
 def test_fetch_error_reports_healed_segments(pg_test):
     _init(pg_test)
     conn = psycopg2.connect(pg_test)
-    upsert_daily(conn, "600519", "qfq", weekday_rows("20240108", "20240112"), "efinance")
+    upsert_daily(conn, "600519", "qfq", weekday_rows("20240108", "20240112"), "tencent")
     conn.close()
 
     # 头部抓取成功、尾部全失败：错误里要带已补的分段，不能静默丢弃

@@ -131,17 +131,17 @@ def test_fetch_lhb_partial_failure_is_reported(pg_test):
 
 def test_fetch_section_failure_is_isolated(pg_test):
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", fail_sections=("zt_pool", "lhb"))
+    ef = FakeBoardAdapter("tencent", fail_sections=("zt_pool", "lhb"))
     ak = FakeBoardAdapter("akshare", fail_sections=("zt_pool", "lhb"))
     result = fetch_board_snapshot(trade_date=TODAY, adapters=[ef, ak])
     assert result["status"] == "ok"  # 单 section 失败不拖垮其他
     assert sorted(result["failed_sections"]) == ["lhb", "zt_pool"]
     assert result["sections"]["zt_pool"]["status"] == "error"
-    assert "efinance" in result["sections"]["zt_pool"]["error"]
+    assert "tencent" in result["sections"]["zt_pool"]["error"]
     assert "akshare" in result["sections"]["zt_pool"]["error"]
     assert result["sections"]["indices"] == {
         "rows": len(INDEX_ROWS),
-        "source": "efinance",
+        "source": "tencent",
         "status": "ok",
     }
     assert _count(pg_test, "market_indices") == len(INDEX_ROWS)
@@ -163,7 +163,7 @@ def test_fetch_all_sections_failed_returns_error(pg_test):
 
 def test_fetch_section_falls_back_to_next_source(pg_test):
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", fail_sections=("indices",))
+    ef = FakeBoardAdapter("tencent", fail_sections=("indices",))
     ak = FakeBoardAdapter("akshare")
     result = fetch_board_snapshot(
         trade_date=TODAY, sections="indices", adapters=[ef, ak]

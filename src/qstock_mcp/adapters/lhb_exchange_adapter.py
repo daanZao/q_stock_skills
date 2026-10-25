@@ -16,7 +16,8 @@ lhb_stock_statistic：akshare 新浪 ggtj（近 60 日窗口，万元原生，tr
 
 子项容错：单所/单个子项失败记入 errors（工具层报 partial_error），拿到什么落
 什么；basic/statistic/yyb 全空且全部失败才抛 FetchError 触发链上回退
-（default_lhb_adapters：exchange → akshare 东财 legacy，待清理 ticket 退役）。
+（default_lhb_adapters 交易所官方单源，issue #121 摘除东财 legacy 兜底；
+新浪互补校验走 `qstock-scheduler lhb --check` 对拍，不落库）。
 盘中/非交易日三所全空是正常语义（rows 0 + empty_kind，非失败）。
 """
 
@@ -25,8 +26,8 @@ import re
 import time
 
 from . import _lhb_bse, _lhb_sse, _lhb_szse
-from ._board_em import map_lhb_yyb_capital_rows, map_lhb_yyb_most_rows
 from ._bse_codes import normalize_stock_code
+from ._lhb_yyb import map_lhb_yyb_capital_rows, map_lhb_yyb_most_rows
 from .base import FetchError, import_akshare
 from ..dates import dash_date
 

@@ -21,7 +21,7 @@ industry/concept 行按 (trade_date, board_type, board_name) 业务键天然隔�
 第四态语义废弃，见 tools_board.PLANNED_ABSENT_BOARD_FIELDS。
 """
 
-from ._eastmoney import _num
+from ._num import _num
 
 # 量纲换算系数（对拍核实，见模块 docstring）
 _CURRENT_AMOUNT_X = 1e2  # 百万元 → 万元（ADR 0006）

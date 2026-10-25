@@ -139,26 +139,21 @@ def test_planned_absent_declared_even_when_all_sources_fail():
     assert "base_info" in result["planned_absent"]  # 弃用声明与链成败无关
 
 
-def test_default_chain_excludes_efinance():
-    """基本面链剔东财（issue #115）：akshare → baostock，efinance 出局。"""
+def test_default_chain_finalized():
+    """基本面链定稿（issue #115/#121）：akshare → baostock，efinance 已退役摘除。"""
     from qstock_mcp.adapters import default_fundamentals_adapters
 
     names = [a.name for a in default_fundamentals_adapters()]
     assert names == ["akshare", "baostock"]
 
 
-def test_efinance_fetch_fundamentals_deprecated_without_eastmoney_touch(monkeypatch):
-    """efinance base_info 显式弃用：抛 unsupported 弃用错误，且不触达东财 push2。"""
-    import efinance as ef
-
+def test_akshare_eastmoney_fundamentals_retired_stubs():
+    """akshare 东财基本面接口退役桩（issue #121）：显式 unsupported 拒绝。"""
     from qstock_mcp.adapters import FetchError
-    from qstock_mcp.adapters.efinance_adapter import EfinanceAdapter
+    from qstock_mcp.adapters.akshare_adapter import AkshareAdapter
 
-    def _boom(*args, **kwargs):
-        raise AssertionError("get_base_info 不应被调用（东财链路）")
-
-    monkeypatch.setattr(ef.stock, "get_base_info", _boom)
+    adapter = AkshareAdapter()
     with pytest.raises(FetchError) as ei:
-        EfinanceAdapter().fetch_fundamentals("600519")
+        adapter.fetch_market_snapshot()
     assert ei.value.kind == "unsupported"
-    assert "已弃用" in str(ei.value)
+    assert "issue #121" in str(ei.value)

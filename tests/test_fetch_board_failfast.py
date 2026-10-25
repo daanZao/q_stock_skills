@@ -60,7 +60,7 @@ def test_core_section_set_is_explicit_and_excludes_lhb(pg_test):
 def test_core_section_unreachable_fails_overall_with_per_section_detail(pg_test):
     """核心 section（boards）连接级故障 → 整体 error + 完整 per-section 明细。"""
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", fail_sections=("boards",), exc=_conn_exc("efinance"))
+    ef = FakeBoardAdapter("tencent", fail_sections=("boards",), exc=_conn_exc("tencent"))
     ak = FakeBoardAdapter("akshare", fail_sections=("boards",), exc=_conn_exc("akshare"))
     result = fetch_board_snapshot(trade_date=TODAY, adapters=[ef, ak])
     assert result["status"] == "error"
@@ -74,13 +74,13 @@ def test_core_section_unreachable_fails_overall_with_per_section_detail(pg_test)
     assert boards["error_kind"] == "upstream_unreachable"
     assert boards["retry_advice"]
     attempted = {a["source"]: a for a in boards["attempted_sources"]}
-    assert attempted["efinance"]["failure_kind"] == "connection"
+    assert attempted["tencent"]["failure_kind"] == "connection"
     assert attempted["akshare"]["failure_kind"] == "connection"
-    assert "Connection aborted" in attempted["efinance"]["error"]
+    assert "Connection aborted" in attempted["tencent"]["error"]
     # 已成功 section 的明细仍在：状态表而非一句"失败了"
     assert result["sections"]["indices"] == {
         "rows": len(INDEX_ROWS),
-        "source": "efinance",
+        "source": "tencent",
         "status": "ok",
     }
     assert result["sections"]["lhb"]["status"] == "ok"
@@ -137,18 +137,18 @@ def test_unsupported_sources_not_counted_as_unreachable(pg_test):
     独占失败清单时判 fetch_failed（不触发整体 error）。"""
     _init(pg_test)
     ef = FakeBoardAdapter(
-        "efinance", fail_sections=("boards",), exc=_unsupported_exc("efinance")
+        "tencent", fail_sections=("boards",), exc=_unsupported_exc("tencent")
     )
     ak = FakeBoardAdapter("akshare", fail_sections=("boards",), exc=_conn_exc("akshare"))
     result = fetch_board_snapshot(trade_date=TODAY, adapters=[ef, ak])
     assert result["status"] == "error"
     attempted = {a["source"]: a for a in result["sections"]["boards"]["attempted_sources"]}
-    assert attempted["efinance"]["failure_kind"] == "unsupported"
-    assert "不支持" in attempted["efinance"]["error"]
+    assert attempted["tencent"]["failure_kind"] == "unsupported"
+    assert "不支持" in attempted["tencent"]["error"]
 
     _init(pg_test)
     only_unsupported = FakeBoardAdapter(
-        "efinance", fail_sections=("boards",), exc=_unsupported_exc("efinance")
+        "tencent", fail_sections=("boards",), exc=_unsupported_exc("tencent")
     )
     result = fetch_board_snapshot(trade_date=TODAY, adapters=[only_unsupported])
     assert result["status"] == "ok"

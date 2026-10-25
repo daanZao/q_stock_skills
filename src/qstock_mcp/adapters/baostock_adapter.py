@@ -16,7 +16,7 @@ from datetime import date
 from typing import NoReturn
 
 from ..dates import dash_date
-from ._eastmoney import _int, _num, _wan
+from ._num import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
 _FIELDS = "date,open,high,low,close,volume,amount,pctChg,tradestatus,turn"
@@ -309,8 +309,3 @@ class BaostockAdapter:
 
     def fetch_lhb(self, trade_date: str) -> dict:
         self._unsupported_board("lhb")
-
-    def fetch_board_history(
-        self, board_type: str, board_name: str, start: str, end: str
-    ) -> list[dict]:
-        self._unsupported_board("board_history")

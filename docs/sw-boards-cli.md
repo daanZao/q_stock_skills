@@ -120,5 +120,5 @@ launchd/cron 安装样例见 `docs/scheduler-launchd.md`；出报时点与数据
   | current 双级快照 | `sw-boards` | rc=0，155 行落库（31 一级+124 二级），source=swsresearch，planned_absent_fields 4 项声明 |
   | trend 历史回补 | `backfill --source sw --start 20261020 --end 20261023` | rc=0，155/155 板块 ok、各 4 交易日行、零失败，source='swsresearch' |
   | 分类 xls | `sw-dict` | rc=0，12,929 行 / 5,934 股入库（含北交所 920xxx 归属） |
-  | 每日分析报表 | `morning --date 20261023` | 申万估值 part 经协议测试覆盖、报表端点实抓 200（fixture 录制）；**morning 整批在空测试库未跑完**——7 大指数尾行补漏走 efinance→akshare→baostock 兜底，本机东财连接级不可达（60s 超时×14 次，spec #111 已记录），baostock 全历史补齐耗时超冒烟时限。现象为环境问题非申万缺陷；有数据的生产库指数尾行已到目标日，零补抓请求，不受影响 |
+  | 每日分析报表 | `morning --date 20261023` | 申万估值 part 经协议测试覆盖、报表端点实抓 200（fixture 录制）；**morning 整批在空测试库未跑完**——7 大指数尾行补漏当时走 efinance→akshare→baostock 兜底，本机东财连接级不可达（60s 超时×14 次，spec #111 已记录；#117/#121 起指数尾行链已切腾讯→baostock、东财代码面清零，该环境限制不复存在），baostock 全历史补齐耗时超冒烟时限。现象为环境问题非申万缺陷；有数据的生产库指数尾行已到目标日，零补抓请求，不受影响 |
   | 三方位对拍 | `sw-boards --check` | rc=0，155 板块 mismatches=0（库内行与官网一致），dict_as_of=20261014 |

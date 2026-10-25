@@ -42,7 +42,7 @@ from time import sleep
 from ..dates import add_days
 from ._bse_codes import to_market_code
 from ._daily_common import adjust_param, derive_change_fields
-from ._eastmoney import _int, _num, _wan
+from ._num import _int, _num, _wan
 from .base import FetchError, import_akshare
 
 log = logging.getLogger(__name__)
