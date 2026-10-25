@@ -106,13 +106,15 @@ MCP server 只提供工具，**自己不会按点采集**。日常数据靠独�
 
 | 子命令 | 用途 | 建议执行时机 |
 | --- | --- | --- |
-| `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集 | 交易日 15:30 之后 |
-| `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
-| `backfill [--start D] [--end D]` | 板块历史回补：push2his 板块 K 线回补 `market_boards`（重操作，回补行带 `source='push2his'` 标注） | 手动/灾难恢复，非定时任务 |
+| `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集（boards 行业段申万官网单源，issue #118） | 交易日 15:30 之后 |
+| `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 + 申万板块分析报表估值维度（sw_board_valuation part，T+1） | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
+| `backfill [--start D] [--end D] [--source em\|sw]` | 板块历史回补：`--source em`（缺省）push2his 板块 K 线回补 `market_boards`；`--source sw` 申万官网 trend 全历史回补申万双级口径行（深至 1999，回补行带 `source='swsresearch'` 标注） | 手动/灾难恢复，非定时任务 |
+| `sw-boards [--date D] [--check]` | 申万板块固定入口（issue #118）：双级实时快照落库（收盘后=当日收盘截面）；`--check` 官网 vs 库内 vs 自算三方位对拍不落库 | 收盘后；对拍按需 |
+| `sw-dict [--url U]` | 申万成分字典在线刷新（issue #118）：官网分类 xls 清空重载 'sw' 体系（含北交所归属），幂等 | 每周一次 |
 | `daily --codes A,B [--date D]` / `daily --all` | 个股日线固定入口（issue #112）：腾讯 → 新浪 → baostock 抓取落库；`--check` 三源直取对拍不落库；北交所旧码自动归一化 | 收盘后 19:30 左右的当日行（T+0）补采；`--all` 全市场刷新建议配 `--throttle 1` |
 | `snapshot [--date D] [--check]` | 全市场快照固定入口（issue #116）：腾讯批量报价 → 腾讯 rank → 新浪三层链抓取落库；`--check` 三源直取对拍不落库；主源 18 字段全覆盖、含北交所 | 收盘后（15:30 之后）；盘中勿高频 |
 
-耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求）；`close` 数分钟到十几分钟（cons 成分积累逐概念板块抓取）；`backfill` 取决于板块数 × 窗口，全量（约千板块）默认 3 个月窗口通常几十分钟；`daily --codes` 每只约 1–2 秒（腾讯单请求），`daily --all` 约 5900 只 × 节流间隔（缺省 1 秒/只，约 1.5–2 小时）。
+耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求 + 申万估值报表 2 次分页调用）；`close` 数分钟到十几分钟（cons 成分积累随东财概念退役不再触发）；`backfill --source em` 取决于板块数 × 窗口，全量（约千板块）默认 3 个月窗口通常几十分钟；`backfill --source sw` 155 板块 × trend 全历史（1999 起，单请求/板块）约 2~3 分钟（0.4s/请求限速内）；`daily --codes` 每只约 1–2 秒（腾讯单请求），`daily --all` 约 5900 只 × 节流间隔（缺省 1 秒/只，约 1.5–2 小时）。
 
 重复执行幂等（各业务键 upsert），每次执行落采集台账（可用 MCP 工具 `query_collection_log` 查询）；退出码 0=全部成功，1=任一部分失败（明细在 stdout JSON），2=参数错误。长时间运行的批（backfill 全量约千个板块、cons 概念成分逐板块）按双阈值向 **stderr** 打进度（每 50 个板块或距上条 ≥60s，先到先打），stdout 始终只留给最终结构化 JSON。backfill 韧性（spec #86）：连续 10 个板块全源失败即熔断中止（输出 `aborted` + exit 1，落整体 error 台账）；重跑自动跳过台账中同窗口已 ok 的板块（断点续跑，只补缺口）。全链路另有统一韧性：上游请求 60s 全局超时（挂死有界）、同源重试 0.5/1/2s 退避、by-design 不支持的源不重试。
 
@@ -123,7 +125,9 @@ MCP server 只提供工具，**自己不会按点采集**。日常数据靠独�
 qstock-scheduler morning --date 20261015
 qstock-scheduler morning --date 20261016
 
-# 补 10-14~10-16 的板块行情（market_boards；约 1000 个板块 × 3 日，重操作）
+# 补 10-14~10-16 的板块行情（market_boards）；申万口径 155 板块全历史回补
+qstock-scheduler backfill --source sw
+# 存量东财口径行回补（em 约 1000 个板块 × 3 日，重操作）
 qstock-scheduler backfill --start 20261014 --end 20261016
 
 # 收盘后当晚补个股日线当日行（T+0；沪/深/北代表股，北交所旧码自动归一化）

@@ -63,7 +63,7 @@ _Avoid_: 元（库内金额口径）
 _Avoid_: 手（库内成交量口径）
 
 **成分字典**:
-板块成分归属的库内真源表（stock × 板块 × 生效日期）。现内容为申万行业分类变更史（用户提供文件、MCP 导入工具以文件为准清空重载）；预留 source_system 体系列（'sw'/'em' 等）以扩展东财概念成分。point-in-time 归属 = 生效日期 ≤ 当日的最新行。
+板块成分归属的库内真源表（stock × 板块 × 生效日期）。现内容为申万行业分类变更史（`qstock-scheduler sw-dict` 在线刷新，issue #118：申万官网分类 xls 直链下载、以文件为准清空重载 'sw' 体系，含北交所归属；手工导入入口 import_board_classification 仍保留）；预留 source_system 体系列（'sw'/'em' 等）以扩展东财概念成分。point-in-time 归属 = 生效日期 ≤ 当日的最新行。
 _Avoid_: 板块映射表
 
 **自算板块行情**:
@@ -96,7 +96,7 @@ _Avoid_: 定时任务（不加限定时）
 _Avoid_: 早盘补抓
 
 **板块回补**:
-`qstock-scheduler backfill` 执行的板块历史补数：东财 push2his 板块 K 线同口径回补行业+概念板块入 `market_boards`（默认窗口 = 前一交易日前推约 3 个月），回补行带 `source='push2his'` 标注与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。收盘后批东财健康时附带概念成分积累入成分字典 'em' 体系（随 close 执行，独立成败不拖垮主批）。
+`qstock-scheduler backfill` 执行的板块历史补数入 `market_boards`，按源分两种：`--source em`（缺省）为东财 push2his 板块 K 线回补行业+概念板块（默认窗口 = 前一交易日前推约 3 个月）；`--source sw`（issue #118，spec #111）为申万官网 trend 指数全历史回补申万双级口径行（默认窗口 = 19990101 起、历史深至 1999，解除 5/10 日涨跌"自落库日起积累"限制）。回补行带 source 标注（'push2his'/'swsresearch'）与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。收盘后批东财健康时附带概念成分积累入成分字典 'em' 体系（随 close 执行，独立成败不拖垮主批；申万承接后当日无概念板块，该步空转）。
 
 **个股日线入口**:
 `qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。

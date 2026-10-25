@@ -370,6 +370,37 @@ class AStockDailyAdapter(Protocol):
     def fetch_astock_daily(self, trade_date: str) -> list[dict]: ...
 
 
+class SwBoardsAdapter(Protocol):
+    """申万官网板块能力（issue #118，spec #111）协议。
+
+    SwSResearchAdapter 实现：boards 行业段主承载（fetch_boards 见
+    BoardAdapter 协议）+ 调度 CLI 申万专属能力。申万单源无 fallback 链，
+    失败一律抛 FetchError；行结构见 _sw_board 映射（落库单位万元/股，
+    ADR 0006/0008）。
+
+    fetch_sw_board_list：申万双级板块清单（board_code/board_name/level），
+    回补与对拍的目标集。
+    fetch_sw_board_history：trend 指数全历史（1999 起，T+1）按 board
+    （board_code/board_name/level 的 dict）+ yyyymmdd 闭区间取数，行自带
+    trade_date；空区间返回 []（非错误）。
+    fetch_sw_board_analysis：每日分析报表（T+1）双级一把抓，yymmdd 闭区间，
+    行键见 sw_board_valuation 表（换手率/PE/PB/流通市值/股息率）。
+    fetch_sw_class_file：成分分类 xls 直链下载（成分字典在线刷新源）。
+    """
+
+    name: str
+
+    def fetch_sw_board_list(self) -> list[dict]: ...
+
+    def fetch_sw_board_history(
+        self, board: dict, start: str, end: str
+    ) -> list[dict]: ...
+
+    def fetch_sw_board_analysis(self, start: str, end: str) -> list[dict]: ...
+
+    def fetch_sw_class_file(self, url: str) -> bytes: ...
+
+
 class DataAdapter(
     DailyAdapter,
     SnapshotAdapter,

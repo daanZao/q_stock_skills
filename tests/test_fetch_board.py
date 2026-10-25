@@ -52,11 +52,16 @@ def test_fetch_all_sections_land_and_report(pg_test):
         "lhb": sum(len(v) for v in LHB_ROWS.values()),
     }
     for section, n in expected_rows.items():
-        assert result["sections"][section] == {
+        expected = {
             "rows": n,
             "source": "akshare",
             "status": "ok",
         }
+        if section == "boards":
+            # 字段级第四态声明（issue #118）：boards 段响应额外携带
+            # planned_absent_fields（申万不发布的三字段，见 tools_board）
+            assert result["sections"][section].pop("planned_absent_fields")
+        assert result["sections"][section] == expected
     assert _count(pg_test, "market_indices") == len(INDEX_ROWS)
     assert _count(pg_test, "market_boards") == len(BOARD_ROWS)
     assert _count(pg_test, "zt_pool") == len(ZT_POOL_ROWS)

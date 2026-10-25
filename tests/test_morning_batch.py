@@ -1,10 +1,12 @@
-"""次晨批测试（issue #83，spec #71/W5）：baostock 一把抓全市场日线 + 指数尾行补漏。
+"""次晨批测试（issue #83，spec #71/W5）：baostock 一把抓全市场日线 + 指数尾行补漏
++ 申万板块分析报表估值维度（issue #118 的 sw_board_valuation part）。
 
 fetch_morning_batch：默认目标日 = 前一交易日（时钟可注入）；一把抓结果按
 业务键 (stock_code, trade_date, adj) 幂等落 stock_daily（tradestatus/turn
 等字段映射在适配器映射层）；7 大指数白名单尾行缺失即补（fetch_index_daily
-fallback 链）；各部分独立成败、逐部分落采集台账；baostock 不可达按三态
-契约报错落台账，不影响指数补漏步骤。
+fallback 链）；申万估值维度按业务键 (trade_date, board_code) 幂等落
+sw_board_valuation；各部分独立成败、逐部分落采集台账；baostock/申万不可达
+按三态契约报错落台账，不影响其余 part。
 """
 
 import json
@@ -18,12 +20,17 @@ from qstock_mcp.adapters.base import FetchError
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.repository import select_daily, select_index_daily, upsert_index_daily
 from qstock_mcp.tools_morning import fetch_morning_batch
-from fakes import FakeInitAdapter
+from fakes import FakeInitAdapter, FakeSwBoardsAdapter
 
 _TZ8 = timezone(timedelta(hours=8))
 
 TARGET = "20261016"  # 周五；2026-10-19（周一）开盘前跑次晨批的目标日
 NOW_MONDAY_AM = datetime(2026, 10, 19, 8, 30, tzinfo=_TZ8)
+
+
+def _sw(fail=(), analysis=None):
+    """申万估值 part 的 fake 注入：默认返回两条估值行（trade_date 盖戳为目标日）。"""
+    return [FakeSwBoardsAdapter(analysis=analysis, fail=fail)]
 
 
 def _init(pg_test):
@@ -101,7 +108,7 @@ class TestStockDailyPart:
     def test_full_market_rows_land(self, pg_ready):
         out = fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()),
-            adapters=[FakeInitAdapter("fake")], now=NOW_MONDAY_AM)
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         assert out["status"] == "ok"
         part = out["parts"]["stock_daily"]
         assert part["status"] == "ok"
@@ -122,7 +129,7 @@ class TestStockDailyPart:
     def test_ledger_recorded(self, pg_ready):
         fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()),
-            adapters=[FakeInitAdapter("fake")], now=NOW_MONDAY_AM)
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         rows = _ledger(pg_ready, section="stock_daily")
         assert len(rows) == 1
         assert rows[0][0] == TARGET
@@ -135,7 +142,7 @@ class TestStockDailyPart:
             fetch_morning_batch(
                 trade_date=TARGET,
                 adapter=FakeMorningAdapter(rows=_morning_rows()),
-                adapters=[FakeInitAdapter("fake")], now=NOW_MONDAY_AM)
+                adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         assert len(_stock_daily_rows(pg_ready, "600519")) == 1  # 业务键幂等覆盖
 
     def test_baostock_unreachable_three_state(self, pg_ready):
@@ -144,7 +151,7 @@ class TestStockDailyPart:
         exc.__cause__ = ConnectionRefusedError("connection refused")
         out = fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(exc=exc),
-            adapters=[FakeInitAdapter("fake")], now=NOW_MONDAY_AM)
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         part = out["parts"]["stock_daily"]
         assert part["status"] == "error"
         assert part["error_kind"] == "upstream_unreachable"
@@ -158,7 +165,7 @@ class TestStockDailyPart:
         """非交易日/上游确认无数据：empty 落台账，非故障。"""
         out = fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
-            adapters=[FakeInitAdapter("fake")], now=NOW_MONDAY_AM)
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         assert out["parts"]["stock_daily"]["status"] == "empty"
         assert _ledger(pg_ready, section="stock_daily")[0][2] == "empty"
 
@@ -168,7 +175,7 @@ class TestDefaultTargetDate:
         adapter = FakeMorningAdapter(rows=_morning_rows())
         out = fetch_morning_batch(
             adapter=adapter, adapters=[FakeInitAdapter("fake")],
-            now=NOW_MONDAY_AM)
+            sw_adapters=_sw(), now=NOW_MONDAY_AM)
         assert out["trade_date"] == TARGET  # 周一开盘前 → 上周五
         assert adapter.calls == [TARGET]
 
@@ -178,7 +185,7 @@ class TestDefaultTargetDate:
         out = fetch_morning_batch(
             trade_date="20261019",
             adapter=FakeMorningAdapter(rows=_morning_rows("20261019")),
-            adapters=[FakeInitAdapter("fake")], now=now)
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=now)
         assert out["status"] == "error"
         assert _ledger(pg_ready) == []
 
@@ -207,7 +214,7 @@ class TestIndexTailFill:
         filler = FakeInitAdapter("fake", index_rows=[self._index_row(TARGET)])
         fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
-            adapters=[filler], now=NOW_MONDAY_AM)
+            adapters=[filler], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         conn = psycopg2.connect(pg_ready)
         try:
             rows = select_index_daily(conn, "000001", limit=2)
@@ -227,7 +234,7 @@ class TestIndexTailFill:
         fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
             adapters=[FakeInitAdapter("fake", index_rows=[self._index_row(TARGET)])],
-            now=NOW_MONDAY_AM)
+            sw_adapters=_sw(), now=NOW_MONDAY_AM)
         rows = _ledger(pg_ready, section="index_daily")
         assert len(rows) == 1
         assert rows[0][2] == "ok"
@@ -240,7 +247,7 @@ class TestIndexTailFill:
         out = fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()),
             adapters=[FakeInitAdapter("fake", fail=("index",))],
-            now=NOW_MONDAY_AM)
+            sw_adapters=_sw(), now=NOW_MONDAY_AM)
         assert out["parts"]["stock_daily"]["status"] == "ok"
         assert out["parts"]["index_daily"]["status"] == "error"
         assert out["status"] == "partial_error"
@@ -267,3 +274,88 @@ class TestSchedulerMorningCli:
         assert rc == 1
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "partial_error"
+
+
+class TestSwBoardValuationPart:
+    """申万板块分析报表估值维度（issue #118）：T+1 落 sw_board_valuation。"""
+
+    def _valuation_rows(self, dsn, trade_date):
+        conn = psycopg2.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT board_code, board_name, level, close_index,"
+                    " turnover_rate, pe_ratio, pb_ratio, float_cap,"
+                    " dividend_yield FROM sw_board_valuation"
+                    " WHERE trade_date = %s ORDER BY board_code",
+                    (trade_date,),
+                )
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def test_valuation_rows_land(self, pg_ready):
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(),
+            now=NOW_MONDAY_AM)
+        part = out["parts"]["sw_board_valuation"]
+        assert part["status"] == "ok"
+        assert part["rows"] == 2
+        assert part["source"] == "swsresearch"
+        rows = self._valuation_rows(pg_ready, TARGET)
+        assert len(rows) == 2
+        code, name, level, close, turnover, pe, pb, float_cap, dp = rows[0]
+        assert code == "801010" and name == "农林牧渔" and level == 1
+        assert close == 2491.17
+        assert turnover == 4.65 and pe == 78.88 and pb == 2.37
+        assert float_cap == 5_664_540_000.0  # 流通市值万元口径（ADR 0006）
+        assert dp == 1.43
+        # 已注册 query_board_data 白名单（BOARD_QUERY_TABLES）
+        from qstock_mcp.tools_board import query_board_data
+
+        q = query_board_data("sw_board_valuation", trade_date=TARGET)
+        assert q["status"] == "ok" and q["count"] == 2
+        assert q["rows"][0]["board_code"] == "801010"
+
+    def test_valuation_ledger_recorded(self, pg_ready):
+        fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(),
+            now=NOW_MONDAY_AM)
+        rows = _ledger(pg_ready, section="sw_board_valuation")
+        assert len(rows) == 1
+        assert rows[0][0] == TARGET
+        assert rows[0][2] == "ok"
+        assert rows[0][3] == "swsresearch"
+        assert rows[0][4] == 2
+
+    def test_valuation_rerun_idempotent(self, pg_ready):
+        for _ in range(2):
+            fetch_morning_batch(
+                trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
+                adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(),
+                now=NOW_MONDAY_AM)
+        assert len(self._valuation_rows(pg_ready, TARGET)) == 2
+
+    def test_valuation_empty_not_error(self, pg_ready):
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=[]),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(analysis=[]),
+            now=NOW_MONDAY_AM)
+        assert out["parts"]["sw_board_valuation"]["status"] == "empty"
+        assert out["parts"]["sw_board_valuation"]["empty_kind"] == "no_data_for_date"
+        assert _ledger(pg_ready, section="sw_board_valuation")[0][2] == "empty"
+
+    def test_valuation_failure_independent(self, pg_ready):
+        """申万不可达：估值 part error + 台账，其余 part 不受影响。"""
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(fail=("analysis",)),
+            now=NOW_MONDAY_AM)
+        assert out["parts"]["stock_daily"]["status"] == "ok"
+        assert out["parts"]["sw_board_valuation"]["status"] == "error"
+        assert out["status"] == "partial_error"
+        rows = _ledger(pg_ready, section="sw_board_valuation")
+        assert rows[0][2] == "error"
+        assert rows[0][5] == "fetch_failed"

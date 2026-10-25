@@ -29,6 +29,16 @@ fetch_failed / 全源口径不含该指数 no_data_for_date）。
 ==请求日期（不符 detail=date_mismatch 零落库）。防线拒收同样落采集台账
 （issue #77：被拒的污染尝试最值得审计）。
 
+boards 行业段申万承接（issue #118，spec #111）：boards section 的 fallback
+链独立解析为申万官网单源（default_boards_adapters，一级 31 + 二级 124 双级
+实时快照，board_type=industry_l1/industry_l2），东财 industry/concept 口径
+退役、不再入链（口径断代不混排）；申万专属能力（板块清单/历史/分析报表/
+分类文件）经 SwSResearchAdapter 申万专属协议供调度 CLI 调用。申万不发布的
+量比/领涨股/资金流三字段按 #113 第四态语义废弃：PLANNED_ABSENT_BOARD_FIELDS
+机器可读声明进 boards 响应与台账 detail，列恒 NULL 不报故障；板块历史回补
+（1999 起）走 scheduler backfill --source sw，申万官网故障时复盘降级用库内
+自算 query_sw_board_daily（daily-review skill 板块节降级节）。
+
 第四态 planned_absent（issue #113，spec #111/#102，ADR 0007 补记）：已定方向
 待接线的 section 在 PLANNED_ABSENT_SECTIONS 登记后以第四态占位——循环内最先
 判定，不抓取、零落库、不计 failed_sections、不触发核心 section fail-fast、
@@ -41,7 +51,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import BoardAdapter, default_adapters
+from .adapters import BoardAdapter, default_adapters, default_boards_adapters
 from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
@@ -82,6 +92,24 @@ REALTIME_NO_BACKFILL = "realtime_section_no_backfill"
 # "planned_absent"，落 planned_absent 占位台账，不计失败、不进异常报告。
 # 接线完成即从本字典删除该 section 即恢复采集；测试用 monkeypatch 替换本字典。
 PLANNED_ABSENT_SECTIONS: dict[str, str] = {}
+
+# 板块段字段级第四态（issue #118，spec #111/#113 语义）：申万官网不发布、
+# 按决策永久废弃的 boards 字段 → 废弃原因。申万承接后 market_boards 的该列
+# 恒 NULL 是决策性缺席而非数据缺口：响应以 planned_absent_fields 机器可读
+# 声明（不误报故障、不进 data_gaps），daily-review 报告不设对应栏目。
+# 资金流不在表列（原东财资金接口承载的报表栏目，#113 已从报告删除）。
+PLANNED_ABSENT_BOARD_FIELDS: dict[str, str] = {
+    "fund_flow": (
+        "主力资金净流入：申万官网不发布板块资金流，随东财链路永久弃用"
+        "（spec #111/#113，issue #118）；报告不设该栏目、不入 data_gaps"
+    ),
+    "volume_ratio": "量比：申万官网接口不提供板块量比，永久弃用（issue #118）",
+    "leading_stock": (
+        "领涨股：申万官网接口不发布板块领涨股，永久弃用；可选增强为"
+        "成分×全市场快照派生（spec #111 列为演进项，本期不实施）"
+    ),
+    "leading_change": "领涨股涨跌幅：随领涨股字段一并弃用（issue #118）",
+}
 
 _LHB_EMPTY_NOTE = "当日无龙虎榜数据（龙虎榜盘后发布）"
 
@@ -175,6 +203,11 @@ def fetch_board_snapshot(
         return _error(tool, params, str(e))
     if adapters is None:
         adapters = default_adapters()
+        # boards 行业段申万单源链（issue #118，spec #111）；注入适配器时
+        # （测试缝）全部 section 共用注入链，保持既有行为
+        boards_adapters: Sequence[BoardAdapter] = default_boards_adapters()
+    else:
+        boards_adapters = adapters
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -183,6 +216,7 @@ def fetch_board_snapshot(
         today = today_str()
         for name in selected:
             started = datetime.now(timezone.utc)
+            chain = boards_adapters if name == "boards" else adapters
             if name in PLANNED_ABSENT_SECTIONS:
                 # 第四态占位（issue #113）：已定方向待接线，不抓取零落库、不计
                 # 失败；占位落账供历史模式就绪归因（计划缺席 ≠ 未采集 ≠ 故障）
@@ -223,7 +257,7 @@ def fetch_board_snapshot(
                 }
                 continue
             try:
-                r = fetch_section_with_fallback(adapters, name, effective)
+                r = fetch_section_with_fallback(chain, name, effective)
             except AllSourcesFailed as e:
                 kind = aggregate_error_kind(e.attempted)
                 entry = {
@@ -282,6 +316,11 @@ def fetch_board_snapshot(
                 "source": r["source"],
                 "status": "ok",
             }
+            if name == "boards":
+                # 字段级第四态（issue #118）：申万不发布的三字段机器可读声明
+                # （量比重申万官网不发布、领涨股不发布、资金流永久弃用），
+                # 消费方按 planned_absent 语义处理——不报故障、不入 data_gaps
+                res["planned_absent_fields"] = dict(PLANNED_ABSENT_BOARD_FIELDS)
             if patch:
                 res["patch"] = patch
             if r["attempted_sources"]:
@@ -295,6 +334,12 @@ def fetch_board_snapshot(
                     res["note"] = _LHB_EMPTY_NOTE
             elif not data:
                 res["empty_kind"] = "no_data_for_date"
+            detail = summarize_attempted(r["attempted_sources"])
+            if name == "boards":
+                note = "planned_absent_fields=" + ",".join(
+                    PLANNED_ABSENT_BOARD_FIELDS
+                )
+                detail = f"{detail} {note}" if detail else note
             record_collection(
                 conn,
                 trade_date=effective,
@@ -303,7 +348,7 @@ def fetch_board_snapshot(
                 source=r["source"],
                 rows=res["rows"],
                 error_kind=None if res["rows"] > 0 else "no_data_for_date",
-                detail=summarize_attempted(r["attempted_sources"]),
+                detail=detail,
                 started_at=started,
             )
             results[name] = res

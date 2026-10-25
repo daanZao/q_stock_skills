@@ -572,6 +572,7 @@ def upsert_em_cons(conn, rows: list[dict], effective_date: str) -> int:
 BOARD_QUERY_TABLES: dict[str, tuple[str, str]] = {
     "market_indices": ("trade_date", "index_code"),
     "market_boards": ("trade_date", "board_name"),
+    "sw_board_valuation": ("trade_date", "board_code"),
     "zt_pool": ("trade_date", "stock_code"),
     "strong_stocks": ("trade_date", "stock_code"),
     "lhb_basic": ("trade_date", "stock_code"),
@@ -580,6 +581,46 @@ BOARD_QUERY_TABLES: dict[str, tuple[str, str]] = {
     "lhb_yyb_capital": ("fetch_date", "seat_name"),
     "lhb_yyb_most": ("fetch_date", "seat_name"),
 }
+
+
+_SW_BOARD_VALUATION_COLS = (
+    "trade_date",
+    "board_code",
+    "board_name",
+    "level",
+    "close_index",
+    "turnover_rate",
+    "pe_ratio",
+    "pb_ratio",
+    "float_cap",
+    "dividend_yield",
+)
+
+
+def upsert_sw_board_valuation(conn, rows: list[dict]) -> int:
+    """申万板块分析报表（估值维度）落库（issue #118）：业务键
+    (trade_date, board_code) 幂等 upsert，返回写入行数。"""
+    values = [[row.get(c) for c in _SW_BOARD_VALUATION_COLS] for row in rows]
+    if not values:
+        return 0
+    sql = (
+        f"INSERT INTO sw_board_valuation ({', '.join(_SW_BOARD_VALUATION_COLS)})"
+        " VALUES %s ON CONFLICT (trade_date, board_code) DO UPDATE SET "
+        + ", ".join(
+            f"{c} = EXCLUDED.{c}"
+            for c in _SW_BOARD_VALUATION_COLS
+            if c != "board_code"
+        )
+    )
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            sql,
+            values,
+            template="(" + ", ".join(["%s"] * len(_SW_BOARD_VALUATION_COLS)) + ")",
+        )
+    conn.commit()
+    return len(values)
 
 _INTERNAL_COLS = ("id", "created_at", "updated_at")
 
