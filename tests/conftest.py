@@ -6,6 +6,7 @@
 """
 
 import os
+from typing import Any
 
 import psycopg2
 import pytest
@@ -26,6 +27,54 @@ def _reachable(dsn: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# 测试库为全 runner 共享单例：每个用例都 terminate 他端连接 + DROP SCHEMA，
+# 两个 pytest 进程同跑会互相拆表（现象 = 大面积 psycopg2 OperationalError /
+# UndefinedTable，干扰诊断）。会话级咨询锁保证同时只有一个 runner 持有测试库；
+# 持锁进程被 kill 时锁随连接释放，不会死锁后续运行。
+_TEST_RUNNER_LOCK_KEY = 0x71557  # 'qstock' 七进制梗：任意不冲突常量即可
+
+
+def _try_lock() -> tuple[Any | None, bool | None]:
+    """经维护库取会话级咨询锁。
+
+    返回 (conn, True) = 已持锁（conn 须保活到会话结束）；(None, None) = PG
+    不可达，交由各用例 pg_test fixture 自行 skip；(None, False) = 锁被其他
+    runner 持有，调用方应立即退出。
+    """
+    try:
+        conn = psycopg2.connect(MAINT_DSN, connect_timeout=2)
+    except Exception:
+        return None, None
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_TEST_RUNNER_LOCK_KEY,))
+        got = bool(cur.fetchone()[0])
+    if not got:
+        conn.close()
+        return None, False
+    return conn, True
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _single_test_runner():
+    """拒绝并发 runner：拿不到咨询锁直接退出（返回码 3），不产出误导性红结果。"""
+    conn, got = _try_lock()
+    if got is None:
+        yield  # PG 不可达：交由各用例 pg_test fixture 自行 skip
+        return
+    if not got:
+        pytest.exit(
+            "另一个 pytest 进程正持有 qstock_test 测试库 runner 锁"
+            "（共享库不可并发，并发会互相 DROP SCHEMA 制造假失败）；"
+            "请先结束它再跑",
+            returncode=3,
+        )
+    try:
+        yield
+    finally:
+        conn.close()  # 会话连接关闭即释放咨询锁
 
 
 def reset_test_db(dsn: str) -> None:
