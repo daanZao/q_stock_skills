@@ -178,7 +178,7 @@ pytest tests/ skills/
 
 ## 文档导航
 
-- [`docs/first-run.md`](docs/first-run.md)：首次使用、最近 90 个交易日整窗刷新与验收
+- [`docs/first-run.md`](docs/first-run.md)：最近 90 个交易日数据准备快速引导 + 全部调度 CLI 命令手册
 - [`docs/knowledge-graph.md`](docs/knowledge-graph.md)：项目知识图谱——总览图、实体清单、关键流程、「想改 X 先看哪里」
 - CLI 手册：[`daily`](docs/daily-source-cli.md) / [`index`](docs/index-source-cli.md) / [`sw-boards`](docs/sw-boards-cli.md) / [`lhb`](docs/lhb-source-cli.md) / [`limitpool`](docs/limitpool-cli.md) / [`snapshot`](docs/snapshot-source-cli.md) / [`stock-list`](docs/stock-list-cli.md) / [`parity`](docs/parity-cli.md)
 - [`CONTEXT.md`](CONTEXT.md)：领域词汇表
