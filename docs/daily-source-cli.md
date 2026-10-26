@@ -9,7 +9,8 @@ issue #112（spec #111）：个股日线 fallback 链重排为 **腾讯 → 新�
 | 场景 | 命令要点 |
 | --- | --- |
 | 收盘后当晚补当日行（T+0） | `daily --codes ... --date <当日>` |
-| 补某段历史缺口 | `daily --codes ... --start <起> --end <止>` |
+| 补某段历史缺口 | `daily --codes ... --start <起> --end <止>`（默认只补头尾） |
+| 最近 90 个交易日整窗刷新 | `daily --all --trading-days 90 --force`；已有行也重抓，窗外不动 |
 | 迁移/换源后验证数据质量 | `daily --codes ... --date <交易日> --check`（不写库） |
 | 全市场刷新（重操作） | `daily --all --limit N` 冒烟后再全量；缺省 1 秒/只节流 |
 | 北交所个股 | 新码 `920xxx` 直接传；旧码 `43x/83x/87x` 自动归一化到 920 新码 |
@@ -46,8 +47,12 @@ qstock-scheduler daily --all --date 20261020 --throttle 1
 
 - `--codes`：逗号分隔，支持 `sh/sz/bj` 前缀；与 `--all` 互斥。
 - `--all`：从库内 `stock_list` 取全部代码；`--limit` 只取前 N 只（冒烟）。
-- `--date` 与 `--start/--end` 互斥；都不传时缺省当日。区间跨多个交易日时
+- `--date` 与 `--start/--end/--trading-days` 互斥；都不传时缺省当日。区间跨多个交易日时
   逐段补齐，空结果（停牌/非交易日）不是失败。
+- `--trading-days N`：选择含截止日在内的 N 个 A 股交易日，不是 N 个自然日；
+  可用 `--end` 指定截止日，缺省截止最近已收盘交易日；与 `--start` 互斥。
+- `--force`：整窗重抓并覆盖窗内同键记录，不读取已有日期做头尾跳过；窗口外不动。
+  默认仍只补头尾缺口，中段缺口不会自动补。
 - `--adj`：`qfq`（缺省）/ `hfq` / `none`，写入 `stock_daily.adj`。
 - `--check`：逐源直取**结束日**的 bar 比对（区间模式取 `--end`），不落库；
   沪/深/北各源可比值见下。**`--adj hfq` 时只比成交量/成交额/换手率**——各源
@@ -73,9 +78,10 @@ stdout 只输出一份 JSON（日志走 stderr）：
 ```
 
 - `mode="fetch"`：`status` 为 `ok` / `partial_error` / `error`（全失败）；
-  每只股票带实际命中源 `source`（`tencent`/`sina`/`baostock`）。已补过的区间
+  每只股票带实际命中源 `source`（`tencent`/`sina`/`baostock`）。默认模式下已补过的区间
   重跑为零抓取：`source` 为 null、`rows_upserted` 0、`note` 为「区间内无缺口，
-  零抓取」，状态仍为 ok（幂等）。腾讯复权键缺失按 day 回落时（无复权事件或
+  零抓取」；`--force` 不适用此跳过规则。顶层回显 `trading_days` 与 `force`。
+  腾讯复权键缺失按 day 回落时（无复权事件或
   上游不提供调整序列），`note` 标注「上游缺复权键，已按不复权（day）数据落库」，
   采集台账 detail 同步留「复权回落=day」。
 - `mode="check"`：`status` 为 `ok` / `mismatch` / `error`；每只股票带
@@ -100,8 +106,8 @@ stdout 只输出一份 JSON（日志走 stderr）：
   920 新码再请求；对照表未覆盖的旧码原样请求（保留冻结历史可取）。注意：
   归一化只作用于**请求**，`stock_daily.stock_code` 仍记录你传入的代码——若
   同一只票既要按旧码又要按新码取数，会形成两条序列，迁移时需统一代码口径。
-- **落库**：每只股票调用一次 `tools_daily.fetch_daily`，只补头尾缺口、按
-  `(stock_code, trade_date, adj)` 幂等 upsert，并落一条 `collection_log`
+- **落库**：每只股票调用一次 `tools_daily.fetch_daily`，默认只补头尾缺口，
+  `--force` 整窗重抓；按 `(stock_code, trade_date, adj)` 幂等 upsert，并落一条 `collection_log`
   （section=`stock_daily`）。`--all` 会为每只股票各落一条台账行，与逐股调用
   `fetch_daily` 一致。
 

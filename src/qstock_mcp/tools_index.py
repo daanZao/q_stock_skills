@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import DataAdapter, default_index_daily_adapters
-from .dates import add_days, is_trading_day, is_trading_time, normalize_date, today_str
+from .dates import add_days, is_trading_time, normalize_date, today_str, trading_days_between
 from .db import connect
 from .fetch_chain import (
     AllSourcesFailed,
@@ -202,12 +202,7 @@ def verify_index_coverage(
             "params": params,
             "error": "核验窗口过大（>10000 日），请缩小范围",
         }
-    calendar: list[str] = []
-    d = start_n
-    while d <= end_n:
-        if is_trading_day(d):
-            calendar.append(d)
-        d = add_days(d, 1)
+    calendar = trading_days_between(start_n, end_n)
     conn, err = connect()
     if err:
         return {"status": "error", "tool": tool, "params": params, "error": err}

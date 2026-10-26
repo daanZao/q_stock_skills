@@ -23,7 +23,7 @@ ok/empty = 上游确认无数据（lhb/zt_pool 等事件驱动面为正常语义
 import logging
 from typing import Callable, Sequence
 
-from .dates import add_days, is_trading_day, normalize_date, today_str
+from .dates import add_days, normalize_date, today_str, trading_days_between
 from .db import connect
 from .index_parity import compare_index_spot_sources
 from .output import error as _error
@@ -94,16 +94,6 @@ def _parse_faces(faces: Sequence[str] | str | None) -> tuple[list[str] | None, s
     return out, None
 
 
-def _trading_days(start: str, end: str) -> list[str]:
-    days = []
-    d = start
-    while d <= end:
-        if is_trading_day(d):
-            days.append(d)
-        d = add_days(d, 1)
-    return days
-
-
 def _table_date_counts(conn, table: str, start: str, end: str) -> dict[str, int]:
     """窗口内库内表逐交易日行数（表名仅来自 _FACE_TABLES 内部常量）。"""
     with conn.cursor() as cur:
@@ -139,7 +129,7 @@ def _check_table_continuity(conn, face: str, start: str, end: str) -> dict:
     daily = spec["cadence"] == "daily"
     gap_days: list[dict] = []
     empty_confirmed: list[str] = []
-    for day in _trading_days(start, end):
+    for day in trading_days_between(start, end):
         n = counts.get(day, 0)
         if n > 0:
             continue
@@ -162,7 +152,7 @@ def _check_table_continuity(conn, face: str, start: str, end: str) -> dict:
         "table": spec["table"],
         "cadence": spec["cadence"],
         "window": {"start": start, "end": end},
-        "trading_days": len(_trading_days(start, end)),
+        "trading_days": len(trading_days_between(start, end)),
         "covered_days": sum(1 for d in counts if counts[d] > 0),
         "empty_confirmed_days": empty_confirmed,
         "gap_days": gap_days,
@@ -181,7 +171,7 @@ def _check_indices_continuity(conn, start: str, end: str) -> dict:
     ledger = _ledger_statuses(conn, ("indices",), start, end)
     gap_days = [
         {"trade_date": d, "ledger": ledger.get(d)}
-        for d in _trading_days(start, end)
+        for d in trading_days_between(start, end)
         if snap_counts.get(d, 0) == 0 and ledger.get(d) not in ("ok", "empty")
     ]
     return {

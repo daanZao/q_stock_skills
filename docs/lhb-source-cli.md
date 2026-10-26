@@ -13,6 +13,7 @@ issue #114（spec #111）：龙虎榜迁移交易所官方源——深交所 Sho
 | --- | --- |
 | 收盘后当日龙虎榜落库 | `lhb --date <当日>`（T 日盘后 16:30–18:00 发布） |
 | 历史回补/回溯 | `lhb --start <起> --end <止>`（逐交易日，单日失败不中断） |
+| 最近 90 个交易日整窗刷新 | `lhb --trading-days 90`（basic 按日替换 + statistic 重算） |
 | 迁移后数据质量验证 | `lhb --date <交易日> --check`（新浪对拍，不写库） |
 | 收盘后批（五 section 同跑） | `close [--date]`（lhb 段自动走本专用链） |
 
@@ -44,10 +45,12 @@ qstock-scheduler lhb --date 20261020 --check
 
 参数说明：
 
-- `--date`：单日 yyyymmdd；与 `--start/--end` 互斥。盘中/非交易日三所全空是
+- `--date`：单日 yyyymmdd；与 `--start/--end/--trading-days` 互斥。盘中/非交易日三所全空是
   **正常语义**（status ok + `empty_kind=no_data_for_date` + note，非失败）。
 - `--start/--end`：回溯闭区间（自然日），区间内逐交易日抓取；缺省无（不传即
   单日模式）。进度经 stderr 双阈值报（每 20 日或 ≥60s，issue #89）。
+- `--trading-days N`：含截止日在内 N 个 A 股交易日，可用 `--end` 改截止日，
+  缺省截止最近已收盘交易日；与 `--start` 互斥。
 - `--check`：对拍模式（不落库、不落台账；只读连库读取 statistic 自算快照）。
   逐股比对：
   - 股票集合双向差集（`stock_set_diff`，信息级——两源归类口径不同，差集供
@@ -104,22 +107,27 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
   删除）。`buy_seat_count`/`sell_seat_count` 恒 NULL：交易所官方汇总无席位
   计数来源、不伪造（lhb_stock_detail 接线后才可派生）。新浪 ggtj 回归
   `--check` 对拍校验位（不落库）。`trade_date` 为快照交易日，业务键
-  (trade_date, stock_code)。
+  (trade_date, stock_code)。历史回溯额外抓取窗口前 60 个日历日 basic 作为
+  连接级临时 staging，保证目标窗口早期也使用完整公式；staging 不写入窗外业务表。
+- **历史回溯一致性**：只写 `lhb_basic` 与 statistic，basic 按日完整替换并在
+  同一事务重算 statistic，清除旧来源/旧原因行。单所缺失、`partial_error` 或
+  连接失败时保留该日旧数据并报告失败，不以残缺结果替换。两个营业部累计榜
+  没有历史日期参数，历史任务不写，不得把当前榜盖成历史日期。
 - **lhb_stock_detail（席位级表）**：本期未接线（schema 在、写路径未挂；研究
   报告定位"能力增量非恢复"）。席位数据已用于金额自算与对拍。
 - **北交所**：历史行旧码自动归一化 920 新码（官方 248 条对照表，未覆盖的
   极少数旧码原样保留）；北交所特有的严重异常波动分类资金（yzycbdList）本期
   不接线。
 - **链序**：`default_lhb_adapters()` = **交易所官方单源**（`ExchangeLhbAdapter`，
-  issue #121 摘除东财 legacy 兜底后定稿）；单所/单子项失败降级为
-  partial_error，拿到什么落什么。
+  issue #121 摘除东财 legacy 兜底后定稿）。单日实时抓取的子项失败保留
+  partial_error 语义；历史回溯遇任何部分失败则不替换该日旧数据。
 
 ## 落库与回滚
 
-CLI 写 `lhb_basic` / `lhb_yyb_capital` / `lhb_yyb_most`（业务键 upsert）
-与 `lhb_stock_statistic`（库内自算快照，DELETE+INSERT 幂等）及 append-only
-台账 `collection_log`；无 schema 变更。回滚按日期/代码段删除即可（幂等可重跑
-覆盖）：
+单日实时 CLI 写 basic、两个营业部榜与 statistic；历史回溯只写 basic 与
+statistic，并写 append-only 台账 `collection_log`。历史 basic 按日替换且与统计
+重算同事务，恢复旧值须从事先备份回写，不能假设 upsert 可反推旧行。台账不回滚。
+按日期清理后可重跑：
 
 ```sql
 DELETE FROM lhb_basic WHERE trade_date = '20261020';

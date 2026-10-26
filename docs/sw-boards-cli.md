@@ -12,6 +12,7 @@ issue #118（spec #111）：boards 行业维度迁移申万官网（swsresearch.
 | 收盘后抓当日申万双级板块快照 | `sw-boards --date <当日>`（收盘后调用=当日收盘截面） |
 | 迁移初始化：板块历史回补至 1999 | `backfill --source sw`（全量，155 板块逐只 trend 全历史） |
 | 补一段历史窗口 / 修订某天 | `backfill --source sw --start <起> --end <止>` |
+| 最近 90 个交易日整窗刷新 | `backfill --source sw --trading-days 90 --force`（成功台账不跳过） |
 | 对拍验证（官网 vs 库内 vs 自算） | `sw-boards --date <日> --check [--level 1\|2\|all] [--limit N]` |
 | 成分字典在线刷新（含北交所归属） | `sw-dict`（申万不定期维护，建议周频） |
 | 每日估值维度例行入库 | `morning`（申万分析报表 sw_board_valuation part，T+1） |
@@ -63,6 +64,10 @@ qstock-scheduler morning --date 20261023
 - `--date`：交易日 yyyymmdd。sw-boards 为实时语义（收盘后末次快照=当日
   收盘截面），历史日期被防线拒收（`realtime_section_no_backfill`）；
   历史数据一律走 `backfill --source sw`。
+- `--trading-days N`：按 A 股交易日历选择 N 日窗口，可用 `--end` 改截止日，
+  缺省截止最近已收盘交易日；与 `--start` 互斥。
+- `--force`：忽略同板块同窗口成功台账并整窗重抓，覆盖窗内同键记录、窗外不动；
+  不加时保持断点续跑，只有完全相同的成功窗口才跳过。
 - 实时快照与历史回补的边界：current 接口的 最新价/昨收 与 trend 收盘价
   对拍一致（2026-10-24 实测 ratio=1.000000）；量纲在适配器映射层换算
   （current 成交额百万元→万元、成交量万手→股；trend 成交额亿元→万元、

@@ -13,7 +13,7 @@ fetch_failed（非连接级）与 no_data_for_date（上游正常响应空结果
 盘中 lhb_basic 为空返回 rows:0 + note + empty_kind=no_data_for_date
 （龙虎榜盘后发布是正常语义），lhb 抓取失败按三态结构化返回
 （status error + error_kind + 逐源明细），与"未发布"可区分；
-lhb 子项部分失败落已得数据并报 partial_error。
+单日实时 lhb 子项部分失败落已得数据并报 partial_error；历史回溯则保留旧日。
 
 indices 段白名单定点补漏（issue #49）：生产链腾讯批量报价口径已全量覆盖
 7 大指数白名单（含科创50 000688），全命中时零补抓请求；补漏机制为口径性
@@ -92,6 +92,7 @@ from .repository import (
     BOARD_QUERY_TABLES,
     BOARD_SECTION_TABLES,
     recompute_lhb_statistic,
+    replace_lhb_basic_day,
     select_board_rows,
     select_latest_board_date,
     upsert_board_rows,
@@ -329,6 +330,8 @@ def fetch_board_snapshot(
     sections: str | Sequence[str] | None = None,
     adapters: Sequence[BoardAdapter] | None = None,
     lhb_adapters: Sequence[BoardAdapter] | None = None,
+    lhb_history: bool = False,
+    lhb_staging_rows: list[dict] | None = None,
 ) -> dict:
     """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。
 
@@ -490,8 +493,27 @@ def fetch_board_snapshot(
                         "detail": "date_mismatch",
                     }
                     continue
+            if name == "lhb" and lhb_history and data.get("errors"):
+                message = "; ".join(data["errors"])
+                record_collection(
+                    conn, trade_date=effective, section=name, status="error",
+                    source=r["source"], rows=0, error_kind="partial_error",
+                    detail=message, started_at=started,
+                )
+                results[name] = {
+                    "rows": 0, "status": "error", "error": message,
+                    "error_kind": "partial_error",
+                }
+                continue
+            statistic_written = 0
+            if name == "lhb" and lhb_history:
+                written, statistic_written = replace_lhb_basic_day(
+                    conn, effective, data["lhb_basic"], lhb_staging_rows
+                )
+            else:
+                written = _upsert_section(conn, name, data, effective)
             res = {
-                "rows": _upsert_section(conn, name, data, effective),
+                "rows": written,
                 "source": r["source"],
                 "status": "ok",
             }
@@ -514,7 +536,11 @@ def fetch_board_snapshot(
                 # statistic 子表不在适配器承载（issue #114 定稿，spec 冲突修正）：
                 # lhb_basic 落库后由库内近 60 日历日窗口滚动自算（DELETE+INSERT
                 # 幂等，窗口滑出/上游修订自愈）；新浪 ggtj 回归 --check 对拍校验位
-                res["rows"] += recompute_lhb_statistic(conn, effective)
+                res["rows"] += (
+                    statistic_written
+                    if lhb_history
+                    else recompute_lhb_statistic(conn, effective)
+                )
             elif not data:
                 res["empty_kind"] = "no_data_for_date"
             detail = summarize_attempted(r["attempted_sources"])

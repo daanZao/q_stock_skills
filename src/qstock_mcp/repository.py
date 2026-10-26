@@ -481,14 +481,9 @@ def upsert_board_rows(
     return len(values)
 
 
-# ---------------------------------------------------------------- lhb 统计子表（库内自算）
-
-# statistic 滚动窗口：近 60 日历日（承接原新浪 ggtj「近 60 日」窗口语义；
-# issue #114 code-review 修正：交易所官方源覆盖 statistic 两表口径，
-# 新浪 ggtj 回归 --check 对拍校验位，不再承载落库）
 LHB_STATISTIC_WINDOW_DAYS = 60
 
-_LHB_STATISTIC_INSERT_SQL = """
+_LHB_STATISTIC_INSERT_TEMPLATE = """
 INSERT INTO lhb_stock_statistic (
     trade_date, stock_code, stock_name,
     appear_count_3m, buy_amount_3m, sell_amount_3m, net_buy_3m,
@@ -497,11 +492,84 @@ INSERT INTO lhb_stock_statistic (
 SELECT %s, stock_code, MAX(stock_name), COUNT(*),
        SUM(buy_amount), SUM(sell_amount), SUM(net_buy_amount),
        NULL, NULL, CURRENT_TIMESTAMP
-FROM lhb_basic
+FROM {source}
 WHERE trade_date >= %s AND trade_date <= %s
 GROUP BY stock_code
 """
 
+_LHB_STATISTIC_INSERT_SQL = _LHB_STATISTIC_INSERT_TEMPLATE.format(source="lhb_basic")
+_LHB_STATISTIC_STAGING_INSERT_SQL = _LHB_STATISTIC_INSERT_TEMPLATE.format(
+    source="""
+    (
+        SELECT trade_date, stock_code, stock_name, lhb_reason,
+               buy_amount, sell_amount, net_buy_amount
+        FROM lhb_basic
+        UNION ALL
+        SELECT s.trade_date, s.stock_code, s.stock_name, s.lhb_reason,
+               s.buy_amount, s.sell_amount, s.net_buy_amount
+        FROM lhb_stat_staging AS s
+        WHERE NOT EXISTS (
+            SELECT 1 FROM lhb_basic AS b
+            WHERE b.trade_date = s.trade_date
+              AND b.stock_code = s.stock_code
+              AND b.lhb_reason = s.lhb_reason
+        )
+    ) AS statistic_input
+    """
+)
+
+
+def replace_lhb_basic_day(
+    conn, trade_date: str, rows: list[dict], staging_rows: list[dict] | None = None
+) -> tuple[int, int]:
+    """原子替换当日 basic 并重算 statistic；前置行只进连接级临时表。"""
+    cols = ("trade_date",) + LHB_BASIC_FIELDS
+    values = [[trade_date] + [row.get(f) for f in LHB_BASIC_FIELDS] for row in rows]
+    staging_values = [
+        [row.get("trade_date"), row.get("stock_code"), row.get("stock_name"),
+         row.get("lhb_reason") or "", row.get("buy_amount"),
+         row.get("sell_amount"), row.get("net_buy_amount")]
+        for row in (staging_rows or [])
+    ]
+    window_start = add_days(trade_date, -LHB_STATISTIC_WINDOW_DAYS)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS lhb_stat_staging ("
+                "trade_date text, stock_code text, stock_name text, lhb_reason text, "
+                "buy_amount real, sell_amount real, net_buy_amount real"
+                ") ON COMMIT DELETE ROWS"
+            )
+            cur.execute("DELETE FROM lhb_stat_staging")
+            if staging_values:
+                execute_values(
+                    cur,
+                    "INSERT INTO lhb_stat_staging VALUES %s",
+                    staging_values,
+                )
+            cur.execute("DELETE FROM lhb_stock_statistic WHERE trade_date = %s",
+                        (trade_date,))
+            cur.execute("DELETE FROM lhb_basic WHERE trade_date = %s", (trade_date,))
+            if values:
+                execute_values(
+                    cur,
+                    f"INSERT INTO lhb_basic ({', '.join(cols)}) VALUES %s",
+                    values,
+                    template="(" + ", ".join(["%s"] * len(cols)) + ")",
+                )
+            cur.execute(
+                _LHB_STATISTIC_STAGING_INSERT_SQL,
+                (trade_date, window_start, trade_date),
+            )
+            statistic_rows = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(values), statistic_rows
+
+
+# ---------------------------------------------------------------- lhb 统计子表（库内自算）
 
 def recompute_lhb_statistic(conn, trade_date: str) -> int:
     """lhb_stock_statistic 库内滚动自算（issue #114 定稿口径）：以 lhb_basic

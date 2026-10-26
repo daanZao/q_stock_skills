@@ -36,17 +36,19 @@ def ensure_coverage(
     start: str,
     end: str,
     defer_dates: frozenset[str] = frozenset(),
+    force: bool = False,
 ) -> dict:
     """补齐 [start, end] 的头尾缺口，返回 {"ok", "segments", "deferred_rows"}。
 
     公共能力：fetch/query 自愈与 init 全量回溯（issue #8）共用。
     defer_dates：禁写日期集（盘中禁写防线，issue #78）——命中行不落库，
-    收集进 deferred_rows 由调用方决定如何呈现。
+    收集进 deferred_rows 由调用方决定如何呈现。force=True 时整窗重抓。
     """
     existing = select_dates(conn, stock_code, adj, start, end)
+    gaps = [(start, end)] if force else head_tail_gaps(existing, start, end)
     segments: list[dict] = []
     deferred_rows: list[dict] = []
-    for seg_start, seg_end in head_tail_gaps(existing, start, end):
+    for seg_start, seg_end in gaps:
         try:
             result = fetch_with_fallback(adapters, stock_code, seg_start, seg_end, adj)
         except AllSourcesFailed as e:
@@ -157,8 +159,11 @@ _ADJUST_FALLBACK_NOTE = (
 )
 
 
-def _run(stock_code: str, days, start, end, adj, adapters, tool: str, now=None):
-    """公共骨架：参数解析 → 连接 → 头尾自愈。失败返回 (None, error_dict)。"""
+def _run(
+    stock_code: str, days, start, end, adj, adapters, tool: str, now=None,
+    force: bool = False,
+):
+    """公共骨架：参数解析 → 连接 → 头尾自愈或整窗刷新。"""
     params = {
         "stock_code": stock_code,
         "adj": adj,
@@ -166,6 +171,8 @@ def _run(stock_code: str, days, start, end, adj, adapters, tool: str, now=None):
         "start": start,
         "end": end,
     }
+    if force:
+        params["force"] = True
     try:
         start_d, end_d = resolve_range(days, start, end)
     except ValueError as e:
@@ -180,7 +187,8 @@ def _run(stock_code: str, days, start, end, adj, adapters, tool: str, now=None):
         # 盘中禁写（issue #78）：交易时段内当日行不落库（未收盘数据非最终值）
         defer = frozenset({today_str(now)}) if is_trading_time(now) else frozenset()
         cover = ensure_coverage(
-            conn, adapters, stock_code, adj, start_d, end_d, defer_dates=defer
+            conn, adapters, stock_code, adj, start_d, end_d,
+            defer_dates=defer, force=force,
         )
         if cover["ok"] and cover["segments"]:
             # 采集台账（issue #77）：真实发生抓取/写库才落账；无缺口零动作不落账
@@ -218,13 +226,16 @@ def fetch_daily(
     adj: str = "qfq",
     adapters: Sequence[DailyAdapter] | None = None,
     now=None,
+    force: bool = False,
 ) -> dict:
-    """抓取个股日线并落库：只补头尾缺口，按业务键 upsert（幂等）。
+    """抓取个股日线并落库：默认只补头尾缺口，force=True 时整窗重抓。
 
     盘中时段（交易日 09:30–15:00）当日行不落库（盘中禁写防线，issue #78），
     响应带 note；now 为测试注入的时钟。
     """
-    ctx, err = _run(stock_code, days, start, end, adj, adapters, "fetch_daily", now)
+    ctx, err = _run(
+        stock_code, days, start, end, adj, adapters, "fetch_daily", now, force=force
+    )
     if err:
         return err
     out = {

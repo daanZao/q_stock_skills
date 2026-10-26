@@ -239,11 +239,79 @@ def test_fetch_lhb_backfill_iterates_trading_days(pg_ready, monkeypatch):
     r = fetch_lhb_backfill("2026-10-16", "2026-10-20",
                            lhb_adapters=[Recorder()])
     assert r["status"] == "ok" and r["total_days"] == 3  # 16/19/20（17/18 周末）
-    assert calls == ["20261016", "20261019", "20261020"]
+    assert [d for d in calls if d >= "20261016"] == [
+        "20261016", "20261019", "20261020",
+    ]
+    assert all(d < "20261016" for d in calls[:-3])  # 统计前置只抓、不写库
     assert r["empty_days"] == 0
     # 逐日落库 + 逐日台账
     assert _count(pg_ready, "lhb_basic") == 2 * 3
     assert len([x for x in _ledger(pg_ready) if x[0] == "lhb"]) == 3
+
+
+def test_fetch_lhb_backfill_replaces_old_reasons_and_excludes_yyb(pg_ready):
+    old = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][0], lhb_reason="旧来源原因")],
+    }
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter(payload=old)])
+    new = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][0], lhb_reason="交易所官方原因")],
+        "lhb_yyb_capital": [{"rank": 1, "seat_name": "不应写入", "total_amount": 1.0}],
+        "lhb_yyb_most": [{"rank": 1, "seat_name": "不应写入", "appear_count": 1}],
+    }
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[FakeLhbAdapter(payload=new)]
+    )
+
+    assert result["status"] == "ok"
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT lhb_reason FROM lhb_basic WHERE trade_date = '20261020'")
+            assert cur.fetchall() == [("交易所官方原因",)]
+    finally:
+        conn.close()
+    assert _count(pg_ready, "lhb_yyb_capital") == 0
+    assert _count(pg_ready, "lhb_yyb_most") == 0
+
+
+def test_fetch_lhb_backfill_partial_failure_preserves_old_day(pg_ready):
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter()])
+    partial = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][0], lhb_reason="残缺新行", buy_amount=1.0)],
+        "errors": ["sse: 单所失败"],
+    }
+
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = partial if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[PartialOnTargetDay()]
+    )
+
+    assert result["status"] == "error"
+    assert result["results"][0]["status"] == "error"
+    assert "单所失败" in result["results"][0]["error"]
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT lhb_reason, buy_amount FROM lhb_basic ORDER BY stock_code")
+            basics = cur.fetchall()
+            cur.execute("SELECT buy_amount_3m FROM lhb_stock_statistic ORDER BY stock_code")
+            statistics = cur.fetchall()
+    finally:
+        conn.close()
+    assert basics == [
+        ("日价格振幅达到18.39%", pytest.approx(3601.5072)),
+        ("一、涨幅偏离值达7%的前五只证券", pytest.approx(293.5474)),
+    ]
+    assert statistics == [(pytest.approx(3601.5072),), (pytest.approx(293.5474),)]
 
 
 def test_fetch_lhb_backfill_single_day_failure_continues(pg_ready):
@@ -259,6 +327,49 @@ def test_fetch_lhb_backfill_single_day_failure_continues(pg_ready):
     by_day = {x["trade_date"]: x for x in r["results"]}
     assert by_day["20261019"]["status"] == "error"
     assert _count(pg_ready, "lhb_basic") == 2 * 2  # 失败日不落库，其余保留
+
+
+def test_fetch_lhb_backfill_stages_lookback_without_writing_outside_window(pg_ready):
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[FakeLhbAdapter()]
+    )
+
+    assert result["status"] == "ok"
+    assert result["statistic_lookback"] == {"start": "20260821", "days": 60}
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(trade_date), MAX(trade_date), COUNT(*) FROM lhb_basic")
+            assert cur.fetchone() == ("20261020", "20261020", 2)
+            cur.execute(
+                "SELECT stock_code, appear_count_3m FROM lhb_stock_statistic"
+                " WHERE trade_date = '20261020' ORDER BY stock_code"
+            )
+            assert cur.fetchall() == [("000530", 37), ("600302", 37)]
+    finally:
+        conn.close()
+
+
+def test_fetch_lhb_backfill_does_not_double_count_existing_lookback_rows(pg_ready):
+    fetch_lhb_day("20261019", lhb_adapters=[FakeLhbAdapter()])
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[FakeLhbAdapter()]
+    )
+
+    assert result["status"] == "ok"
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stock_code, appear_count_3m FROM lhb_stock_statistic"
+                " WHERE trade_date = '20261020' ORDER BY stock_code"
+            )
+            assert cur.fetchall() == [("000530", 37), ("600302", 37)]
+            cur.execute("SELECT COUNT(*) FROM lhb_basic WHERE trade_date < '20261020'")
+            assert cur.fetchone()[0] == 2  # 既有窗前行保留，但未被重复写入
+    finally:
+        conn.close()
 
 
 def test_fetch_lhb_backfill_bad_range(pg_ready):
@@ -382,6 +493,16 @@ class TestLhbCli:
         )
         assert rc == 0 and out["mode"] == "backfill" and out["total_days"] == 3
 
+    def test_backfill_trading_day_window(self, pg_ready, capsys):
+        rc, out = _run(
+            capsys, ["lhb", "--trading-days", "3", "--end", "20261020"],
+            lhb_adapters=[FakeLhbAdapter()],
+        )
+        assert rc == 0
+        assert out["params"] == {"start": "20261016", "end": "20261020"}
+        assert out["trading_days"] == 3
+        assert out["total_days"] == 3
+
     def test_backfill_mode_partial_exit_1(self, pg_ready, capsys):
         class Flaky(FakeLhbAdapter):
             def fetch_lhb(self, trade_date):
@@ -490,14 +611,17 @@ def test_statistic_selfcalc_rolling_window(pg_ready):
             rows = cur.fetchall()
     finally:
         conn.close()
-    # 逐日快照：08-03 起每日窗口含全部回溯日，appear 按日累计 1→5
+    # staging 提供完整前置；周末没有旧行滑出，后两日窗口行数相应增加。
     assert len(rows) == 5 * 2  # 5 日 × 2 股
     by_day = {}
     for d, code, n in rows:
         by_day.setdefault(d, {})[code] = n
-    for i, d in enumerate(["20260803", "20260804", "20260805", "20260806",
-                           "20260807"]):
-        assert by_day[d] == {"000530": i + 1, "600302": i + 1}
+    expected = dict(zip(
+        ["20260803", "20260804", "20260805", "20260806", "20260807"],
+        [42, 42, 42, 43, 44],
+    ))
+    for d, count in expected.items():
+        assert by_day[d] == {"000530": count, "600302": count}
     # 重跑末日：快照行数不变、计数不变（幂等自愈）
     fetch_lhb_day("2026-08-07", lhb_adapters=[FakeLhbAdapter()])
     assert _count(pg_ready, "lhb_stock_statistic") == 10

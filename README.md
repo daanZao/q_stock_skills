@@ -80,7 +80,7 @@ pip install -e ".[sources,dev]"   # sources = akshare/baostock/curl_cffi 真实�
 }
 ```
 
-首次使用调一次 `init_database` 即可完成建表与轻量初始化，秒级就绪。
+首次使用调一次 `init_database` 即可完成建表与轻量初始化。轻量初始化不等于全市场历史数据已就绪；从空库或已有断档库建立最近 90 个交易日的历史分析数据，按 [`docs/first-run.md`](docs/first-run.md) 的顺序执行并验收。
 
 ## 启动方式
 
@@ -108,17 +108,19 @@ MCP server 只提供工具，**自己不会按点采集**。日常数据靠独�
 | --- | --- | --- |
 | `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集（boards 行业段申万官网单源，issue #118） | 交易日 15:30 之后 |
 | `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 + 申万板块分析报表估值维度（sw_board_valuation part，T+1） | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
-| `backfill [--start D] [--end D] [--source sw]` | 板块历史回补（issue #121 定稿申万单源）：申万官网 trend 全历史回补申万双级口径行（深至 1999，回补行带 `source='swsresearch'` 标注）；东财 push2his 回补已随 issue #121 摘除 | 手动/灾难恢复，非定时任务 |
+| `backfill [--start D --end D \| --trading-days N] [--force]` | 申万板块历史回补：默认断点续跑；`--force` 整窗重抓并覆盖同键记录 | 手动/灾难恢复，非定时任务 |
 | `sw-boards [--date D] [--check]` | 申万板块固定入口（issue #118）：双级实时快照落库（收盘后=当日收盘截面）；`--check` 官网 vs 库内 vs 自算三方位对拍不落库 | 收盘后；对拍按需 |
 | `sw-dict [--url U]` | 申万成分字典在线刷新（issue #118）：官网分类 xls 清空重载 'sw' 体系（含北交所归属），幂等 | 每周一次 |
-| `daily --codes A,B [--date D]` / `daily --all` | 个股日线固定入口（issue #112）：腾讯 → 新浪 → baostock 抓取落库；`--check` 三源直取对拍不落库；北交所旧码自动归一化 | 收盘后 19:30 左右的当日行（T+0）补采；`--all` 全市场刷新建议配 `--throttle 1` |
+| `daily --codes A,B [--date D \| --start D --end D \| --trading-days N] [--force]` / `daily --all` | 个股日线固定入口：默认只补头尾缺口；`--force` 整窗重抓；`--check` 三源对拍不落库 | 收盘后 19:30 左右的当日行（T+0）补采；`--all` 建议配 `--throttle 1` |
 | `limitpool [--date D]` / `limitpool --probe` | 涨停池固定入口（issue #120）：zt_pool 三池经同花顺涨停揭秘低频抓取（每日每池一次、封禁探测），strong_stocks 库内自算（60日新高 ∪ 近10日多次涨停）；`--probe` 只做封禁探测 | 交易日 19:30 之后（THS 盘后数据 + 当日个股日线已入库）；被封禁当日勿重试，等次日 |
 | `snapshot [--date D] [--check]` | 全市场快照固定入口（issue #116）：腾讯批量报价 → 腾讯 rank → 新浪三层链抓取落库；`--check` 三源直取对拍不落库；主源 18 字段全覆盖、含北交所 | 收盘后（15:30 之后）；盘中勿高频 |
-| `index [--codes A,B] [--date D \| --start D --end D] [--verify]` | 指数日线固定入口（issue #117）：腾讯 → baostock 抓取落库（断档回填如科创50 2026-10-13 起缺口 / 收盘后当晚 T+0 当日行）；`--verify` 覆盖核验对照交易日历列缺口，不写库；缺省代码 = 7 大指数白名单 | 收盘后 19:30 左右的指数当日行（T+0）补采；`--verify` 复盘前巡检 |
+| `index [--codes A,B] [--date D \| --start D --end D \| --trading-days N] [--verify]` | 指数日线固定入口：历史回补 / T+0 补采；`--verify` 对照交易日历列缺口 | 收盘后 19:30 左右；`--verify` 复盘前巡检 |
+| `lhb [--date D \| --start D --end D \| --trading-days N]` | 龙虎榜 basic 与滚动统计；历史逐日完整替换、60 日历日前置 staging，营业部累计榜不写历史 | 收盘后 18:30 或历史回补 |
+| `coverage [--start D --end D \| --trading-days N]` | 个股、指数、申万板块、龙虎榜窗口覆盖核验；首末日期、行数、缺失日，纯读不补抓 | 回补前预检与回补后验收 |
 
 耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求 + 申万估值报表 2 次分页调用）；`close` 数分钟到十几分钟；`limitpool` 约 40 秒（THS 三池 × 池间 20s 长退避 + 库内自算秒级）；`backfill --source sw` 155 板块 × trend 全历史（1999 起，单请求/板块）约 2~3 分钟（0.4s/请求限速内）；`daily --codes` 每只约 1–2 秒（腾讯单请求），`daily --all` 约 5900 只 × 节流间隔（缺省 1 秒/只，约 1.5–2 小时）。
 
-重复执行幂等（各业务键 upsert），每次执行落采集台账（可用 MCP 工具 `query_collection_log` 查询）；退出码 0=全部成功，1=任一部分失败（明细在 stdout JSON），2=参数错误。长时间运行的批（backfill 全量约千个板块）按双阈值向 **stderr** 打进度（每 50 个板块或距上条 ≥60s，先到先打），stdout 始终只留给最终结构化 JSON。backfill 韧性（spec #86）：连续 10 个板块全源失败即熔断中止（输出 `aborted` + exit 1，落整体 error 台账）；重跑自动跳过台账中同窗口已 ok 的板块（断点续跑，只补缺口）。全链路另有统一韧性：上游请求 60s 全局超时（挂死有界）、同源重试 0.5/1/2s 退避、by-design 不支持的源不重试。
+重复执行按业务键幂等；每次执行落采集台账（可用 MCP 工具 `query_collection_log` 查询）。退出码 0=全部成功，1=任一部分失败（明细在 stdout JSON），2=参数错误，退出码不单独证明窗口完整。长时间运行的批按双阈值向 **stderr** 打进度，stdout 只留最终结构化 JSON。backfill 默认跳过同窗口已 ok 板块，`--force` 时整窗重抓；连续 10 个板块全源失败仍熔断。全链路上游请求 60s 全局超时，同源重试 0.5/1/2s 退避，by-design 不支持的源不重试。
 
 **漏采补录示例**：某天定时任务没跑、复盘发现缺数时，按数据类型选路径——
 
@@ -143,7 +145,7 @@ qstock-scheduler index --start 20261013 --end 20261020 --verify
 qstock-scheduler limitpool --date 20261020
 ```
 
-注意可补性边界：`zt_pool`/`strong_stocks`/`lhb` 也可直接走 MCP `fetch_board_snapshot` 补历史日期（zt_pool 为 THS 源、回溯深度有限，见 `docs/limitpool-cli.md`）；`indices` 快照与 `boards` 属实时语义 section，**MCP 路径对历史日期硬拒绝**（issue #78，防"把最新数据写成历史日期"），板块只能经上面的 `backfill` CLI 补；指数日线（`index_daily`）可经上面的 `index` CLI 补任意历史区间（腾讯 K 线全历史，`--verify` 可定位缺口首日）；`market_snapshot`（涨跌家数/两市成交额）没有历史 API，漏采即永久缺失。因此定时任务的当日告警比事后补录更重要。
+注意可补性边界：`zt_pool` 为 THS 源、回溯深度有限，`strong_stocks` 依赖日线与涨停池输入，不承诺完整 90 日；龙虎榜历史统一走 `lhb` CLI，只补 basic 与滚动统计，营业部累计榜无历史日期接口。`indices` 快照与 `boards` 实时快照属实时语义 section，**MCP 路径对历史日期硬拒绝**；板块历史走 `backfill`，指数日线走 `index`。`market_snapshot`（涨跌家数/两市成交额）没有历史 API，漏采即永久缺失。因此定时任务的当日告警比事后补录更重要。
 
 launchd/cron 安装样例见 [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)（用户自行安装；非交易日触发产生 empty 台账行，属正常语义）。
 
@@ -176,7 +178,9 @@ pytest tests/ skills/
 
 ## 文档导航
 
+- [`docs/first-run.md`](docs/first-run.md)：首次使用、最近 90 个交易日整窗刷新与验收
 - [`docs/knowledge-graph.md`](docs/knowledge-graph.md)：项目知识图谱——总览图、实体清单、关键流程、「想改 X 先看哪里」
+- CLI 手册：[`daily`](docs/daily-source-cli.md) / [`index`](docs/index-source-cli.md) / [`sw-boards`](docs/sw-boards-cli.md) / [`lhb`](docs/lhb-source-cli.md) / [`limitpool`](docs/limitpool-cli.md) / [`snapshot`](docs/snapshot-source-cli.md) / [`stock-list`](docs/stock-list-cli.md) / [`parity`](docs/parity-cli.md)
 - [`CONTEXT.md`](CONTEXT.md)：领域词汇表
 - [`docs/adr/`](docs/adr/)：设计决策（MCP 边界 / PG 选型 / 通用结论表 / init 设计 / 妙想接入 / 金额单位万元 / 抓取三态错误契约）
 - [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)：`qstock-scheduler` 定时采集的 launchd 安装样例

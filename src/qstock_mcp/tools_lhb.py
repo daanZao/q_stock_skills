@@ -17,15 +17,19 @@ from datetime import datetime, timezone
 from time import monotonic
 from typing import Sequence
 
-from .adapters import BoardAdapter
+from .adapters import BoardAdapter, default_lhb_adapters
 from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
 from .dates import add_days, is_trading_day, normalize_date, today_str
 from .daily_parity import _within_tolerance
 from .db import connect
+from .fetch_chain import (
+    AllSourcesFailed, aggregate_error_kind, fetch_section_with_fallback,
+)
+from .ledger import record_collection, summarize_attempted
 from .output import aggregate_batch_status
 from .output import error as _error
-from .repository import select_lhb_statistic
+from .repository import LHB_STATISTIC_WINDOW_DAYS, select_lhb_statistic
 from .tools_board import fetch_board_snapshot
 
 log = logging.getLogger(__name__)
@@ -63,10 +67,13 @@ def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
 def fetch_lhb_day(
     trade_date: str | None = None,
     lhb_adapters: Sequence[BoardAdapter] | None = None,
+    history: bool = False,
+    staging_rows: list[dict] | None = None,
 ) -> dict:
-    """单日龙虎榜抓取落库（lhb 专用链）；返回 fetch_board_snapshot 的 lhb 段结果。"""
+    """单日龙虎榜抓取落库；history=True 时仅 basic 按日完整替换。"""
     result = fetch_board_snapshot(
-        trade_date=trade_date, sections=["lhb"], lhb_adapters=lhb_adapters
+        trade_date=trade_date, sections=["lhb"], lhb_adapters=lhb_adapters,
+        lhb_history=history, lhb_staging_rows=staging_rows,
     )
     if result.get("sections") is None:
         return result  # 参数级 error 契约原样上抛
@@ -77,6 +84,32 @@ def fetch_lhb_day(
         "lhb": result["sections"]["lhb"],
         "failed_sections": result["failed_sections"],
     }
+
+
+def _lhb_staging_rows(
+    start: str, end: str, adapters: Sequence[BoardAdapter]
+) -> tuple[list[dict], dict | None]:
+    rows: list[dict] = []
+    d = start
+    while d <= end:
+        if is_trading_day(d):
+            try:
+                result = fetch_section_with_fallback(adapters, "lhb", d)
+            except AllSourcesFailed as e:
+                return [], {
+                    "error": f"统计前置抓取失败 {d}: {e}",
+                    "error_kind": aggregate_error_kind(e.attempted),
+                    "detail": summarize_attempted(e.attempted),
+                }
+            if result["data"].get("errors"):
+                message = "; ".join(result["data"]["errors"])
+                return [], {
+                    "error": f"统计前置抓取不完整 {d}: {message}",
+                    "error_kind": "partial_error", "detail": message,
+                }
+            rows.extend(result["data"]["lhb_basic"])
+        d = add_days(d, 1)
+    return rows, None
 
 
 def fetch_lhb_backfill(
@@ -102,11 +135,35 @@ def fetch_lhb_backfill(
         d = add_days(d, 1)
     if not days:
         return _error(tool, params, f"区间 {start_d}~{end_d} 内无交易日")
+    lookback_start = add_days(start_d, -LHB_STATISTIC_WINDOW_DAYS)
+    lookback_end = add_days(start_d, -1)
+    staging_rows, staging_error = _lhb_staging_rows(
+        lookback_start, lookback_end,
+        lhb_adapters if lhb_adapters is not None else default_lhb_adapters(),
+    )
+    if staging_error:
+        conn, db_error = connect()
+        if not db_error:
+            try:
+                record_collection(
+                    conn, trade_date=start_d, section="lhb", status="error",
+                    error_kind=staging_error["error_kind"],
+                    detail=staging_error["detail"],
+                )
+            finally:
+                conn.close()
+        return {
+            "tool": tool, "status": "error", "params": params,
+            "error": staging_error["error"],
+            "error_kind": staging_error["error_kind"], "results": [],
+        }
     total = len(days)
     results = []
     last_logged = monotonic()
     for i, d in enumerate(days, 1):
-        r = fetch_lhb_day(d, lhb_adapters=lhb_adapters)
+        r = fetch_lhb_day(
+            d, lhb_adapters=lhb_adapters, history=True, staging_rows=staging_rows
+        )
         lhb = r.get("lhb") or {}
         results.append(
             {
@@ -116,6 +173,7 @@ def fetch_lhb_backfill(
                 "source": lhb.get("source"),
                 "empty_kind": lhb.get("empty_kind"),
                 "error_kind": lhb.get("error_kind"),
+                "error": lhb.get("error"),
                 "partial_error": lhb.get("partial_error"),
             }
         )
@@ -129,6 +187,9 @@ def fetch_lhb_backfill(
         "tool": tool,
         "status": status,
         "params": {"start": start_d, "end": end_d},
+        "statistic_lookback": {
+            "start": lookback_start, "days": LHB_STATISTIC_WINDOW_DAYS,
+        },
         "total_days": total,
         "succeeded": total - len(failed),
         "failed": len(failed),

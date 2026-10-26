@@ -16,6 +16,7 @@ from qstock_mcp import scheduler
 from qstock_mcp.adapters.base import FetchError
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.ledger import record_collection
+from qstock_mcp.repository import upsert_board_history
 from qstock_mcp.tools_backfill import fetch_sw_boards_backfill
 
 from fakes import FakeSwBoardsAdapter, SW_BOARD_LIST
@@ -147,6 +148,38 @@ def test_sw_backfill_rerun_idempotent_and_resumes(pg_ready):
     assert adapters[0].calls.count("history") == len(SW_BOARD_LIST)  # 只抓一轮
 
 
+def test_sw_backfill_force_refetches_successful_window(pg_ready):
+    adapters = [_adapter_with_window()]
+    kwargs = dict(start="20261001", end=END, adapters=adapters, now=NOW)
+    fetch_sw_boards_backfill(**kwargs)
+
+    forced = fetch_sw_boards_backfill(**kwargs, force=True)
+
+    assert forced["status"] == "ok"
+    assert forced["skipped_boards"] == []
+    assert forced["params"]["force"] is True
+    assert adapters[0].calls.count("history") == 2 * len(SW_BOARD_LIST)
+
+
+def test_sw_backfill_force_preserves_rows_outside_window(pg_ready):
+    board = SW_BOARD_LIST[0]
+    outside = dict(_history(board, ["20260930"])[0], latest_price=999.0)
+    conn = psycopg2.connect(pg_ready)
+    upsert_board_history(conn, [outside], "legacy")
+    conn.close()
+
+    out = fetch_sw_boards_backfill(
+        start="20261001", end=END,
+        adapters=[_adapter_with_window()], now=NOW, force=True,
+    )
+
+    assert out["status"] == "ok"
+    rows = _board_rows(pg_ready, "20260930")
+    assert len(rows) == 1
+    assert rows[0][3] == 999.0
+    assert rows[0][4] == "legacy"
+
+
 def test_sw_backfill_default_window_from_1999(pg_ready):
     """默认窗口 19990101 起：历史深度直达 1999（5/10 日涨跌数据基础）。"""
     adapters = [_adapter_with_window()]
@@ -243,6 +276,23 @@ def test_cli_backfill_source_sw(pg_ready, capsys, monkeypatch):
     assert out["source"] == "sw"
     assert out["status"] == "ok"
     assert len(_board_rows(pg_ready)) == len(SW_BOARD_LIST) * len(WINDOW_DAYS)
+
+
+def test_cli_backfill_trading_day_window_and_force(pg_ready, capsys, monkeypatch):
+    adapter = _adapter_with_window()
+    monkeypatch.setattr(
+        "qstock_mcp.adapters.sw_adapter.SwSResearchAdapter",
+        lambda *a, **k: adapter,
+    )
+    rc = scheduler.main([
+        "backfill", "--source", "sw", "--trading-days", "3",
+        "--end", END, "--force",
+    ])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["window"] == {"start": "20261021", "end": END}
+    assert out["trading_days"] == 3
+    assert out["params"]["force"] is True
 
 
 def test_cli_backfill_default_is_sw(pg_ready, capsys, monkeypatch):

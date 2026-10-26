@@ -14,6 +14,7 @@ baostock 保留为次晨权威复核。东财口径（akshare 沪深
 | --- | --- |
 | 科创50（000688）断档回填（如 2026-10-13 起缺口） | `index --codes 000688 --start <缺口首日> --end <截止日>` |
 | 收盘后当晚补指数当日行（T+0） | `index --date <当日>`（缺省代码 = 7 大指数） |
+| 最近 90 个交易日回补与核验 | `index --trading-days 90` 后 `index --trading-days 90 --verify` |
 | 复盘前覆盖核验（主要指数清单逐一对照） | `index --verify [--start D --end D]`（不写库） |
 | 换源后数据质量抽查 | `index --codes 000001 --start D --end D` 后 `query_index_daily` 读数与行情软件对照 |
 
@@ -44,7 +45,10 @@ qstock-scheduler index --codes 000001,399006 --start 20261001 --end 20261023
 - `--codes`：逗号分隔指数代码；缺省 = `MAJOR_INDICES` 7 大指数白名单
   （000001 上证指数 / 399001 深证成指 / 399006 创业板指 / 000300 沪深300 /
   000016 上证50 / 000905 中证500 / 000688 科创50）。
-- `--date` 与 `--start/--end` 互斥；都不传时缺省当日。
+- `--date` 与 `--start/--end/--trading-days` 互斥；都不传时缺省当日。
+- `--trading-days N`：含截止日在内 N 个 A 股交易日，可用 `--end` 改截止日，
+  缺省截止最近已收盘交易日；与 `--start` 互斥。指数始终整窗重抓并 upsert，
+  不需要 `--force`。
 - `--verify`：覆盖核验模式——逐指数读库内区间行数/首末日期/来源分布，并对照
   `dates.is_trading_day` 交易日历列示窗口内缺失交易日；纯读不写库。
   窗口缺省 = 近 31 自然日。退出码 1 表示存在 gap（`missing_days` 即回填命令的

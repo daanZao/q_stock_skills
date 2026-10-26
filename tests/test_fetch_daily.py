@@ -100,6 +100,32 @@ def test_fetch_all_sources_failed(pg_test):
     assert _rows_in_db(pg_test) == []  # 不落任何数据，更不伪造
 
 
+def test_fetch_force_refreshes_whole_window_and_preserves_outside(pg_test):
+    _init(pg_test)
+    conn = psycopg2.connect(pg_test)
+    upsert_daily(conn, "600519", "qfq", weekday_rows("20231229", "20240112", close=99.0), "legacy")
+    conn.close()
+    ef = FakeAdapter("tencent")
+
+    result = fetch_daily(
+        "600519", start="20240101", end="20240110", adapters=[ef], force=True
+    )
+
+    assert result["status"] == "ok"
+    assert result["params"]["force"] is True
+    assert [(c["start"], c["end"]) for c in ef.calls] == [("20240101", "20240110")]
+    rows = _rows_in_db(pg_test)
+    by_date = {r["trade_date"]: r for r in rows}
+    assert all(by_date[d]["close"] == 10.0 for d in weekday_dates("20240101", "20240110"))
+    assert by_date["20231229"]["close"] == 99.0
+    assert by_date["20240111"]["close"] == 99.0
+    assert by_date["20240112"]["close"] == 99.0
+
+
+def weekday_dates(start, end):
+    return [r["trade_date"] for r in weekday_rows(start, end)]
+
+
 def test_fetch_is_idempotent(pg_test):
     _init(pg_test)
     ef = FakeAdapter("tencent")

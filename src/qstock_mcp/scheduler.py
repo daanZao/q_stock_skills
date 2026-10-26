@@ -56,12 +56,11 @@
                              默认走 腾讯→baostock 链抓取落库（断档回填/T+0
                              当日行补采）；--verify 纯读覆盖核验（对照交易日历
                              列缺口），不写库。缺省代码 = 7 大指数白名单。
-  lhb [--date D] [--start D --end D] [--check]
-                             龙虎榜固定入口（issue #114，spec #111）：沪深北
-                             交易所官方源（深所 JSON/上所文本/北所 JSONP）抓取
-                             落库，逐日幂等；--start/--end 历史回溯（单日失败
-                             不中断）；--check 新浪互补对拍（不落库，可手动
-                             触发）。
+  lhb [--date D] [--start D --end D | --trading-days N] [--check]
+                             龙虎榜固定入口：单日实时抓取；历史仅 basic/statistic，
+                             按日原子替换，60 日历日前置 staging，营业部榜不写历史。
+  coverage [--start D --end D | --trading-days N]
+                             历史分析窗口覆盖核验，纯读不触发抓取。
   limitpool [--date D] [--probe]
                              涨停池固定入口（issue #120，spec #111）：zt_pool
                              三池经同花顺涨停揭秘低频纪律抓取落库（每日每池
@@ -99,7 +98,7 @@ from typing import Sequence
 
 from .adapters import BoardAdapter, SnapshotAdapter
 from .daily_parity import compare_daily_sources
-from .dates import normalize_date, today_str
+from .dates import normalize_date, today_str, trading_day_window
 from .db import connect
 from .fetch_chain import (
     AllSourcesFailed,
@@ -115,6 +114,7 @@ from .stock_list_parity import compare_stock_list_sources
 from .sw_board_parity import compare_sw_board_sources
 from .tools_backfill import fetch_sw_boards_backfill
 from .tools_board import fetch_board_snapshot
+from .tools_coverage import verify_history_coverage
 from .tools_daily import fetch_daily
 from .tools_lhb import compare_lhb_sources, fetch_lhb_backfill, fetch_lhb_day
 from .tools_morning import fetch_morning_batch
@@ -164,20 +164,33 @@ def cmd_morning(date_arg: str | None) -> int:
     return 0 if result.get("status") == "ok" else 1
 
 
-def cmd_backfill(start: str | None, end: str | None,
-                 source: str = "sw") -> int:
-    """板块历史回补（申万官网 trend，issue #118/#121 定稿单源）：
-    非全 ok（partial_error/error）exit 1。默认窗口
-    19990101~前一交易日，历史深至 1999；东财 push2his 回补已随 issue #121
-    摘除（--source 仅 sw）。
-    """
+def cmd_backfill(
+    start: str | None,
+    end: str | None,
+    source: str = "sw",
+    trading_days: int | None = None,
+    force: bool = False,
+) -> int:
+    """板块历史回补；N 交易日窗口与显式起止日二选一。"""
     if source != "sw":
         _emit({"status": "error", "job": "backfill",
-               "error": f"未知 source: {source}（可选: sw；东财 push2his 回补"
-                        "已随 issue #121 摘除）"})
-        return 1  # 输入非法（退出码定义见模块 docstring：2 仅 argparse 参数错误）
-    result = fetch_sw_boards_backfill(start=start, end=end)
-    out = {"job": "backfill", "source": source, **result}
+               "error": f"未知 source: {source}（可选: sw）"})
+        return 1
+    if trading_days is not None:
+        if start:
+            _emit({"status": "error", "job": "backfill",
+                   "error": "--trading-days 与 --start 互斥；可用 --end 指定截止日"})
+            return 1
+        try:
+            start, end = trading_day_window(trading_days, end)
+        except ValueError as e:
+            _emit({"status": "error", "job": "backfill", "error": str(e)})
+            return 1
+    result = fetch_sw_boards_backfill(start=start, end=end, force=force)
+    out = {
+        "job": "backfill", "source": source,
+        "trading_days": trading_days, **result,
+    }
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
 
@@ -187,30 +200,36 @@ def cmd_lhb(
     start_arg: str | None = None,
     end_arg: str | None = None,
     check: bool = False,
+    trading_days: int | None = None,
     lhb_adapters: Sequence[BoardAdapter] | None = None,
 ) -> int:
-    """龙虎榜固定入口（issue #114）：单日抓取 / 区间回溯 / 新浪对拍。
-
-    - 默认：单日抓取落库（缺省当日；三所盘后发布，盘中空数据是正常语义）；
-    - --start/--end：历史回溯（单日失败不中断，逐日独立成败）；
-    - --check：新浪互补对拍（不落库）。--date 与 --start/--end 互斥。
-    """
+    """龙虎榜单日抓取、区间回溯或新浪对拍。"""
     tool = "lhb"
-    if date_arg and (start_arg or end_arg):
+    if date_arg and (start_arg or end_arg or trading_days is not None):
         _emit({"status": "error", "job": tool,
-               "error": "--date 与 --start/--end 互斥"})
+               "error": "--date 与 --start/--end/--trading-days 互斥"})
+        return 1
+    if trading_days is not None and start_arg:
+        _emit({"status": "error", "job": tool,
+               "error": "--trading-days 与 --start 互斥；可用 --end 指定截止日"})
         return 1
     if check:
         result = compare_lhb_sources(trade_date=date_arg)
         _emit({"job": tool, "mode": "check", **result})
         return 0 if result.get("status") == "ok" else 1
+    if trading_days is not None:
+        try:
+            start_arg, end_arg = trading_day_window(trading_days, end_arg)
+        except ValueError as e:
+            _emit({"status": "error", "job": tool, "error": str(e)})
+            return 1
     if start_arg or end_arg:
         if not (start_arg and end_arg):
             _emit({"status": "error", "job": tool,
                    "error": "--start 与 --end 需成对提供"})
             return 1
         result = fetch_lhb_backfill(start_arg, end_arg, lhb_adapters=lhb_adapters)
-        _emit({"job": tool, "mode": "backfill", **result})
+        _emit({"job": tool, "mode": "backfill", "trading_days": trading_days, **result})
         return 0 if result.get("status") == "ok" else 1
     result = fetch_lhb_day(date_arg, lhb_adapters=lhb_adapters)
     _emit({"job": tool, "mode": "fetch", **result})
@@ -285,12 +304,19 @@ def _parse_codes(codes_arg: str | None) -> list[str]:
 
 
 def _daily_range(
-    date_arg: str | None, start_arg: str | None, end_arg: str | None
+    date_arg: str | None,
+    start_arg: str | None,
+    end_arg: str | None,
+    trading_days: int | None = None,
 ) -> tuple[tuple[str, str] | None, str | None]:
-    """解析日线日期参数：--date 单日 / --start+--end 区间 / 缺省当日。"""
-    if date_arg and (start_arg or end_arg):
-        return None, "--date 与 --start/--end 互斥"
+    """解析单日、显式区间或 N 个交易日窗口。"""
+    if date_arg and (start_arg or end_arg or trading_days is not None):
+        return None, "--date 与 --start/--end/--trading-days 互斥"
+    if trading_days is not None and start_arg:
+        return None, "--trading-days 与 --start 互斥；可用 --end 指定截止日"
     try:
+        if trading_days is not None:
+            return trading_day_window(trading_days, end_arg), None
         if date_arg:
             day = normalize_date(date_arg)
             return (day, day), None
@@ -319,6 +345,8 @@ def cmd_daily(
     adj: str = "qfq",
     check: bool = False,
     throttle: float | None = None,
+    trading_days: int | None = None,
+    force: bool = False,
     daily_adapters: Sequence | None = None,
 ) -> int:
     """个股日线固定入口（issue #112）：抓取落库 / 三源对拍。
@@ -328,7 +356,7 @@ def cmd_daily(
     - --all：从 stock_list 取全市场，缺省按 1 秒/只节流（腾讯连接级限速实测）。
     """
     tool = "daily"
-    rng, err = _daily_range(date_arg, start_arg, end_arg)
+    rng, err = _daily_range(date_arg, start_arg, end_arg, trading_days)
     if err:
         _emit({"status": "error", "job": tool, "error": err})
         return 1
@@ -368,7 +396,7 @@ def cmd_daily(
     results: list[dict] = []
     for i, code in enumerate(codes):
         raw = fetch_daily(
-            code, start=start, end=end, adj=adj, adapters=daily_adapters
+            code, start=start, end=end, adj=adj, adapters=daily_adapters, force=force
         )
         entry: dict = {"stock_code": code, "status": raw.get("status")}
         if raw.get("status") == "ok":
@@ -400,6 +428,8 @@ def cmd_daily(
         "mode": "fetch",
         "range": {"start": start, "end": end},
         "adj": adj,
+        "trading_days": trading_days,
+        "force": force,
         "total": len(results),
         "succeeded": succeeded,
         "failed": failed,
@@ -465,34 +495,54 @@ def cmd_index(
     start_arg: str | None = None,
     end_arg: str | None = None,
     verify: bool = False,
+    trading_days: int | None = None,
     index_adapters: Sequence | None = None,
 ) -> int:
-    """指数日线固定入口（issue #117）：抓取落库 / 覆盖核验。
-
-    - 默认（fetch）：逐指数走 腾讯→baostock fallback 链抓取 [start, end]
-      落库 index_daily（业务键幂等，可重复执行）；用于断档回填（如科创50
-      2026-10-13 起缺口）与收盘后当晚 T+0 当日行补采。缺省代码 = 7 大指数。
-    - --verify：纯读覆盖核验（对照交易日历列缺口），不写库。
-    """
+    """指数日线固定入口（issue #117）：抓取落库 / 覆盖核验。"""
     tool = "index"
-    if verify:
-        from .tools_index import verify_index_coverage
-
-        result = verify_index_coverage(codes=codes_arg, start=start_arg, end=end_arg)
-        _emit({"job": tool, "mode": "verify", **result})
-        return 0 if result.get("status") == "ok" else 1
-    rng, err = _daily_range(date_arg, start_arg, end_arg)
+    rng, err = _daily_range(date_arg, start_arg, end_arg, trading_days)
     if err:
         _emit({"status": "error", "job": tool, "error": err})
         return 1
     assert rng is not None
     start, end = rng
+    if verify:
+        from .tools_index import verify_index_coverage
+
+        result = verify_index_coverage(codes=codes_arg, start=start, end=end)
+        _emit({"job": tool, "mode": "verify", "trading_days": trading_days, **result})
+        return 0 if result.get("status") == "ok" else 1
     from .tools_index import fetch_index_backfill
 
     result = fetch_index_backfill(
         codes=codes_arg, start=start, end=end, adapters=index_adapters
     )
-    _emit({"job": tool, "mode": "fetch", **result})
+    _emit({"job": tool, "mode": "fetch", "trading_days": trading_days, **result})
+    return 0 if result.get("status") == "ok" else 1
+
+
+def cmd_coverage(
+    start_arg: str | None = None,
+    end_arg: str | None = None,
+    trading_days: int | None = None,
+) -> int:
+    """历史分析窗口只读覆盖核验。"""
+    tool = "coverage"
+    if trading_days is not None and start_arg:
+        _emit({"status": "error", "job": tool,
+               "error": "--trading-days 与 --start 互斥；可用 --end 指定截止日"})
+        return 1
+    try:
+        if trading_days is not None:
+            start_arg, end_arg = trading_day_window(trading_days, end_arg)
+        elif not (start_arg and end_arg):
+            raise ValueError("需要 --trading-days 或成对的 --start/--end")
+        start, end = normalize_date(start_arg), normalize_date(end_arg)
+    except ValueError as e:
+        _emit({"status": "error", "job": tool, "error": str(e)})
+        return 1
+    result = verify_history_coverage(start, end)
+    _emit({"job": tool, "mode": "verify", "trading_days": trading_days, **result})
     return 0 if result.get("status") == "ok" else 1
 
 
@@ -693,8 +743,11 @@ def main(argv: list[str] | None = None,
     p_backfill.add_argument("--end", default=None,
                             help="回补终点 yyyymmdd，缺省前一交易日")
     p_backfill.add_argument("--source", default="sw", choices=("sw",),
-                            help="回补源：sw=申万官网 trend（issue #118）；"
-                                 "东财 push2his 回补已随 issue #121 摘除")
+                            help="回补源：sw=申万官网 trend")
+    p_backfill.add_argument("--trading-days", type=int, default=None,
+                            help="最近 N 个交易日；可用 --end 指定截止日")
+    p_backfill.add_argument("--force", action="store_true",
+                            help="忽略同窗口成功台账，整窗重抓并覆盖同键记录")
     p_sw_boards = sub.add_parser(
         "sw-boards", help="申万板块：双级实时快照落库 / 三方位对拍（--check）")
     p_sw_boards.add_argument("--date", default=None,
@@ -723,6 +776,10 @@ def main(argv: list[str] | None = None,
                          help="区间起点 yyyymmdd（与 --end 配对）")
     p_daily.add_argument("--end", default=None,
                          help="区间终点 yyyymmdd（与 --start 配对）")
+    p_daily.add_argument("--trading-days", type=int, default=None,
+                         help="最近 N 个交易日；可用 --end 指定截止日")
+    p_daily.add_argument("--force", action="store_true",
+                         help="整窗重抓并覆盖窗内同键记录，不只补头尾缺口")
     p_daily.add_argument("--adj", default="qfq", choices=("qfq", "hfq", "none"),
                          help="复权口径，缺省 qfq")
     p_daily.add_argument("--check", action="store_true",
@@ -754,8 +811,18 @@ def main(argv: list[str] | None = None,
                          help="区间起点 yyyymmdd（与 --end 配对）")
     p_index.add_argument("--end", default=None,
                          help="区间终点 yyyymmdd（与 --start 配对）")
+    p_index.add_argument("--trading-days", type=int, default=None,
+                         help="最近 N 个交易日；可用 --end 指定截止日")
     p_index.add_argument("--verify", action="store_true",
                          help="覆盖核验：对照交易日历列缺口，不写库")
+    p_coverage = sub.add_parser(
+        "coverage", help="历史分析窗口覆盖核验（纯读，不触发抓取）")
+    p_coverage.add_argument("--start", default=None,
+                            help="核验起点 yyyymmdd（与 --end 配对）")
+    p_coverage.add_argument("--end", default=None,
+                            help="核验终点 yyyymmdd")
+    p_coverage.add_argument("--trading-days", type=int, default=None,
+                            help="最近 N 个交易日；可用 --end 指定截止日")
     p_lhb = sub.add_parser(
         "lhb", help="龙虎榜：沪深北交易所官方源抓取落库 / 历史回溯 / 新浪对拍")
     p_lhb.add_argument("--date", default=None,
@@ -764,6 +831,8 @@ def main(argv: list[str] | None = None,
                        help="回溯起点 yyyymmdd（与 --end 配对，历史回溯模式）")
     p_lhb.add_argument("--end", default=None,
                        help="回溯终点 yyyymmdd（与 --start 配对）")
+    p_lhb.add_argument("--trading-days", type=int, default=None,
+                       help="最近 N 个交易日；可用 --end 指定截止日")
     p_lhb.add_argument("--check", action="store_true",
                        help="对拍模式：交易所官方 vs 新浪互补校验，不落库")
     p_pool = sub.add_parser(
@@ -815,6 +884,8 @@ def main(argv: list[str] | None = None,
                 adj=args.adj,
                 check=args.check,
                 throttle=args.throttle,
+                trading_days=args.trading_days,
+                force=args.force,
                 daily_adapters=daily_adapters,
             )
         if args.command == "snapshot":
@@ -830,10 +901,14 @@ def main(argv: list[str] | None = None,
                 start_arg=args.start,
                 end_arg=args.end,
                 check=args.check,
+                trading_days=args.trading_days,
                 lhb_adapters=lhb_adapters,
             )
         if args.command == "backfill":
-            return cmd_backfill(args.start, args.end, source=args.source)
+            return cmd_backfill(
+                args.start, args.end, source=args.source,
+                trading_days=args.trading_days, force=args.force,
+            )
         if args.command == "sw-boards":
             return cmd_sw_boards(
                 date_arg=args.date,
@@ -856,7 +931,13 @@ def main(argv: list[str] | None = None,
                 start_arg=args.start,
                 end_arg=args.end,
                 verify=args.verify,
+                trading_days=args.trading_days,
                 index_adapters=index_adapters,
+            )
+        if args.command == "coverage":
+            return cmd_coverage(
+                start_arg=args.start, end_arg=args.end,
+                trading_days=args.trading_days,
             )
         if args.command == "limitpool":
             return cmd_limitpool(args.date, probe=args.probe)

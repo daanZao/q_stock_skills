@@ -90,6 +90,7 @@ def fetch_sw_boards_backfill(
     adapters: Sequence | None = None,
     boards: list[dict] | None = None,
     now=None,
+    force: bool = False,
 ) -> dict:
     """申万板块历史回补（issue #118，spec #111）：申万官网 trend 指数全历史
     （1999 起，T+1）回补 market_boards 申万双级口径行——板块历史深度直达
@@ -105,7 +106,9 @@ def fetch_sw_boards_backfill(
     内报错零落库）。申万单源无 fallback 链。
     """
     tool = "fetch_sw_boards_backfill"
-    params = {"start": start, "end": end}
+    params: dict = {"start": start, "end": end}
+    if force:
+        params["force"] = True
     try:
         end_d = normalize_date(end) if end else prev_trading_day(today_str(now))
         start_d = normalize_date(start) if start else SW_BACKFILL_DEFAULT_START
@@ -144,8 +147,8 @@ def fetch_sw_boards_backfill(
             boards = board_result["boards"]
         if not boards:
             return _error(tool, params, "申万板块清单为空")
-        # 断点续跑（issue #91）：同板块同窗口台账已 ok 的跳过，重跑只补缺口
-        skipped = [
+        # 默认断点续跑；force 明确要求整窗重抓，不读成功台账跳过。
+        skipped = [] if force else [
             b for b in boards
             if _has_ok_backfill_ledger(
                 conn,

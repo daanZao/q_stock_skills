@@ -103,6 +103,27 @@ def test_backfill_kc50_gap_lands_and_is_idempotent(pg_test):
     ]
 
 
+def test_backfill_preserves_rows_outside_requested_window(pg_test):
+    conn = _conn(pg_test)
+    outside = dict(KC50_ROWS[0], trade_date="20261012", close=999.0)
+    upsert_index_daily(conn, "000688", [outside], "legacy")
+    conn.close()
+
+    out = fetch_index_backfill(
+        codes="000688", start="20261013", end="20261022",
+        adapters=[FakeIndexDailyAdapter("tencent", rows={"000688": KC50_ROWS})],
+        now=NOW_AFTER_CLOSE,
+    )
+
+    assert out["status"] == "ok"
+    conn = psycopg2.connect(pg_test)
+    rows = select_index_daily(conn, "000688", "20261012", "20261012")
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0]["close"] == 999.0
+    assert rows[0]["source"] == "legacy"
+
+
 def test_backfill_falls_back_to_baostock_and_partial_failure(pg_test):
     """链序 腾讯→baostock：腾讯挂走 baostock；单指数失败不拖垮其他。"""
     conn = _conn(pg_test)
@@ -212,6 +233,21 @@ def test_verify_reports_gap_then_ok_after_backfill(pg_test):
 def _run(capsys, argv, index_adapters):
     rc = scheduler.main(argv, index_adapters=index_adapters)
     return rc, json.loads(capsys.readouterr().out)
+
+
+def test_cli_index_trading_day_window(pg_test, capsys):
+    conn = _conn(pg_test)
+    conn.close()
+    adapters = [FakeIndexDailyAdapter("tencent", rows={"000688": KC50_ROWS})]
+    rc, out = _run(
+        capsys,
+        ["index", "--codes", "000688", "--trading-days", "3", "--end", "20261022"],
+        adapters,
+    )
+    assert rc == 0
+    assert out["range"] == {"start": "20261020", "end": "20261022"}
+    assert out["trading_days"] == 3
+    assert adapters[0].calls == [("000688", "20261020", "20261022")]
 
 
 def test_cli_index_fetch_and_verify(pg_test, capsys):

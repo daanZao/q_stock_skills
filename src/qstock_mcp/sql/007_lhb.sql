@@ -49,9 +49,10 @@ CREATE INDEX IF NOT EXISTS idx_lhb_detail_date ON lhb_stock_detail (trade_date);
 CREATE INDEX IF NOT EXISTS idx_lhb_detail_seat ON lhb_stock_detail (seat_name);
 
 CREATE TABLE IF NOT EXISTS lhb_stock_statistic (
-    -- 承载（issue #114 定稿，spec 冲突修正）：库内自算——写路径为
-    -- fetch_board_snapshot(lhb 段) 落 lhb_basic 后
-    -- repository.recompute_lhb_statistic 以近 60 日历日窗口（含当日，承接
+    -- 承载（issue #114 定稿，spec 冲突修正）：库内自算——单日写路径为
+    -- fetch_board_snapshot(lhb 段) 落 lhb_basic 后 recompute_lhb_statistic；
+    -- 历史回溯由 replace_lhb_basic_day 原子替换 basic 并以临时 staging 重算，
+    -- 两条路径均以近 60 日历日窗口（含当日，承接
     -- 原新浪 ggtj「近 60 日」窗口语义）按股聚合（交易所官方数据派生，
     -- appear=窗口行数、buy/sell/net=窗口合计万元）；DELETE+INSERT 幂等可
     -- 重跑，窗口滑出/上游修订自愈。buy/sell_seat_count 恒 NULL：官方汇总

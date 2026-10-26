@@ -13,7 +13,9 @@ import pytest
 
 from qstock_mcp import scheduler
 from qstock_mcp.db import ensure_schema
-from fakes import FakeAdapter, FakeBoardAdapter, FakeSnapshotAdapter, SNAPSHOT_ROWS
+from fakes import (
+    FakeAdapter, FakeBoardAdapter, FakeSnapshotAdapter, SNAPSHOT_ROWS, trading_rows,
+)
 
 TODAY = date.today().strftime("%Y%m%d")
 
@@ -241,6 +243,20 @@ def test_daily_fetch_rerun_reports_zero_gap(pg_ready, capsys):
     assert out["results"][0]["source"] is None
     assert out["results"][0]["rows_upserted"] == 0
     assert "零抓取" in out["results"][0]["note"]
+
+
+def test_daily_trading_day_window_uses_calendar_not_calendar_days(pg_ready, capsys):
+    adapter = FakeAdapter("tencent", rows_fn=trading_rows)
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--codes", "600519", "--trading-days", "3", "--end", "20261023", "--force"],
+        [adapter],
+    )
+    assert rc == 0
+    assert out["range"] == {"start": "20261021", "end": "20261023"}
+    assert out["trading_days"] == 3
+    assert out["force"] is True
+    assert [(c["start"], c["end"]) for c in adapter.calls] == [("20261021", "20261023")]
 
 
 # ---------------------------------------------------------------- 基本面透传固定入口（issue #115）
