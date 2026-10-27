@@ -340,6 +340,14 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
         if error.split(":", 1)[0] in _LHB_MARKETS
     ]
     if not failed_markets:
+        failed_markets = [
+            market for market in _LHB_MARKETS
+            if any(
+                error.startswith("lhb_basic:") and f"{market}:" in error
+                for error in errors
+            )
+        ]
+    if not failed_markets:
         return data
     merged = dict(data)
     try:
@@ -347,30 +355,52 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
     except Exception as exc:  # noqa: BLE001 - 后备失败保留官方错误并中止当日历史写入
         merged["errors"] = errors + [f"ths: {exc}"]
         return merged
-    rows = list(data["lhb_basic"])
-    keys = {(row["stock_code"], row.get("lhb_reason") or "") for row in rows}
-    patched_markets = []
-    patched_rows = 0
-    for market in failed_markets:
-        additions = [
-            row for row in fallback_rows
-            if _lhb_market(row["stock_code"]) == market
-            and row.get("trade_date") == trade_date
-        ]
-        if not additions:
-            continue
-        patched_markets.append(market)
-        for row in additions:
-            key = (row["stock_code"], row.get("lhb_reason") or "")
-            if key not in keys:
-                rows.append(row)
-                keys.add(key)
-                patched_rows += 1
+    try:
+        mismatched_dates = sorted(
+            {
+                row.get("trade_date") for row in fallback_rows
+                if row.get("trade_date") != trade_date
+            }
+        )
+        if mismatched_dates:
+            merged["errors"] = errors + [
+                f"ths: 后备行日期不符 {mismatched_dates} != {trade_date}"
+            ]
+            return merged
+        rows = list(data["lhb_basic"])
+        keys = {(row["stock_code"], row.get("lhb_reason") or "") for row in rows}
+        patched_markets = []
+        patched_rows = 0
+        for market in failed_markets:
+            additions = [
+                row for row in fallback_rows
+                if _lhb_market(row["stock_code"]) == market
+                and row.get("trade_date") == trade_date
+            ]
+            if not additions:
+                continue
+            patched_markets.append(market)
+            for row in additions:
+                key = (row["stock_code"], row.get("lhb_reason") or "")
+                if key not in keys:
+                    rows.append(row)
+                    keys.add(key)
+                    patched_rows += 1
+    except Exception as exc:  # noqa: BLE001 - 合并异常同样不得污染旧日
+        merged["errors"] = errors + [f"ths: 后备合并异常: {exc}"]
+        return merged
     merged["lhb_basic"] = rows
     resolved = set(patched_markets)
     merged["errors"] = [
         error for error in errors
         if error.split(":", 1)[0] not in resolved
+        and not (
+            error.startswith("lhb_basic:")
+            and not any(
+                f"{market}:" in error and market not in resolved
+                for market in _LHB_MARKETS
+            )
+        )
     ]
     if patched_markets:
         merged["basic_fallback"] = {
@@ -380,6 +410,19 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
         }
         merged["primary_source"] = primary_source
     return merged
+
+
+def _lhb_all_markets_failure_result(exc: AllSourcesFailed) -> dict:
+    return {
+        "source": exc.attempted[0]["source"] if exc.attempted else "exchange",
+        "attempted_sources": exc.attempted,
+        "data": {
+            "lhb_basic": [],
+            "lhb_yyb_capital": [],
+            "lhb_yyb_most": [],
+            "errors": [f"{market}: {exc}" for market in _LHB_MARKETS],
+        },
+    }
 
 
 def fetch_board_snapshot(
@@ -499,27 +542,30 @@ def fetch_board_snapshot(
             try:
                 r = fetch_section_with_fallback(chain, name, effective)
             except AllSourcesFailed as e:
-                kind = aggregate_error_kind(e.attempted)
-                entry = {
-                    "rows": 0,
-                    "status": "error",
-                    "error": str(e),
-                    "error_kind": kind,
-                    "attempted_sources": e.attempted,
-                }
-                if kind == "upstream_unreachable":
-                    entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
-                results[name] = entry
-                record_collection(
-                    conn,
-                    trade_date=effective,
-                    section=name,
-                    status="error",
-                    error_kind=kind,
-                    detail=summarize_attempted(e.attempted),
-                    started_at=started,
-                )
-                continue
+                if name == "lhb" and lhb_history and lhb_fallback is not None:
+                    r = _lhb_all_markets_failure_result(e)
+                else:
+                    kind = aggregate_error_kind(e.attempted)
+                    entry = {
+                        "rows": 0,
+                        "status": "error",
+                        "error": str(e),
+                        "error_kind": kind,
+                        "attempted_sources": e.attempted,
+                    }
+                    if kind == "upstream_unreachable":
+                        entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
+                    results[name] = entry
+                    record_collection(
+                        conn,
+                        trade_date=effective,
+                        section=name,
+                        status="error",
+                        error_kind=kind,
+                        detail=summarize_attempted(e.attempted),
+                        started_at=started,
+                    )
+                    continue
             data = r["data"]
             if name == "lhb" and lhb_history and lhb_fallback is not None:
                 data = _merge_lhb_basic_fallback(

@@ -1,4 +1,4 @@
-"""同花顺历史龙虎榜 basic 后备源（issue #126，默认关闭）。"""
+"""同花顺历史龙虎榜 basic 后备源（issue #126/#127，默认关闭）。"""
 
 import html as html_lib
 import re
@@ -29,7 +29,7 @@ _BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TARGET_CODE_RE = re.compile(
-    r"^(?:(?:00[0-3]|30[01]|60[0135]|68[89])\d{3}|[489]\d{5})$"
+    r"^(?:(?:00[0-3]|30[01]|60[0135]|68[89])\d{3}|[48]\d{5}|920\d{3})$"
 )
 
 
@@ -102,7 +102,11 @@ def parse_lhb_basic_html(html: str, trade_date: str) -> list[dict]:
                 "buy_amount": buy,
                 "sell_amount": sell,
                 "total_amount": buy + sell,
-                "day_amount": _day_amount(block),
+                "day_amount": (
+                    None
+                    if any(marker in reason for marker in ("累计", "连续三个交易日", "异常期间"))
+                    else _day_amount(block)
+                ),
             }
         )
     return rows

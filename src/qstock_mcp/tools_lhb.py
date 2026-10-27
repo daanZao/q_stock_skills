@@ -32,7 +32,11 @@ from .ledger import record_collection, summarize_attempted
 from .output import aggregate_batch_status
 from .output import error as _error
 from .repository import LHB_STATISTIC_WINDOW_DAYS, select_lhb_statistic
-from .tools_board import _merge_lhb_basic_fallback, fetch_board_snapshot
+from .tools_board import (
+    _lhb_all_markets_failure_result,
+    _merge_lhb_basic_fallback,
+    fetch_board_snapshot,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,11 +104,14 @@ def _lhb_staging_rows(
             try:
                 result = fetch_section_with_fallback(adapters, "lhb", d)
             except AllSourcesFailed as e:
-                return [], {
-                    "error": f"统计前置抓取失败 {d}: {e}",
-                    "error_kind": aggregate_error_kind(e.attempted),
-                    "detail": summarize_attempted(e.attempted),
-                }
+                if lhb_fallback is not None:
+                    result = _lhb_all_markets_failure_result(e)
+                else:
+                    return [], {
+                        "error": f"统计前置抓取失败 {d}: {e}",
+                        "error_kind": aggregate_error_kind(e.attempted),
+                        "detail": summarize_attempted(e.attempted),
+                    }
             data = result["data"]
             if lhb_fallback is not None:
                 data = _merge_lhb_basic_fallback(

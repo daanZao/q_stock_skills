@@ -313,6 +313,320 @@ def test_fetch_lhb_backfill_ths_patches_only_failed_market(pg_ready):
     assert "ths_fake:szse" in detail
 
 
+def test_fetch_lhb_backfill_ths_recovers_all_markets_failed(pg_ready):
+    class AllFailOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            if trade_date == "20261020":
+                raise FetchError("三所均断连")
+            return super().fetch_lhb(trade_date)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def __init__(self):
+            self.calls = []
+
+        def fetch_lhb_basic(self, trade_date):
+            self.calls.append(trade_date)
+            bse = dict(
+                EXCHANGE_LHB["lhb_basic"][0],
+                stock_code="920454", stock_name="同心传动",
+            )
+            return [
+                dict(row, trade_date=trade_date)
+                for row in [*EXCHANGE_LHB["lhb_basic"], bse]
+            ]
+
+    fallback = FakeThs()
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[AllFailOnTargetDay()], lhb_fallback=fallback,
+    )
+
+    assert result["status"] == "ok"
+    assert fallback.calls == ["20261020"]
+    assert result["results"][0]["source_detail"]["fallback"] == {
+        "source": "ths_fake", "markets": ["szse", "sse", "bse"], "rows": 3,
+    }
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stock_code FROM lhb_basic WHERE trade_date = '20261020'"
+                " ORDER BY stock_code"
+            )
+            assert cur.fetchall() == [("000530",), ("600302",), ("920454",)]
+            cur.execute(
+                "SELECT COUNT(*) FROM lhb_stock_statistic WHERE trade_date = '20261020'"
+            )
+            assert cur.fetchone()[0] == 3
+    finally:
+        conn.close()
+
+
+def test_fetch_lhb_backfill_ths_handles_nested_all_basic_failure(pg_ready):
+    official = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [],
+        "lhb_yyb_capital": [{"rank": 1, "seat_name": "营业部仍在", "total_amount": 1.0}],
+        "errors": ["lhb_basic: 三所均失败: szse: 断连; sse: 断连; bse: 断连"],
+    }
+
+    class NestedFailureOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = official if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, trade_date):
+            bse = dict(EXCHANGE_LHB["lhb_basic"][0], stock_code="920454")
+            return [dict(row, trade_date=trade_date)
+                    for row in [*EXCHANGE_LHB["lhb_basic"], bse]]
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[NestedFailureOnTargetDay()], lhb_fallback=FakeThs(),
+    )
+
+    assert result["status"] == "ok"
+    assert result["results"][0]["source_detail"]["fallback"]["markets"] == [
+        "szse", "sse", "bse",
+    ]
+    assert _count(pg_ready, "lhb_basic") == 3
+    assert _count(pg_ready, "lhb_yyb_capital") == 0
+
+
+def test_fetch_lhb_backfill_ths_repairs_staging_without_window_writes(pg_ready):
+    class AllFailOnLookbackDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            if trade_date == "20261019":
+                raise FetchError("三所均断连")
+            return super().fetch_lhb(trade_date)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def __init__(self):
+            self.calls = []
+
+        def fetch_lhb_basic(self, trade_date):
+            self.calls.append(trade_date)
+            bse = dict(
+                EXCHANGE_LHB["lhb_basic"][0],
+                stock_code="920454", stock_name="同心传动",
+            )
+            return [
+                dict(row, trade_date=trade_date)
+                for row in [*EXCHANGE_LHB["lhb_basic"], bse]
+            ]
+
+    fallback = FakeThs()
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[AllFailOnLookbackDay()], lhb_fallback=fallback,
+    )
+
+    assert result["status"] == "ok"
+    assert fallback.calls == ["20261019"]
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(trade_date), MAX(trade_date), COUNT(*) FROM lhb_basic")
+            assert cur.fetchone() == ("20261020", "20261020", 2)
+            cur.execute(
+                "SELECT stock_code, appear_count_3m FROM lhb_stock_statistic"
+                " WHERE trade_date = '20261020' ORDER BY stock_code"
+            )
+            assert cur.fetchall() == [
+                ("000530", 37), ("600302", 37), ("920454", 1),
+            ]
+    finally:
+        conn.close()
+
+
+def test_fetch_lhb_backfill_ths_patches_sse_and_bse_only(pg_ready):
+    official = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [EXCHANGE_LHB["lhb_basic"][0]],
+        "errors": ["sse: 上交所断连", "bse: 北交所断连"],
+    }
+
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = official if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, trade_date):
+            bse = dict(EXCHANGE_LHB["lhb_basic"][0], stock_code="920454")
+            return [dict(row, trade_date=trade_date)
+                    for row in [*EXCHANGE_LHB["lhb_basic"], bse]]
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=FakeThs(),
+    )
+
+    assert result["status"] == "ok"
+    assert result["results"][0]["source_detail"]["fallback"]["markets"] == ["sse", "bse"]
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT stock_code FROM lhb_basic ORDER BY stock_code")
+            assert cur.fetchall() == [("000530",), ("600302",), ("920454",)]
+    finally:
+        conn.close()
+
+
+def test_fetch_lhb_backfill_official_empty_does_not_call_ths(pg_ready):
+    empty = {table: [] for table in EXCHANGE_LHB}
+
+    class UnexpectedThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, _trade_date):
+            raise AssertionError("官方正常空日不应请求后备")
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[FakeLhbAdapter(payload=empty)], lhb_fallback=UnexpectedThs(),
+    )
+
+    assert result["status"] == "ok"
+    assert result["empty_days"] == 1
+    assert _count(pg_ready, "lhb_basic") == 0
+
+
+def test_fetch_lhb_backfill_incomplete_staging_aborts_without_writes(pg_ready):
+    class AllFailOnLookbackDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            if trade_date == "20261019":
+                raise FetchError("三所均断连")
+            return super().fetch_lhb(trade_date)
+
+    class IncompleteThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, trade_date):
+            return [dict(EXCHANGE_LHB["lhb_basic"][0], trade_date=trade_date)]
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[AllFailOnLookbackDay()], lhb_fallback=IncompleteThs(),
+    )
+
+    assert result["status"] == "error"
+    assert result["results"] == []
+    assert result["error_kind"] == "partial_error"
+    assert _count(pg_ready, "lhb_basic") == 0
+    assert _count(pg_ready, "lhb_stock_statistic") == 0
+
+
+def test_fetch_lhb_backfill_ths_mixed_dates_rejected(pg_ready):
+    official = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [EXCHANGE_LHB["lhb_basic"][1]],
+        "errors": ["szse: 深交所断连"],
+    }
+
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = official if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    class WrongDateThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, trade_date):
+            return [
+                dict(EXCHANGE_LHB["lhb_basic"][0], trade_date=trade_date),
+                dict(EXCHANGE_LHB["lhb_basic"][1], trade_date="20261019"),
+            ]
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=WrongDateThs(),
+    )
+
+    assert result["status"] == "error"
+    assert "日期不符" in result["results"][0]["error"]
+    assert _count(pg_ready, "lhb_basic") == 0
+    assert _count(pg_ready, "lhb_stock_statistic") == 0
+
+
+def test_fetch_lhb_backfill_ths_merge_exception_is_structured(pg_ready):
+    official = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [EXCHANGE_LHB["lhb_basic"][1]],
+        "errors": ["szse: 深交所断连"],
+    }
+
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = official if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    class UnexpectedCodeThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, trade_date):
+            return [dict(EXCHANGE_LHB["lhb_basic"][0],
+                         stock_code="900901", trade_date=trade_date)]
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=UnexpectedCodeThs(),
+    )
+
+    assert result["status"] == "error"
+    assert "后备合并异常" in result["results"][0]["error"]
+    assert _count(pg_ready, "lhb_basic") == 0
+
+
+def test_fetch_lhb_backfill_ths_exception_preserves_old_day(pg_ready):
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter()])
+    official = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][1], buy_amount=1.0)],
+        "errors": ["szse: 深交所断连"],
+    }
+
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = official if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    class BrokenThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, _trade_date):
+            raise ValueError("异常 HTML")
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=BrokenThs(),
+    )
+
+    assert result["status"] == "error"
+    assert "异常 HTML" in result["results"][0]["error"]
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT stock_code, buy_amount FROM lhb_basic ORDER BY stock_code")
+            assert cur.fetchall() == [
+                ("000530", pytest.approx(3601.5072)),
+                ("600302", pytest.approx(293.5474)),
+            ]
+            cur.execute("SELECT COUNT(*) FROM lhb_stock_statistic")
+            assert cur.fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
 def test_fetch_lhb_backfill_replaces_old_reasons_and_excludes_yyb(pg_ready):
     old = {
         **EXCHANGE_LHB,

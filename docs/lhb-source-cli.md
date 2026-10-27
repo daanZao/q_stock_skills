@@ -130,9 +130,12 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
 - **链序**：`default_lhb_adapters()` = **交易所官方单源**（`ExchangeLhbAdapter`，
   issue #121 摘除东财 legacy 兜底后定稿）。单日实时抓取的子项失败保留
   partial_error 语义；历史回溯遇任何部分失败则不替换该日旧数据。显式
-  `--fallback ths` 不走通用链，而在市场失败后合并 basic；同花顺页面的
-  buy/sell/net 与 `day_amount` 统一换算为万元，累计榜成交额只作元数据，
-  `turnover_rate` 无独立实际值时恒 null（不取上榜阈值）。
+  `--fallback ths` 不走通用链，而在市场失败后合并 basic；三市场同时失败及
+  嵌套 `lhb_basic` 错误同样只在显式开启后进入后备。同花顺页面的
+  buy/sell/net 与普通行 `day_amount` 统一换算为万元；三日/异常期间累计行的
+  `day_amount` 置 null，不把期间累计成交额冒充单日成交额。`turnover_rate`
+  无独立实际值时恒 null（不取上榜阈值）。后备缺失、异常 HTML、业务键重复
+  或任一行日期错位时当日失败并保留旧数据，staging 不继续也不写窗外表。
 
 ## 落库与回滚
 
