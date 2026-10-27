@@ -57,8 +57,9 @@
                              当日行补采）；--verify 纯读覆盖核验（对照交易日历
                              列缺口），不写库。缺省代码 = 7 大指数白名单。
   lhb [--date D] [--start D --end D | --trading-days N] [--check]
-                             龙虎榜固定入口：单日实时抓取；历史仅 basic/statistic，
+       [--fallback ths]       龙虎榜固定入口：单日实时抓取；历史仅 basic/statistic，
                              按日原子替换，60 日历日前置 staging，营业部榜不写历史。
+                             同花顺市场级后备仅历史显式开启，默认关闭（ADR 0015）。
   coverage [--start D --end D | --trading-days N]
                              历史分析窗口覆盖核验，纯读不触发抓取。
   limitpool [--date D] [--probe]
@@ -201,10 +202,19 @@ def cmd_lhb(
     end_arg: str | None = None,
     check: bool = False,
     trading_days: int | None = None,
+    fallback: str | None = None,
     lhb_adapters: Sequence[BoardAdapter] | None = None,
 ) -> int:
     """龙虎榜单日抓取、区间回溯或新浪对拍。"""
     tool = "lhb"
+    if fallback and not (start_arg or end_arg or trading_days is not None):
+        _emit({"status": "error", "job": tool,
+               "error": "--fallback 仅用于历史回溯"})
+        return 1
+    if fallback and check:
+        _emit({"status": "error", "job": tool,
+               "error": "--fallback 不用于 --check 对拍"})
+        return 1
     if date_arg and (start_arg or end_arg or trading_days is not None):
         _emit({"status": "error", "job": tool,
                "error": "--date 与 --start/--end/--trading-days 互斥"})
@@ -228,7 +238,9 @@ def cmd_lhb(
             _emit({"status": "error", "job": tool,
                    "error": "--start 与 --end 需成对提供"})
             return 1
-        result = fetch_lhb_backfill(start_arg, end_arg, lhb_adapters=lhb_adapters)
+        result = fetch_lhb_backfill(
+            start_arg, end_arg, lhb_adapters=lhb_adapters, fallback=fallback
+        )
         _emit({"job": tool, "mode": "backfill", "trading_days": trading_days, **result})
         return 0 if result.get("status") == "ok" else 1
     result = fetch_lhb_day(date_arg, lhb_adapters=lhb_adapters)
@@ -835,6 +847,8 @@ def main(argv: list[str] | None = None,
                        help="最近 N 个交易日；可用 --end 指定截止日")
     p_lhb.add_argument("--check", action="store_true",
                        help="对拍模式：交易所官方 vs 新浪互补校验，不落库")
+    p_lhb.add_argument("--fallback", choices=("ths",), default=None,
+                       help="历史回溯显式后备：ths=同花顺（默认关闭；对拍验收前勿入默认链）")
     p_pool = sub.add_parser(
         "limitpool",
         help="涨停池：zt_pool 三池 THS 低频抓取 + strong_stocks 库内自算")
@@ -902,6 +916,7 @@ def main(argv: list[str] | None = None,
                 end_arg=args.end,
                 check=args.check,
                 trading_days=args.trading_days,
+                fallback=args.fallback,
                 lhb_adapters=lhb_adapters,
             )
         if args.command == "backfill":

@@ -39,6 +39,9 @@ qstock-scheduler lhb --date 20261020
 # 历史回溯（逐交易日；周末自动跳过；单日失败不中断、逐日落台账）
 qstock-scheduler lhb --start 20261001 --end 20261020
 
+# 官方单市场失败时，显式启用同花顺市场级后备（默认关闭）
+qstock-scheduler lhb --trading-days 90 --fallback ths
+
 # 新浪互补对拍：交易所官方 vs 新浪转载面，不落库
 qstock-scheduler lhb --date 20261020 --check
 ```
@@ -51,6 +54,10 @@ qstock-scheduler lhb --date 20261020 --check
   单日模式）。进度经 stderr 双阈值报（每 20 日或 ≥60s，issue #89）。
 - `--trading-days N`：含截止日在内 N 个 A 股交易日，可用 `--end` 改截止日，
   缺省截止最近已收盘交易日；与 `--start` 互斥。
+- `--fallback ths`：仅历史回溯及统计前置 staging 可用，单日与 `--check` 拒绝。
+  官方某市场失败时只补该市场，其他市场官方行保留；官方正常空日不触发。
+  同花顺每日期最多一次请求、日期间 20 秒退避，封禁后停止本轮后续日期。
+  **默认关闭；真实官方对拍完成前不代表默认生产链已验收**（ADR 0015）。
 - `--check`：对拍模式（不落库、不落台账；只读连库读取 statistic 自算快照）。
   逐股比对：
   - 股票集合双向差集（`stock_set_diff`，信息级——两源归类口径不同，差集供
@@ -81,7 +88,9 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
   由库内自算（见数据口径），无子项失败语义。
 - backfill：`status` ok / partial_error / error（`aggregate_batch_status`
   批次口径）；`results` 逐日成败/行数/来源；`empty_days` 统计上游确认无
-  数据日（非故障）。
+  数据日（非故障）。发生市场级补缺时 `source` 为 `exchange+ths`，
+  `source_detail.fallback` 列出实际后备源、市场与补入行数；
+  采集台账 `source` 与 `detail` 同步记录，不把混合来源记成纯官方。
 - check：`status` ok / mismatch / error；`mismatch_count` 为差异股数
   （basic 对拍 + statistic 校验位差异都计入整体 status）；
   `results` 携带双方原值供人工核对。
@@ -120,7 +129,10 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
   不接线。
 - **链序**：`default_lhb_adapters()` = **交易所官方单源**（`ExchangeLhbAdapter`，
   issue #121 摘除东财 legacy 兜底后定稿）。单日实时抓取的子项失败保留
-  partial_error 语义；历史回溯遇任何部分失败则不替换该日旧数据。
+  partial_error 语义；历史回溯遇任何部分失败则不替换该日旧数据。显式
+  `--fallback ths` 不走通用链，而在市场失败后合并 basic；同花顺页面的
+  buy/sell/net 与 `day_amount` 统一换算为万元，累计榜成交额只作元数据，
+  `turnover_rate` 无独立实际值时恒 null（不取上榜阈值）。
 
 ## 落库与回滚
 

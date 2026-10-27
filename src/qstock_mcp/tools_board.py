@@ -76,6 +76,7 @@ from .adapters import (
     default_index_spot_adapters,
     default_lhb_adapters,
 )
+from .adapters._bse_codes import market_of
 from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
@@ -325,6 +326,62 @@ def _patch_major_indices(
     return rows, report
 
 
+_LHB_MARKETS = ("szse", "sse", "bse")
+
+
+def _lhb_market(stock_code: str) -> str:
+    return {"sh": "sse", "sz": "szse", "bj": "bse"}[market_of(stock_code)]
+
+
+def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_date: str) -> dict:
+    errors = list(data.get("errors") or [])
+    failed_markets = [
+        error.split(":", 1)[0] for error in errors
+        if error.split(":", 1)[0] in _LHB_MARKETS
+    ]
+    if not failed_markets:
+        return data
+    merged = dict(data)
+    try:
+        fallback_rows = fallback.fetch_lhb_basic(trade_date)
+    except Exception as exc:  # noqa: BLE001 - 后备失败保留官方错误并中止当日历史写入
+        merged["errors"] = errors + [f"ths: {exc}"]
+        return merged
+    rows = list(data["lhb_basic"])
+    keys = {(row["stock_code"], row.get("lhb_reason") or "") for row in rows}
+    patched_markets = []
+    patched_rows = 0
+    for market in failed_markets:
+        additions = [
+            row for row in fallback_rows
+            if _lhb_market(row["stock_code"]) == market
+            and row.get("trade_date") == trade_date
+        ]
+        if not additions:
+            continue
+        patched_markets.append(market)
+        for row in additions:
+            key = (row["stock_code"], row.get("lhb_reason") or "")
+            if key not in keys:
+                rows.append(row)
+                keys.add(key)
+                patched_rows += 1
+    merged["lhb_basic"] = rows
+    resolved = set(patched_markets)
+    merged["errors"] = [
+        error for error in errors
+        if error.split(":", 1)[0] not in resolved
+    ]
+    if patched_markets:
+        merged["basic_fallback"] = {
+            "source": fallback.name,
+            "markets": patched_markets,
+            "rows": patched_rows,
+        }
+        merged["primary_source"] = primary_source
+    return merged
+
+
 def fetch_board_snapshot(
     trade_date: str | None = None,
     sections: str | Sequence[str] | None = None,
@@ -332,6 +389,7 @@ def fetch_board_snapshot(
     lhb_adapters: Sequence[BoardAdapter] | None = None,
     lhb_history: bool = False,
     lhb_staging_rows: list[dict] | None = None,
+    lhb_fallback=None,
 ) -> dict:
     """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。
 
@@ -463,6 +521,14 @@ def fetch_board_snapshot(
                 )
                 continue
             data = r["data"]
+            if name == "lhb" and lhb_history and lhb_fallback is not None:
+                data = _merge_lhb_basic_fallback(
+                    data, r["source"], lhb_fallback, effective
+                )
+            source = r["source"]
+            basic_fallback = data.get("basic_fallback") if name == "lhb" else None
+            if basic_fallback:
+                source = f"{source}+{basic_fallback['source']}"
             patch = None
             if name == "indices":
                 data, patch = _patch_major_indices(chain, data)
@@ -514,9 +580,14 @@ def fetch_board_snapshot(
                 written = _upsert_section(conn, name, data, effective)
             res = {
                 "rows": written,
-                "source": r["source"],
+                "source": source,
                 "status": "ok",
             }
+            if basic_fallback:
+                res["source_detail"] = {
+                    "primary": data["primary_source"],
+                    "fallback": basic_fallback,
+                }
             if name == "boards":
                 # 字段级第四态（issue #118）：申万不发布的三字段机器可读声明
                 # （量比重申万官网不发布、领涨股不发布、资金流永久弃用），
@@ -527,10 +598,10 @@ def fetch_board_snapshot(
             if r["attempted_sources"]:
                 res["attempted_sources"] = r["attempted_sources"]
             if name == "lhb":
-                if r["data"].get("errors"):
+                if data.get("errors"):
                     # 子项部分失败：拿到什么落什么，但失败原因必须报告
-                    res["partial_error"] = "; ".join(r["data"]["errors"])
-                if not r["data"]["lhb_basic"]:
+                    res["partial_error"] = "; ".join(data["errors"])
+                if not data["lhb_basic"]:
                     res["empty_kind"] = "no_data_for_date"
                     res["note"] = _LHB_EMPTY_NOTE
                 # statistic 子表不在适配器承载（issue #114 定稿，spec 冲突修正）：
@@ -544,6 +615,12 @@ def fetch_board_snapshot(
             elif not data:
                 res["empty_kind"] = "no_data_for_date"
             detail = summarize_attempted(r["attempted_sources"])
+            if basic_fallback:
+                note = (
+                    f"basic_fallback={basic_fallback['source']}:"
+                    f"{','.join(basic_fallback['markets'])}({basic_fallback['rows']}行)"
+                )
+                detail = f"{detail}; {note}" if detail else note
             if name == "boards":
                 note = "planned_absent_fields=" + ",".join(
                     PLANNED_ABSENT_BOARD_FIELDS
@@ -554,7 +631,7 @@ def fetch_board_snapshot(
                 trade_date=effective,
                 section=name,
                 status="ok" if res["rows"] > 0 else "empty",
-                source=r["source"],
+                source=source,
                 rows=res["rows"],
                 error_kind=None if res["rows"] > 0 else "no_data_for_date",
                 detail=detail,

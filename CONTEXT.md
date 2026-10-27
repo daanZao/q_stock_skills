@@ -103,6 +103,10 @@ _Avoid_: 强制回补、重建数据库
 历史窗口早期派生统计所需的窗前输入，只参与计算、不写入窗口外业务表；输入不完整时不得把短窗口结果当成完整统计。
 _Avoid_: 临时补数、窗外落库
 
+**市场级后备**:
+历史回溯中主源仅部分市场失败时，后备源只补失败市场的数据并保留其他市场主源行；主源正常空数据不属于失败，不触发补缺。它不同于整次抓取失败后切换到下一源的通用 fallback 链。
+_Avoid_: 全量覆盖、整链兜底（不加限定时）
+
 **收盘后批**:
 `qstock-scheduler close` 执行的交易日收盘后采集：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照，直调 tools_* 核心层、不经 MCP 协议层，逐 section 独立成败并落采集台账。调度安装（launchd）为用户侧动作，见 `docs/scheduler-launchd.md`。
 _Avoid_: 定时任务（不加限定时）

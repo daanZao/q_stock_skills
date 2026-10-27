@@ -249,6 +249,70 @@ def test_fetch_lhb_backfill_iterates_trading_days(pg_ready, monkeypatch):
     assert len([x for x in _ledger(pg_ready) if x[0] == "lhb"]) == 3
 
 
+def test_fetch_lhb_backfill_ths_patches_only_failed_market(pg_ready):
+    official = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [EXCHANGE_LHB["lhb_basic"][1]],
+        "errors": ["szse: 深交所断连"],
+    }
+
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            payload = official if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def __init__(self):
+            self.calls = []
+
+        def fetch_lhb_basic(self, trade_date):
+            self.calls.append(trade_date)
+            return [
+                dict(EXCHANGE_LHB["lhb_basic"][0], trade_date=trade_date),
+                dict(EXCHANGE_LHB["lhb_basic"][1], trade_date=trade_date),
+            ]
+
+    fallback = FakeThs()
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=fallback,
+    )
+
+    assert result["status"] == "ok"
+    assert fallback.calls == ["20261020"]
+    assert result["results"][0]["source"] == "exchange_fake+ths_fake"
+    assert result["results"][0]["source_detail"] == {
+        "primary": "exchange_fake",
+        "fallback": {"source": "ths_fake", "markets": ["szse"], "rows": 1},
+    }
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stock_code, buy_amount FROM lhb_basic"
+                " WHERE trade_date = '20261020' ORDER BY stock_code"
+            )
+            assert cur.fetchall() == [
+                ("000530", pytest.approx(3601.5072)),
+                ("600302", pytest.approx(293.5474)),
+            ]
+            cur.execute(
+                "SELECT COUNT(*) FROM lhb_stock_statistic WHERE trade_date = '20261020'"
+            )
+            assert cur.fetchone()[0] == 2
+            cur.execute(
+                "SELECT source, detail FROM collection_log"
+                " WHERE trade_date = '20261020' AND section = 'lhb'"
+            )
+            source, detail = cur.fetchone()
+    finally:
+        conn.close()
+    assert source == "exchange_fake+ths_fake"
+    assert "ths_fake:szse" in detail
+
+
 def test_fetch_lhb_backfill_replaces_old_reasons_and_excludes_yyb(pg_ready):
     old = {
         **EXCHANGE_LHB,
@@ -492,6 +556,54 @@ class TestLhbCli:
             lhb_adapters=[FakeLhbAdapter()],
         )
         assert rc == 0 and out["mode"] == "backfill" and out["total_days"] == 3
+
+    def test_backfill_fallback_ths_is_explicit(self, pg_ready, capsys, monkeypatch):
+        official = {
+            **EXCHANGE_LHB,
+            "lhb_basic": [EXCHANGE_LHB["lhb_basic"][1]],
+            "errors": ["szse: 深交所断连"],
+        }
+
+        class PartialOnTargetDay(FakeLhbAdapter):
+            def fetch_lhb(self, trade_date):
+                payload = official if trade_date == "20261020" else EXCHANGE_LHB
+                return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
+
+        class FakeThs:
+            name = "ths_fake"
+
+            def fetch_lhb_basic(self, trade_date):
+                return [dict(EXCHANGE_LHB["lhb_basic"][0], trade_date=trade_date)]
+
+        monkeypatch.setattr("qstock_mcp.tools_lhb.ThsLhbAdapter", FakeThs)
+        rc, out = _run(
+            capsys,
+            ["lhb", "--start", "20261020", "--end", "20261020", "--fallback", "ths"],
+            lhb_adapters=[PartialOnTargetDay()],
+        )
+
+        assert rc == 0
+        assert out["params"]["fallback"] == "ths"
+        assert out["results"][0]["source"] == "exchange_fake+ths_fake"
+
+    def test_backfill_default_does_not_enable_ths(self, pg_ready, capsys, monkeypatch):
+        def unexpected_ths():
+            raise AssertionError("默认历史回溯不应构造同花顺后备")
+
+        monkeypatch.setattr("qstock_mcp.tools_lhb.ThsLhbAdapter", unexpected_ths)
+        rc, out = _run(
+            capsys, ["lhb", "--start", "20261020", "--end", "20261020"],
+            lhb_adapters=[FakeLhbAdapter()],
+        )
+        assert rc == 0
+        assert "fallback" not in out["params"]
+        assert out["results"][0]["source"] == "exchange_fake"
+
+    def test_fallback_is_rejected_outside_history(self, pg_ready, capsys):
+        rc, out = _run(capsys, ["lhb", "--date", TODAY, "--fallback", "ths"])
+        assert rc == 1
+        assert "仅用于历史回溯" in out["error"]
+        assert _count(pg_ready, "collection_log") == 0
 
     def test_backfill_trading_day_window(self, pg_ready, capsys):
         rc, out = _run(

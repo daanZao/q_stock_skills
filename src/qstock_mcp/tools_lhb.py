@@ -6,7 +6,8 @@ CLI（qstock-scheduler lhb，手册 docs/lhb-source-cli.md）直调本层，不�
   （三态契约、台账、业务键 upsert 全继承），幂等可重跑。
 - fetch_lhb_backfill：区间历史回溯（逐交易日；沪深实测回溯到 2015，北交所
   到 2021-11 开市当周，#97/#107）；单日失败不中断、逐日落台账，进度经
-  logging 走 stderr（issue #89 双阈值模式）。
+  logging 走 stderr（issue #89 双阈值模式）。显式 fallback=ths 时按官方
+  失败市场用同花顺 basic 补缺，默认关闭（issue #126，ADR 0015）。
 - compare_lhb_sources：新浪互补对拍（可手动触发，不落库）——交易所官方
   主源 vs 新浪独立转载面，逐股比对股票集合/全日成交额/席位净买额；
   容差沿用 daily_parity 口径（成交额 rel 0.005；净买 rel 0.005，万元）。
@@ -19,6 +20,7 @@ from typing import Sequence
 
 from .adapters import BoardAdapter, default_lhb_adapters
 from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
+from .adapters.lhb_ths_adapter import ThsLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
 from .dates import add_days, is_trading_day, normalize_date, today_str
 from .daily_parity import _within_tolerance
@@ -30,7 +32,7 @@ from .ledger import record_collection, summarize_attempted
 from .output import aggregate_batch_status
 from .output import error as _error
 from .repository import LHB_STATISTIC_WINDOW_DAYS, select_lhb_statistic
-from .tools_board import fetch_board_snapshot
+from .tools_board import _merge_lhb_basic_fallback, fetch_board_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -69,11 +71,13 @@ def fetch_lhb_day(
     lhb_adapters: Sequence[BoardAdapter] | None = None,
     history: bool = False,
     staging_rows: list[dict] | None = None,
+    lhb_fallback=None,
 ) -> dict:
     """单日龙虎榜抓取落库；history=True 时仅 basic 按日完整替换。"""
     result = fetch_board_snapshot(
         trade_date=trade_date, sections=["lhb"], lhb_adapters=lhb_adapters,
         lhb_history=history, lhb_staging_rows=staging_rows,
+        lhb_fallback=lhb_fallback if history else None,
     )
     if result.get("sections") is None:
         return result  # 参数级 error 契约原样上抛
@@ -87,7 +91,7 @@ def fetch_lhb_day(
 
 
 def _lhb_staging_rows(
-    start: str, end: str, adapters: Sequence[BoardAdapter]
+    start: str, end: str, adapters: Sequence[BoardAdapter], lhb_fallback=None
 ) -> tuple[list[dict], dict | None]:
     rows: list[dict] = []
     d = start
@@ -101,13 +105,18 @@ def _lhb_staging_rows(
                     "error_kind": aggregate_error_kind(e.attempted),
                     "detail": summarize_attempted(e.attempted),
                 }
-            if result["data"].get("errors"):
-                message = "; ".join(result["data"]["errors"])
+            data = result["data"]
+            if lhb_fallback is not None:
+                data = _merge_lhb_basic_fallback(
+                    data, result["source"], lhb_fallback, d
+                )
+            if data.get("errors"):
+                message = "; ".join(data["errors"])
                 return [], {
                     "error": f"统计前置抓取不完整 {d}: {message}",
                     "error_kind": "partial_error", "detail": message,
                 }
-            rows.extend(result["data"]["lhb_basic"])
+            rows.extend(data["lhb_basic"])
         d = add_days(d, 1)
     return rows, None
 
@@ -116,6 +125,8 @@ def fetch_lhb_backfill(
     start: str,
     end: str,
     lhb_adapters: Sequence[BoardAdapter] | None = None,
+    fallback: str | None = None,
+    lhb_fallback=None,
 ) -> dict:
     """区间历史回溯：逐交易日抓取，单日失败不中断；逐日结果+汇总台账由
     fetch_board_snapshot 内联记录（本层不重复落账）。"""
@@ -127,6 +138,12 @@ def fetch_lhb_backfill(
         return _error(tool, params, str(e))
     if start_d > end_d:
         return _error(tool, params, f"start({start_d}) 晚于 end({end_d})")
+    if fallback not in (None, "ths"):
+        return _error(tool, params, f"未知 fallback: {fallback}（可选: ths）")
+    if fallback == "ths":
+        params["fallback"] = "ths"
+        if lhb_fallback is None:
+            lhb_fallback = ThsLhbAdapter()
     days = []
     d = start_d
     while d <= end_d:
@@ -140,6 +157,7 @@ def fetch_lhb_backfill(
     staging_rows, staging_error = _lhb_staging_rows(
         lookback_start, lookback_end,
         lhb_adapters if lhb_adapters is not None else default_lhb_adapters(),
+        lhb_fallback=lhb_fallback,
     )
     if staging_error:
         conn, db_error = connect()
@@ -162,21 +180,23 @@ def fetch_lhb_backfill(
     last_logged = monotonic()
     for i, d in enumerate(days, 1):
         r = fetch_lhb_day(
-            d, lhb_adapters=lhb_adapters, history=True, staging_rows=staging_rows
+            d, lhb_adapters=lhb_adapters, history=True, staging_rows=staging_rows,
+            lhb_fallback=lhb_fallback,
         )
         lhb = r.get("lhb") or {}
-        results.append(
-            {
-                "trade_date": r.get("trade_date", d),
-                "status": lhb.get("status", "error"),
-                "rows": lhb.get("rows", 0),
-                "source": lhb.get("source"),
-                "empty_kind": lhb.get("empty_kind"),
-                "error_kind": lhb.get("error_kind"),
-                "error": lhb.get("error"),
-                "partial_error": lhb.get("partial_error"),
-            }
-        )
+        entry = {
+            "trade_date": r.get("trade_date", d),
+            "status": lhb.get("status", "error"),
+            "rows": lhb.get("rows", 0),
+            "source": lhb.get("source"),
+            "empty_kind": lhb.get("empty_kind"),
+            "error_kind": lhb.get("error_kind"),
+            "error": lhb.get("error"),
+            "partial_error": lhb.get("partial_error"),
+        }
+        if lhb.get("source_detail"):
+            entry["source_detail"] = lhb["source_detail"]
+        results.append(entry)
         now_m = monotonic()
         if _progress_due(i, total, last_logged, now_m):
             log.info("lhb 回溯进度 %d/%d（%s）", i, total, d)
@@ -186,7 +206,7 @@ def fetch_lhb_backfill(
     return {
         "tool": tool,
         "status": status,
-        "params": {"start": start_d, "end": end_d},
+        "params": {**params, "start": start_d, "end": end_d},
         "statistic_lookback": {
             "start": lookback_start, "days": LHB_STATISTIC_WINDOW_DAYS,
         },
@@ -281,7 +301,7 @@ def _compare_statistic_snapshot(trade_date: str, sina) -> tuple[dict, int]:
     mismatched = 0
     for code in sorted(db_codes & si_codes):
         db_r, si_r = db_by_code[code], si_by_code[code]
-        entry = {"stock_code": code, "db": db_r, "sina": si_r, "diffs": []}
+        entry: dict = {"stock_code": code, "db": db_r, "sina": si_r, "diffs": []}
         for field, (kind, tol) in _STATISTIC_PARITY_FIELDS.items():
             dv, sv = db_r.get(field), si_r.get(field)
             if dv is None or sv is None:
