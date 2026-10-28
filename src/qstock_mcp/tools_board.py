@@ -351,7 +351,9 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
         return data
     merged = dict(data)
     try:
-        fallback_rows = fallback.fetch_lhb_basic(trade_date)
+        fallback_rows = data.get("ths_basic_rows")
+        if fallback_rows is None:
+            fallback_rows = fallback.fetch_lhb_basic(trade_date)
     except Exception as exc:  # noqa: BLE001 - 后备失败保留官方错误并中止当日历史写入
         merged["errors"] = errors + [f"ths: {exc}"]
         return merged
@@ -555,14 +557,43 @@ def fetch_board_snapshot(
                     }
                     if kind == "upstream_unreachable":
                         entry["retry_advice"] = UPSTREAM_RETRY_ADVICE
+                    source = None
+                    detail = summarize_attempted(e.attempted)
+                    source_meta = next(
+                        (
+                            a.get("source_meta") for a in e.attempted
+                            if a.get("source_meta", {}).get("szse_primary")
+                        ),
+                        None,
+                    )
+                    if source_meta:
+                        primary = source_meta["szse_primary"]
+                        source = e.attempted[0]["source"]
+                        attempted_primary = (
+                            primary["requested"]
+                            if primary["source"] != primary["requested"]
+                            else primary["source"]
+                        )
+                        if attempted_primary != source:
+                            source = f"{attempted_primary}+{source}"
+                        entry["source"] = source
+                        entry["source_detail"] = {"szse_primary": primary}
+                        note = f"szse_primary={primary['requested']}"
+                        if primary["source"] != primary["requested"]:
+                            note += f"->{primary['source']}"
+                        note += f"({primary['rows']}行)"
+                        if primary.get("error"):
+                            note += f":{primary['error']}"
+                        detail = f"{detail}; {note}" if detail else note
                     results[name] = entry
                     record_collection(
                         conn,
                         trade_date=effective,
                         section=name,
                         status="error",
+                        source=source,
                         error_kind=kind,
-                        detail=summarize_attempted(e.attempted),
+                        detail=detail,
                         started_at=started,
                     )
                     continue
@@ -572,8 +603,11 @@ def fetch_board_snapshot(
                     data, r["source"], lhb_fallback, effective
                 )
             source = r["source"]
+            szse_primary = data.get("szse_primary") if name == "lhb" else None
+            if szse_primary and szse_primary["source"] != r["source"]:
+                source = f"{szse_primary['source']}+{source}"
             basic_fallback = data.get("basic_fallback") if name == "lhb" else None
-            if basic_fallback:
+            if basic_fallback and basic_fallback["source"] not in source.split("+"):
                 source = f"{source}+{basic_fallback['source']}"
             patch = None
             if name == "indices":
@@ -607,15 +641,36 @@ def fetch_board_snapshot(
                     continue
             if name == "lhb" and lhb_history and data.get("errors"):
                 message = "; ".join(data["errors"])
+                error_detail = message
+                source_detail = {}
+                if szse_primary:
+                    source_detail["szse_primary"] = szse_primary
+                    note = f"szse_primary={szse_primary['requested']}"
+                    if szse_primary["source"] != szse_primary["requested"]:
+                        note += f"->{szse_primary['source']}"
+                    note += f"({szse_primary['rows']}行)"
+                    error_detail += f"; {note}"
+                if basic_fallback:
+                    source_detail.update({
+                        "primary": data["primary_source"],
+                        "fallback": basic_fallback,
+                    })
+                    error_detail += (
+                        f"; basic_fallback={basic_fallback['source']}:"
+                        f"{','.join(basic_fallback['markets'])}"
+                        f"({basic_fallback['rows']}行)"
+                    )
                 record_collection(
                     conn, trade_date=effective, section=name, status="error",
-                    source=r["source"], rows=0, error_kind="partial_error",
-                    detail=message, started_at=started,
+                    source=source, rows=0, error_kind="partial_error",
+                    detail=error_detail, started_at=started,
                 )
                 results[name] = {
                     "rows": 0, "status": "error", "error": message,
-                    "error_kind": "partial_error",
+                    "error_kind": "partial_error", "source": source,
                 }
+                if source_detail:
+                    results[name]["source_detail"] = source_detail
                 continue
             statistic_written = 0
             if name == "lhb" and lhb_history:
@@ -624,16 +679,18 @@ def fetch_board_snapshot(
                 )
             else:
                 written = _upsert_section(conn, name, data, effective)
-            res = {
+            res: dict = {
                 "rows": written,
                 "source": source,
                 "status": "ok",
             }
+            if szse_primary:
+                res["source_detail"] = {"szse_primary": szse_primary}
             if basic_fallback:
-                res["source_detail"] = {
+                res.setdefault("source_detail", {}).update({
                     "primary": data["primary_source"],
                     "fallback": basic_fallback,
-                }
+                })
             if name == "boards":
                 # 字段级第四态（issue #118）：申万不发布的三字段机器可读声明
                 # （量比重申万官网不发布、领涨股不发布、资金流永久弃用），
@@ -661,11 +718,22 @@ def fetch_board_snapshot(
             elif not data:
                 res["empty_kind"] = "no_data_for_date"
             detail = summarize_attempted(r["attempted_sources"])
+            if szse_primary:
+                note = f"szse_primary={szse_primary['requested']}"
+                if szse_primary["source"] != szse_primary["requested"]:
+                    note += f"->{szse_primary['source']}"
+                note += f"({szse_primary['rows']}行)"
+                if szse_primary.get("error"):
+                    note += f":{szse_primary['error']}"
+                detail = f"{detail}; {note}" if detail else note
             if basic_fallback:
                 note = (
                     f"basic_fallback={basic_fallback['source']}:"
                     f"{','.join(basic_fallback['markets'])}({basic_fallback['rows']}行)"
                 )
+                detail = f"{detail}; {note}" if detail else note
+            if name == "lhb" and data.get("errors"):
+                note = "partial_error=" + "; ".join(data["errors"])
                 detail = f"{detail}; {note}" if detail else note
             if name == "boards":
                 note = "planned_absent_fields=" + ",".join(

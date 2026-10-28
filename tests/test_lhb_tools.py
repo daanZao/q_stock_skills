@@ -61,12 +61,14 @@ class FakeLhbAdapter:
         # 行级 trade_date 以请求日为准（生产语义：上榜日=请求交易日）——
         # 深度复制后盖戳，避免跨日用例互相污染
         return {
-            table: [
-                dict(row, trade_date=trade_date) if isinstance(row, dict) else row
-                for row in rows
-            ]
+            table: (
+                [
+                    dict(row, trade_date=trade_date) if isinstance(row, dict) else row
+                    for row in rows
+                ]
+                if isinstance(rows, list) else rows
+            )
             for table, rows in self._payload.items()
-            if isinstance(rows, list)
         }
 
 
@@ -227,6 +229,30 @@ def test_fetch_lhb_day_partial_error_lands_rows(pg_ready):
 # ---------------------------------------------------------------- backfill
 
 
+def test_fetch_lhb_backfill_default_history_adapters_are_shared(pg_ready, monkeypatch):
+    calls = []
+
+    class Recorder(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            calls.append(trade_date)
+            return super().fetch_lhb(trade_date)
+
+    recorder = Recorder()
+    created = []
+
+    def factory(ths=None):
+        created.append(ths)
+        return [recorder]
+
+    monkeypatch.setattr("qstock_mcp.tools_lhb.default_lhb_history_adapters", factory)
+    result = fetch_lhb_backfill("20261020", "20261020")
+
+    assert result["status"] == "ok"
+    assert len(created) == 1 and created[0] is not None
+    assert "20261020" in calls
+    assert len(calls) > 1  # staging 与目标窗口复用同一实例
+
+
 def test_fetch_lhb_backfill_iterates_trading_days(pg_ready, monkeypatch):
     calls = []
 
@@ -311,6 +337,110 @@ def test_fetch_lhb_backfill_ths_patches_only_failed_market(pg_ready):
         conn.close()
     assert source == "exchange_fake+ths_fake"
     assert "ths_fake:szse" in detail
+
+
+def test_fetch_lhb_backfill_szse_primary_reuses_ths_page_for_other_markets(pg_ready):
+    ths_rows = [
+        dict(EXCHANGE_LHB["lhb_basic"][0], trade_date="20261020"),
+        dict(EXCHANGE_LHB["lhb_basic"][1], trade_date="20261020"),
+    ]
+    payload = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [ths_rows[0]],
+        "errors": ["sse: 上交所断连"],
+        "szse_primary": {"requested": "ths_fake", "source": "ths_fake", "rows": 1},
+        "ths_basic_rows": ths_rows,
+    }
+
+    class UnexpectedThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, _trade_date):
+            raise AssertionError("同一日期不得重复请求同花顺")
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020",
+        lhb_adapters=[FakeLhbAdapter(payload=payload)],
+        lhb_fallback=UnexpectedThs(),
+    )
+
+    assert result["status"] == "ok"
+    assert result["results"][0]["source"] == "ths_fake+exchange_fake"
+    assert result["results"][0]["source_detail"]["szse_primary"] == {
+        "requested": "ths_fake", "source": "ths_fake", "rows": 1,
+    }
+    assert result["results"][0]["source_detail"]["fallback"]["markets"] == ["sse"]
+    assert _count(pg_ready, "lhb_basic") == 2
+
+
+def test_fetch_lhb_backfill_error_preserves_szse_primary_provenance(pg_ready):
+    payload = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][0], trade_date="20261020")],
+        "errors": ["sse: 上交所断连"],
+        "szse_primary": {"requested": "ths_fake", "source": "ths_fake", "rows": 1},
+    }
+    class PartialOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            selected = payload if trade_date == "20261020" else EXCHANGE_LHB
+            return FakeLhbAdapter(payload=selected).fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[PartialOnTargetDay()],
+    )
+
+    entry = result["results"][0]
+    assert entry["status"] == "error"
+    assert entry["source"] == "ths_fake+exchange_fake"
+    assert entry["source_detail"]["szse_primary"]["source"] == "ths_fake"
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source, detail FROM collection_log"
+                " WHERE trade_date = '20261020' AND section = 'lhb'"
+            )
+            source, detail = cur.fetchone()
+    finally:
+        conn.close()
+    assert source == "ths_fake+exchange_fake"
+    assert "szse_primary=ths_fake(1行)" in detail
+
+
+def test_fetch_lhb_backfill_all_failed_preserves_szse_primary_provenance(pg_ready):
+    class AllFailOnTargetDay(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            if trade_date != "20261020":
+                return super().fetch_lhb(trade_date)
+            error = FetchError("同花顺与交易所均失败")
+            error.source_meta = {
+                "szse_primary": {
+                    "requested": "ths_fake", "source": "exchange", "rows": 0,
+                    "error": "同花顺封禁",
+                }
+            }
+            raise error
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[AllFailOnTargetDay()],
+    )
+
+    entry = result["results"][0]
+    assert entry["status"] == "error"
+    assert entry["source"] == "ths_fake+exchange_fake"
+    assert entry["source_detail"]["szse_primary"]["error"] == "同花顺封禁"
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source, detail FROM collection_log"
+                " WHERE trade_date = '20261020' AND section = 'lhb'"
+            )
+            source, detail = cur.fetchone()
+    finally:
+        conn.close()
+    assert source == "ths_fake+exchange_fake"
+    assert "szse_primary=ths_fake->exchange(0行):同花顺封禁" in detail
 
 
 def test_fetch_lhb_backfill_ths_recovers_all_markets_failed(pg_ready):
@@ -608,7 +738,7 @@ def test_fetch_lhb_backfill_ths_exception_preserves_old_day(pg_ready):
 
     result = fetch_lhb_backfill(
         "20261020", "20261020",
-        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=BrokenThs(),
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=BrokenThs(), force=True,
     )
 
     assert result["status"] == "error"
@@ -627,7 +757,108 @@ def test_fetch_lhb_backfill_ths_exception_preserves_old_day(pg_ready):
         conn.close()
 
 
-def test_fetch_lhb_backfill_replaces_old_reasons_and_excludes_yyb(pg_ready):
+def test_fetch_lhb_backfill_preserves_complete_official_day(pg_ready):
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter()])
+    calls = []
+
+    class Recorder(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            calls.append(trade_date)
+            return super().fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[Recorder()],
+    )
+
+    assert result["status"] == "ok"
+    assert result["results"][0]["preserved"] is True
+    assert "20261020" not in calls
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT buy_amount FROM lhb_basic WHERE stock_code = '000530'")
+            assert cur.fetchone()[0] == pytest.approx(3601.5072)
+    finally:
+        conn.close()
+
+
+def test_fetch_lhb_backfill_preserves_confirmed_official_empty_day(pg_ready):
+    empty = {table: [] for table in EXCHANGE_LHB}
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter(payload=empty)])
+    calls = []
+
+    class Recorder(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            calls.append(trade_date)
+            return super().fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[Recorder()],
+    )
+
+    assert result["status"] == "ok"
+    assert result["results"][0]["preserved"] is True
+    assert result["results"][0]["empty_kind"] == "no_data_for_date"
+    assert "20261020" not in calls
+
+
+def test_fetch_lhb_backfill_does_not_preserve_partial_official_day(pg_ready):
+    partial = {**EXCHANGE_LHB, "errors": ["sse: 上交所断连"]}
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter(payload=partial)])
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM collection_log WHERE trade_date = '20261020'"
+                " AND section = 'lhb' ORDER BY id DESC LIMIT 1"
+            )
+            assert "partial_error" in cur.fetchone()[0]
+    finally:
+        conn.close()
+    calls = []
+
+    class Recorder(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            calls.append(trade_date)
+            return super().fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[Recorder()],
+    )
+
+    assert result["status"] == "ok"
+    assert "preserved" not in result["results"][0]
+    assert "20261020" in calls
+
+
+def test_fetch_lhb_backfill_staging_refreshes_unknown_source(pg_ready):
+    fetch_lhb_day("20261019", lhb_adapters=[FakeLhbAdapter()])
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE collection_log SET source = NULL"
+                " WHERE trade_date = '20261019' AND section = 'lhb'"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    calls = []
+
+    class Recorder(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            calls.append(trade_date)
+            return super().fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[Recorder()],
+    )
+
+    assert result["status"] == "ok"
+    assert "20261019" in calls
+
+
+def test_fetch_lhb_backfill_force_replaces_old_reasons_and_excludes_yyb(pg_ready):
     old = {
         **EXCHANGE_LHB,
         "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][0], lhb_reason="旧来源原因")],
@@ -641,7 +872,8 @@ def test_fetch_lhb_backfill_replaces_old_reasons_and_excludes_yyb(pg_ready):
     }
 
     result = fetch_lhb_backfill(
-        "20261020", "20261020", lhb_adapters=[FakeLhbAdapter(payload=new)]
+        "20261020", "20261020", lhb_adapters=[FakeLhbAdapter(payload=new)],
+        force=True,
     )
 
     assert result["status"] == "ok"
@@ -670,7 +902,7 @@ def test_fetch_lhb_backfill_partial_failure_preserves_old_day(pg_ready):
             return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
 
     result = fetch_lhb_backfill(
-        "20261020", "20261020", lhb_adapters=[PartialOnTargetDay()]
+        "20261020", "20261020", lhb_adapters=[PartialOnTargetDay()], force=True,
     )
 
     assert result["status"] == "error"
@@ -705,6 +937,25 @@ def test_fetch_lhb_backfill_single_day_failure_continues(pg_ready):
     by_day = {x["trade_date"]: x for x in r["results"]}
     assert by_day["20261019"]["status"] == "error"
     assert _count(pg_ready, "lhb_basic") == 2 * 2  # 失败日不落库，其余保留
+
+
+def test_fetch_lhb_backfill_staging_reuses_complete_existing_day(pg_ready):
+    fetch_lhb_day("20261019", lhb_adapters=[FakeLhbAdapter()])
+    calls = []
+
+    class Recorder(FakeLhbAdapter):
+        def fetch_lhb(self, trade_date):
+            calls.append(trade_date)
+            return super().fetch_lhb(trade_date)
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[Recorder()],
+    )
+
+    assert result["status"] == "ok"
+    assert "20261019" not in calls
+    assert "20261020" in calls
+    assert _count(pg_ready, "lhb_basic") == 4
 
 
 def test_fetch_lhb_backfill_stages_lookback_without_writing_outside_window(pg_ready):
@@ -871,6 +1122,14 @@ class TestLhbCli:
         )
         assert rc == 0 and out["mode"] == "backfill" and out["total_days"] == 3
 
+    def test_backfill_force(self, pg_ready, capsys):
+        rc, out = _run(
+            capsys,
+            ["lhb", "--start", "20261020", "--end", "20261020", "--force"],
+            lhb_adapters=[FakeLhbAdapter()],
+        )
+        assert rc == 0 and out["params"]["force"] is True
+
     def test_backfill_fallback_ths_is_explicit(self, pg_ready, capsys, monkeypatch):
         official = {
             **EXCHANGE_LHB,
@@ -918,6 +1177,27 @@ class TestLhbCli:
         assert rc == 1
         assert "仅用于历史回溯" in out["error"]
         assert _count(pg_ready, "collection_log") == 0
+
+    def test_force_is_rejected_outside_history(self, pg_ready, capsys):
+        rc, out = _run(
+            capsys, ["lhb", "--date", TODAY, "--force"],
+            lhb_adapters=[FakeLhbAdapter()],
+        )
+        assert rc == 1
+        assert "仅用于历史回溯" in out["error"]
+        assert _count(pg_ready, "collection_log") == 0
+
+    def test_force_is_rejected_in_check_mode(self, pg_ready, capsys, monkeypatch):
+        monkeypatch.setattr(
+            scheduler, "compare_lhb_sources", lambda trade_date: {"status": "ok"}
+        )
+        rc, out = _run(
+            capsys,
+            ["lhb", "--start", "20261020", "--end", "20261020", "--check", "--force"],
+            lhb_adapters=[FakeLhbAdapter()],
+        )
+        assert rc == 1
+        assert "不用于 --check" in out["error"]
 
     def test_backfill_trading_day_window(self, pg_ready, capsys):
         rc, out = _run(

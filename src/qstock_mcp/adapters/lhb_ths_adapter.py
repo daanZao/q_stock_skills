@@ -1,4 +1,4 @@
-"""同花顺历史龙虎榜 basic 后备源（issue #126/#127，默认关闭）。"""
+"""同花顺历史龙虎榜 basic：深圳主采及其余市场显式后备（ADR 0016）。"""
 
 import html as html_lib
 import re
@@ -12,6 +12,8 @@ from .base import FetchError
 from .ths_adapter import _check_ban
 
 PAGE_URL = "https://data.10jqka.com.cn/ifmarket/lhbggxq/report/{date}/"
+# 性能验证（2026-10-27）：单次历史页响应截断，未取得有效性能样本；
+# 20 秒为保守请求纪律，最小安全间隔、TPS 与并发能力均待验证。
 PAUSE_S = 20.0
 TIMEOUT_SEC = 20
 _HEADERS = {

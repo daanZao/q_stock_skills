@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS lhb_stock_statistic (
     -- fetch_board_snapshot(lhb 段) 落 lhb_basic 后 recompute_lhb_statistic；
     -- 历史回溯由 replace_lhb_basic_day 原子替换 basic 并以临时 staging 重算，
     -- 两条路径均以近 60 日历日窗口（含当日，承接
-    -- 原新浪 ggtj「近 60 日」窗口语义）按股聚合（交易所官方数据派生，
+    -- 原新浪 ggtj「近 60 日」窗口语义）按股聚合（库内 lhb_basic 派生，
     -- appear=窗口行数、buy/sell/net=窗口合计万元）；DELETE+INSERT 幂等可
     -- 重跑，窗口滑出/上游修订自愈。buy/sell_seat_count 恒 NULL：官方汇总
     -- 无席位计数来源、不伪造（lhb_stock_detail 接线后才可派生）。新浪 ggtj

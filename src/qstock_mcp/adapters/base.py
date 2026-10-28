@@ -184,6 +184,7 @@ class FetchError(RuntimeError):
 
     def __init__(self, msg: str, *, kind: str | None = None):
         self.kind = kind
+        self.source_meta: dict | None = None
         super().__init__(msg)
 
 

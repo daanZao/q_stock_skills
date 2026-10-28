@@ -191,8 +191,8 @@ export PG_DSN='postgresql://user:pass@host:5432/qstock'
   .venv/bin/qstock-scheduler lhb --date 20261023 --check
   ```
 
-- **关键参数**：`--date` 用于单日；`--trading-days` 用于历史窗口；`--check` 使用新浪数据做互补校验。官方单市场失败时可在历史命令显式加 `--fallback ths` 启用同花顺市场级后备；默认关闭，单日与对拍不适用，真实官方对拍通过前不会进入默认链。
-- **结果判断**：关注 `status`、逐日 `results` 和 `empty_days`；正常空日不是失败，部分失败不能当作窗口已完成。启用后备时还要核对 `source` 与 `source_detail`，确认哪些市场实际由同花顺补齐。
+- **关键参数**：`--date` 用于单日；`--trading-days` 用于历史窗口；`--check` 使用新浪数据做互补校验。深圳历史默认同花顺主采并保留完整官方日；`--fallback ths` 仅用于沪市/北交所显式补缺，`--force` 用于整窗重抓并替换保留官方日。
+- **结果判断**：关注 `status`、逐日 `results` 和 `empty_days`；正常空日不是失败，部分失败不能当作窗口已完成。保留官方日时 `preserved=true`；主采或后备发生时核对 `source` 与 `source_detail`，确认各市场实际来源。
 - **详细手册**：[龙虎榜 CLI](lhb-source-cli.md)。
 
 #### `coverage`：历史分析窗口统一覆盖核验

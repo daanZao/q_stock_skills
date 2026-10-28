@@ -6,8 +6,8 @@ CLI（qstock-scheduler lhb，手册 docs/lhb-source-cli.md）直调本层，不�
   （三态契约、台账、业务键 upsert 全继承），幂等可重跑。
 - fetch_lhb_backfill：区间历史回溯（逐交易日；沪深实测回溯到 2015，北交所
   到 2021-11 开市当周，#97/#107）；单日失败不中断、逐日落台账，进度经
-  logging 走 stderr（issue #89 双阈值模式）。显式 fallback=ths 时按官方
-  失败市场用同花顺 basic 补缺，默认关闭（issue #126，ADR 0015）。
+  logging 走 stderr（issue #89 双阈值模式）。深圳默认同花顺主采、官方保留，
+  沪深北其他市场仅在显式 fallback=ths 时补缺（issue #128，ADR 0016）。
 - compare_lhb_sources：新浪互补对拍（可手动触发，不落库）——交易所官方
   主源 vs 新浪独立转载面，逐股比对股票集合/全日成交额/席位净买额；
   容差沿用 daily_parity 口径（成交额 rel 0.005；净买 rel 0.005，万元）。
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from time import monotonic
 from typing import Sequence
 
-from .adapters import BoardAdapter, default_lhb_adapters
+from .adapters import BoardAdapter, default_lhb_adapters, default_lhb_history_adapters
 from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
 from .adapters.lhb_ths_adapter import ThsLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
@@ -28,10 +28,12 @@ from .db import connect
 from .fetch_chain import (
     AllSourcesFailed, aggregate_error_kind, fetch_section_with_fallback,
 )
-from .ledger import record_collection, summarize_attempted
+from .ledger import record_collection, select_collection_log, summarize_attempted
 from .output import aggregate_batch_status
 from .output import error as _error
-from .repository import LHB_STATISTIC_WINDOW_DAYS, select_lhb_statistic
+from .repository import (
+    LHB_STATISTIC_WINDOW_DAYS, select_board_rows, select_lhb_statistic,
+)
 from .tools_board import (
     _lhb_all_markets_failure_result,
     _merge_lhb_basic_fallback,
@@ -70,6 +72,58 @@ def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
     )
 
 
+def _latest_lhb_success(conn, trade_date: str) -> dict | None:
+    for entry in select_collection_log(conn, trade_date=trade_date, section="lhb"):
+        if entry["status"] in ("ok", "empty"):
+            return entry
+    return None
+
+
+def _is_complete_lhb_day(entry: dict) -> bool:
+    source = entry.get("source") or ""
+    return (
+        any(known in source for known in ("exchange", "ths"))
+        and "partial_error=" not in (entry.get("detail") or "")
+    )
+
+
+def _is_official_lhb_day(entry: dict) -> bool:
+    if not _is_complete_lhb_day(entry) or "exchange" not in entry["source"]:
+        return False
+    detail = entry.get("detail") or ""
+    for raw_part in detail.split(";"):
+        part = raw_part.strip()
+        if part.startswith("basic_fallback="):
+            markets = part.split(":", 1)[-1].split("(", 1)[0].split(",")
+            if "szse" in markets:
+                return False
+        if part.startswith("szse_primary="):
+            value = part.split("=", 1)[1].split("(", 1)[0]
+            if "exchange" not in value.split("->")[-1]:
+                return False
+    return True
+
+
+def _existing_lhb_inputs(
+    conn, start: str, end: str
+) -> tuple[dict[str, list[dict]], dict[str, dict]]:
+    reusable: dict[str, list[dict]] = {}
+    official: dict[str, dict] = {}
+    d = start
+    while d <= end:
+        rows = select_board_rows(conn, "lhb_basic", "trade_date", "stock_code", d)
+        entry = _latest_lhb_success(conn, d)
+        if entry is not None and _is_complete_lhb_day(entry) and (
+            (rows and entry["status"] == "ok")
+            or (not rows and entry["status"] == "empty")
+        ):
+            reusable[d] = rows
+            if _is_official_lhb_day(entry):
+                official[d] = entry
+        d = add_days(d, 1)
+    return reusable, official
+
+
 def fetch_lhb_day(
     trade_date: str | None = None,
     lhb_adapters: Sequence[BoardAdapter] | None = None,
@@ -95,12 +149,17 @@ def fetch_lhb_day(
 
 
 def _lhb_staging_rows(
-    start: str, end: str, adapters: Sequence[BoardAdapter], lhb_fallback=None
+    start: str, end: str, adapters: Sequence[BoardAdapter], lhb_fallback=None,
+    existing_rows: dict[str, list[dict]] | None = None,
 ) -> tuple[list[dict], dict | None]:
     rows: list[dict] = []
     d = start
     while d <= end:
         if is_trading_day(d):
+            if existing_rows is not None and d in existing_rows:
+                rows.extend(existing_rows[d])
+                d = add_days(d, 1)
+                continue
             try:
                 result = fetch_section_with_fallback(adapters, "lhb", d)
             except AllSourcesFailed as e:
@@ -134,11 +193,14 @@ def fetch_lhb_backfill(
     lhb_adapters: Sequence[BoardAdapter] | None = None,
     fallback: str | None = None,
     lhb_fallback=None,
+    force: bool = False,
 ) -> dict:
     """区间历史回溯：逐交易日抓取，单日失败不中断；逐日结果+汇总台账由
     fetch_board_snapshot 内联记录（本层不重复落账）。"""
     tool = "fetch_lhb_backfill"
-    params = {"start": start, "end": end}
+    params: dict = {"start": start, "end": end}
+    if force:
+        params["force"] = True
     try:
         start_d, end_d = normalize_date(start), normalize_date(end)
     except ValueError as e:
@@ -151,6 +213,12 @@ def fetch_lhb_backfill(
         params["fallback"] = "ths"
         if lhb_fallback is None:
             lhb_fallback = ThsLhbAdapter()
+    other_markets_fallback = lhb_fallback
+    adapters: Sequence[BoardAdapter]
+    if lhb_adapters is None:
+        adapters = default_lhb_history_adapters(lhb_fallback or ThsLhbAdapter())
+    else:
+        adapters = lhb_adapters
     days = []
     d = start_d
     while d <= end_d:
@@ -161,10 +229,21 @@ def fetch_lhb_backfill(
         return _error(tool, params, f"区间 {start_d}~{end_d} 内无交易日")
     lookback_start = add_days(start_d, -LHB_STATISTIC_WINDOW_DAYS)
     lookback_end = add_days(start_d, -1)
+    conn, db_error = connect()
+    if db_error:
+        return _error(tool, params, db_error)
+    try:
+        reusable_rows, official_days = _existing_lhb_inputs(
+            conn, lookback_start, end_d
+        )
+        official_statistic = {
+            d: len(select_lhb_statistic(conn, d)) for d in official_days
+        }
+    finally:
+        conn.close()
     staging_rows, staging_error = _lhb_staging_rows(
-        lookback_start, lookback_end,
-        lhb_adapters if lhb_adapters is not None else default_lhb_adapters(),
-        lhb_fallback=lhb_fallback,
+        lookback_start, lookback_end, adapters,
+        lhb_fallback=other_markets_fallback, existing_rows=reusable_rows,
     )
     if staging_error:
         conn, db_error = connect()
@@ -186,9 +265,29 @@ def fetch_lhb_backfill(
     results = []
     last_logged = monotonic()
     for i, d in enumerate(days, 1):
+        if not force and d in official_days:
+            results.append({
+                "trade_date": d,
+                "status": "ok",
+                "rows": len(reusable_rows[d]) + official_statistic[d],
+                "source": official_days[d].get("source"),
+                "empty_kind": (
+                    "no_data_for_date" if not reusable_rows[d] else None
+                ),
+                "error_kind": None,
+                "error": None,
+                "partial_error": None,
+                "preserved": True,
+                "source_detail": {"preserved_official": True},
+            })
+            now_m = monotonic()
+            if _progress_due(i, total, last_logged, now_m):
+                log.info("lhb 回溯进度 %d/%d（%s，保留官方）", i, total, d)
+                last_logged = now_m
+            continue
         r = fetch_lhb_day(
-            d, lhb_adapters=lhb_adapters, history=True, staging_rows=staging_rows,
-            lhb_fallback=lhb_fallback,
+            d, lhb_adapters=adapters, history=True, staging_rows=staging_rows,
+            lhb_fallback=other_markets_fallback,
         )
         lhb = r.get("lhb") or {}
         entry = {

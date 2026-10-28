@@ -36,11 +36,14 @@ issue #114（spec #111）：龙虎榜迁移交易所官方源——深交所 Sho
 # 单日抓取落库（缺省当日；幂等，可重跑）
 qstock-scheduler lhb --date 20261020
 
-# 历史回溯（逐交易日；周末自动跳过；单日失败不中断、逐日落台账）
+# 历史回溯（深圳默认同花顺主采；周末自动跳过；单日失败不中断）
 qstock-scheduler lhb --start 20261001 --end 20261020
 
-# 官方单市场失败时，显式启用同花顺市场级后备（默认关闭）
+# 沪市/北交所官方失败时，显式启用同花顺市场级后备
 qstock-scheduler lhb --trading-days 90 --fallback ths
+
+# 整窗重抓，包括替换默认保留的完整官方日
+qstock-scheduler lhb --trading-days 90 --force
 
 # 新浪互补对拍：交易所官方 vs 新浪转载面，不落库
 qstock-scheduler lhb --date 20261020 --check
@@ -55,9 +58,10 @@ qstock-scheduler lhb --date 20261020 --check
 - `--trading-days N`：含截止日在内 N 个 A 股交易日，可用 `--end` 改截止日，
   缺省截止最近已收盘交易日；与 `--start` 互斥。
 - `--fallback ths`：仅历史回溯及统计前置 staging 可用，单日与 `--check` 拒绝。
-  官方某市场失败时只补该市场，其他市场官方行保留；官方正常空日不触发。
+  用于沪市/北交所官方失败时补缺；深圳默认同花顺主采，无需此参数。
   同花顺每日期最多一次请求、日期间 20 秒退避，封禁后停止本轮后续日期。
-  **默认关闭；真实官方对拍完成前不代表默认生产链已验收**（ADR 0015）。
+- `--force`：历史整窗重抓；缺省保留有成功台账佐证的完整官方日，显式 force
+  才按当前主源链替换。staging 始终优先复用库内完整输入，不写窗外业务表。
 - `--check`：对拍模式（不落库、不落台账；只读连库读取 statistic 自算快照）。
   逐股比对：
   - 股票集合双向差集（`stock_set_diff`，信息级——两源归类口径不同，差集供
@@ -88,9 +92,10 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
   由库内自算（见数据口径），无子项失败语义。
 - backfill：`status` ok / partial_error / error（`aggregate_batch_status`
   批次口径）；`results` 逐日成败/行数/来源；`empty_days` 统计上游确认无
-  数据日（非故障）。发生市场级补缺时 `source` 为 `exchange+ths`，
-  `source_detail.fallback` 列出实际后备源、市场与补入行数；
-  采集台账 `source` 与 `detail` 同步记录，不把混合来源记成纯官方。
+  数据日（非故障）。深圳主采时 `source_detail.szse_primary` 记录请求源、实际源
+  和行数，其他市场后备由 `source_detail.fallback` 记录；保留官方日时
+  `preserved=true`，不伪造一次新的上游采集。采集台账 `source` 与 `detail`
+  同步记录真实来源，不把同花顺或混合来源记成纯官方。
 - check：`status` ok / mismatch / error；`mismatch_count` 为差异股数
   （basic 对拍 + statistic 校验位差异都计入整体 status）；
   `results` 携带双方原值供人工核对。
@@ -116,33 +121,33 @@ stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例�
   删除）。`buy_seat_count`/`sell_seat_count` 恒 NULL：交易所官方汇总无席位
   计数来源、不伪造（lhb_stock_detail 接线后才可派生）。新浪 ggtj 回归
   `--check` 对拍校验位（不落库）。`trade_date` 为快照交易日，业务键
-  (trade_date, stock_code)。历史回溯额外抓取窗口前 60 个日历日 basic 作为
-  连接级临时 staging，保证目标窗口早期也使用完整公式；staging 不写入窗外业务表。
-- **历史回溯一致性**：只写 `lhb_basic` 与 statistic，basic 按日完整替换并在
-  同一事务重算 statistic，清除旧来源/旧原因行。单所缺失、`partial_error` 或
-  连接失败时保留该日旧数据并报告失败，不以残缺结果替换。两个营业部累计榜
-  没有历史日期参数，历史任务不写，不得把当前榜盖成历史日期。
+  (trade_date, stock_code)。历史回溯使用窗口前 60 个日历日 basic 作为连接级
+  临时 staging，优先复用有成功台账佐证的库内完整日期，只抓缺失或来源不明日；
+  staging 不写入窗外业务表。
+- **历史回溯一致性**：只写 `lhb_basic` 与 statistic。已确认的完整官方日缺省
+  保留；其余实际抓取日按日完整替换并在同一事务重算 statistic，`--force`
+  才替换保留官方日。单所缺失、`partial_error` 或双源失败时保留旧数据并报告
+  失败，不以残缺结果替换。两个营业部累计榜没有历史日期参数，历史任务不写。
 - **lhb_stock_detail（席位级表）**：本期未接线（schema 在、写路径未挂；研究
   报告定位"能力增量非恢复"）。席位数据已用于金额自算与对拍。
 - **北交所**：历史行旧码自动归一化 920 新码（官方 248 条对照表，未覆盖的
   极少数旧码原样保留）；北交所特有的严重异常波动分类资金（yzycbdList）本期
   不接线。
-- **链序**：`default_lhb_adapters()` = **交易所官方单源**（`ExchangeLhbAdapter`，
-  issue #121 摘除东财 legacy 兜底后定稿）。单日实时抓取的子项失败保留
-  partial_error 语义；历史回溯遇任何部分失败则不替换该日旧数据。深交所汇总
-  单页失败最多尝试 3 次（0.5/1 秒退避），持续失败仍按该市场不完整处理。显式
-  `--fallback ths` 不走通用链，而在市场失败后合并 basic；三市场同时失败及
-  嵌套 `lhb_basic` 错误同样只在显式开启后进入后备。同花顺页面的
-  buy/sell/net 与普通行 `day_amount` 统一换算为万元；三日/异常期间累计行的
-  `day_amount` 置 null，不把期间累计成交额冒充单日成交额。`turnover_rate`
-  无独立实际值时恒 null（不取上榜阈值）。后备缺失、异常 HTML、业务键重复
-  或任一行日期错位时当日失败并保留旧数据，staging 不继续也不写窗外表。
+- **链序**：单日 `default_lhb_adapters()` 保持交易所官方单源；历史
+  `default_lhb_history_adapters()` 在深圳组合同花顺主采，成功时不请求深交所，
+  失败才由官方补缺，沪市/北交所仍走官方。显式 `--fallback ths` 只启用其他
+  市场后备，同花顺同一日期页面缓存复用，不重复请求。深交所官方汇总单页仍有
+  最多 3 次（0.5/1 秒退避）的防御性重试。同花顺 buy/sell/net 与普通行
+  `day_amount` 统一万元；累计行 `day_amount` 置 null，`turnover_rate` 无独立
+  实际值时恒 null。异常 HTML、业务键重复、日期错位或双源失败时当日失败并
+  保留旧数据，staging 不继续也不写窗外表。
 
 ## 落库与回滚
 
 单日实时 CLI 写 basic、两个营业部榜与 statistic；历史回溯只写 basic 与
-statistic，并写 append-only 台账 `collection_log`。历史 basic 按日替换且与统计
-重算同事务，恢复旧值须从事先备份回写，不能假设 upsert 可反推旧行。台账不回滚。
+statistic，并写 append-only 台账 `collection_log`。实际重抓日的 basic 按日替换
+且与统计重算同事务；保留官方日不重写也不新增采集台账。恢复旧值须从事先备份
+回写，不能假设 upsert 可反推旧行。台账不回滚。
 按日期清理后可重跑：
 
 ```sql

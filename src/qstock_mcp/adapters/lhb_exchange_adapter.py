@@ -12,7 +12,7 @@ close_price/change_percent 官方汇总不提供（偏离值≠涨跌幅，不�
 可与 stock_daily join 补齐）；换手率仅在披露原因为"换手率达到X%"时从文本提取。
 lhb_stock_statistic 不在本适配器承载（issue #114 code-review 修正，spec 冲突
 修正）：由库内 lhb_basic 近 60 日历日窗口滚动自算（repository.
-recompute_lhb_statistic，交易所官方数据派生），新浪 ggtj 回归 `lhb --check`
+recompute_lhb_statistic，库内 basic 派生），新浪 ggtj 回归 `lhb --check`
 对拍校验位。lhb_yyb_*：akshare 同花顺接口（非东财，#97 勘误幸存）——子项
 委托原 akshare 适配器映射，保持表契约。
 
@@ -28,7 +28,7 @@ import re
 import time
 
 from . import _lhb_bse, _lhb_sse, _lhb_szse
-from ._bse_codes import normalize_stock_code
+from ._bse_codes import market_of, normalize_stock_code
 from ._lhb_yyb import map_lhb_yyb_capital_rows, map_lhb_yyb_most_rows
 from .base import FetchError, import_akshare
 from ..dates import dash_date
@@ -85,22 +85,27 @@ class ExchangeLhbAdapter:
 
     name = "exchange"
 
-    def __init__(self, *, pause_s: float = DETAIL_PAUSE_S, clock=time.sleep):
+    def __init__(
+        self, *, pause_s: float = DETAIL_PAUSE_S, clock=time.sleep, szse_primary=None
+    ):
         self._pause = pause_s
         self._clock = clock
+        self._szse_primary = szse_primary
 
     # ---------------------------------------------------------------- 入口
 
     def fetch_lhb(self, trade_date: str) -> dict:
         """三子表抓取；子项/单所级失败记入 errors（工具层报 partial_error），
         拿到什么落什么；basic/yyb 全空且全部失败才抛 FetchError。"""
-        result: dict[str, list] = {}
+        result: dict = {}
         errors: list[str] = []
         try:
-            result["lhb_basic"], basic_errs = self._fetch_basic(trade_date)
+            result["lhb_basic"], basic_errs, source_meta = self._fetch_basic(trade_date)
+            result.update(source_meta)
             errors += basic_errs
         except Exception as e:  # noqa: BLE001 - 单子项失败不拖垮其他
             errors.append(f"lhb_basic: {e}")
+            result.update(getattr(e, "source_meta", {}))
             result["lhb_basic"] = []
         for table, fn in [
             ("lhb_yyb_capital", self._fetch_yyb_capital),
@@ -111,8 +116,16 @@ class ExchangeLhbAdapter:
             except Exception as e:  # noqa: BLE001 - 单子项失败不拖垮其他
                 errors.append(f"{table}: {e}")
                 result[table] = []
-        if errors and not any(result.values()):
-            raise FetchError(f"交易所龙虎榜抓取失败: {'; '.join(errors)}")
+        if errors and not any(
+            result.get(table)
+            for table in ("lhb_basic", "lhb_yyb_capital", "lhb_yyb_most")
+        ):
+            error = FetchError(f"交易所龙虎榜抓取失败: {'; '.join(errors)}")
+            error.source_meta = {
+                key: result[key]
+                for key in ("szse_primary", "ths_basic_rows") if key in result
+            }
+            raise error
         if errors:
             log.warning("交易所龙虎榜部分子项失败: %s", "; ".join(errors))
             result["errors"] = errors
@@ -120,23 +133,53 @@ class ExchangeLhbAdapter:
 
     # ---------------------------------------------------------------- lhb_basic
 
-    def _fetch_basic(self, trade_date: str) -> tuple[list[dict], list[str]]:
+    def _fetch_basic(self, trade_date: str) -> tuple[list[dict], list[str], dict]:
         rows: list[dict] = []
         errors: list[str] = []
+        metadata: dict = {}
+        szse_rows: list[dict] = []
+        primary_succeeded = False
+        if self._szse_primary is not None:
+            requested = self._szse_primary.name
+            metadata["szse_primary"] = {
+                "requested": requested, "source": self.name, "rows": 0,
+            }
+            try:
+                ths_rows = self._szse_primary.fetch_lhb_basic(trade_date)
+                if any(row.get("trade_date") != trade_date for row in ths_rows):
+                    raise FetchError("深圳主源返回日期错位")
+                szse_rows = [
+                    row for row in ths_rows if market_of(row["stock_code"]) == "sz"
+                ]
+                metadata["szse_primary"].update(
+                    source=requested, rows=len(szse_rows)
+                )
+                metadata["ths_basic_rows"] = ths_rows
+                primary_succeeded = True
+            except Exception as e:  # noqa: BLE001 - 主源失败后由官方深圳补缺
+                metadata["szse_primary"]["error"] = str(e)
         for market, fn in [
             ("szse", self._szse_basic),
             ("sse", self._sse_basic),
             ("bse", self._bse_basic),
         ]:
+            if market == "szse" and primary_succeeded:
+                rows += szse_rows
+                continue
             try:
-                rows += fn(trade_date)
+                market_rows = fn(trade_date)
+                rows += market_rows
+                if market == "szse" and self._szse_primary is not None:
+                    metadata["szse_primary"]["rows"] = len(market_rows)
             except Exception as e:  # noqa: BLE001 - 单所失败不拖垮其他所
                 errors.append(f"{market}: {e}")
         if errors and not rows:
-            raise FetchError(f"lhb_basic 三所均失败: {'; '.join(errors)}")
+            error = FetchError(f"lhb_basic 三所均失败: {'; '.join(errors)}")
+            error.source_meta = metadata
+            raise error
         if errors:
             log.warning("lhb_basic 部分市场失败: %s", "; ".join(errors))
-        return rows, errors
+        return rows, errors, metadata
 
     def _szse_summary(self, dash: str, page: int) -> dict:
         # 性能验证（2026-10-27）：单线程、5 秒间隔请求 3 个汇总页均断连；

@@ -162,6 +162,14 @@ def default_lhb_adapters() -> list[BoardAdapter]:
     return [ExchangeLhbAdapter()]
 
 
+def default_lhb_history_adapters(ths=None) -> list[BoardAdapter]:
+    """历史回溯专用：深圳同花顺主采，沪深北官方保留失败补缺能力。"""
+    from .lhb_exchange_adapter import ExchangeLhbAdapter
+    from .lhb_ths_adapter import ThsLhbAdapter
+
+    return [ExchangeLhbAdapter(szse_primary=ths or ThsLhbAdapter())]
+
+
 def default_boards_adapters() -> list[BoardAdapter]:
     """boards 行业段 fallback 链（issue #118，spec #111）：申万官网单源。
 

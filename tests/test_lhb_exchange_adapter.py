@@ -304,3 +304,97 @@ def test_szse_persistent_summary_page_failure_stops_after_three_attempts(monkeyp
     out = adapter.fetch_lhb(TODAY)
     assert attempts.count(2) == 3
     assert any("szse" in error for error in out["errors"])
+
+
+def test_szse_primary_uses_ths_without_calling_official(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, trade_date):
+            return [
+                _basic_row(
+                    trade_date, "000530", "同花顺深圳", "深圳主采", [],
+                    [{"seat": "卖一", "yuan": 10000.0}], day_amount=1234.0,
+                ),
+                _basic_row(
+                    trade_date, "600302", "不应采用", "沪市仍用官方", [], [],
+                ),
+            ]
+
+    adapter = ExchangeLhbAdapter(
+        pause_s=0.0, clock=lambda _s: None, szse_primary=FakeThs(),
+    )
+
+    def unexpected_szse(_trade_date):
+        raise AssertionError("同花顺主采成功时不请求深交所官方")
+
+    monkeypatch.setattr(adapter, "_szse_basic", unexpected_szse)
+    out = adapter.fetch_lhb(TODAY)
+    szse = next(row for row in out["lhb_basic"] if row["stock_code"] == "000530")
+    sse = next(row for row in out["lhb_basic"] if row["stock_code"] == "600302")
+    assert szse["stock_name"] == "同花顺深圳"
+    assert sse["buy_amount"] == pytest.approx(293.5474)
+    assert out["szse_primary"] == {
+        "requested": "ths_fake", "source": "ths_fake", "rows": 1,
+    }
+    assert len(out["ths_basic_rows"]) == 2
+    assert "errors" not in out
+
+
+def test_szse_primary_failure_falls_back_to_official(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+
+    class BrokenThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, _trade_date):
+            raise FetchError("同花顺封禁")
+
+    adapter = ExchangeLhbAdapter(
+        pause_s=0.0, clock=lambda _s: None, szse_primary=BrokenThs(),
+    )
+    out = adapter.fetch_lhb(TODAY)
+    szse = next(row for row in out["lhb_basic"] if row["stock_code"] == "000530")
+    assert szse["stock_name"] == "冰山冷热"
+    assert out["szse_primary"]["source"] == "exchange"
+    assert out["szse_primary"]["requested"] == "ths_fake"
+    assert "同花顺封禁" in out["szse_primary"]["error"]
+    assert "errors" not in out
+
+
+def test_all_basic_failure_keeps_szse_primary_metadata_on_error(monkeypatch):
+    class BrokenThs:
+        name = "ths_fake"
+
+        def fetch_lhb_basic(self, _trade_date):
+            raise FetchError("同花顺封禁")
+
+    class BoomAK:
+        @staticmethod
+        def stock_lh_yyb_capital():
+            raise FetchError("ths boom")
+
+        @staticmethod
+        def stock_lh_yyb_most():
+            raise FetchError("ths boom")
+
+    monkeypatch.setattr(mod, "import_akshare", lambda: BoomAK)
+    adapter = ExchangeLhbAdapter(
+        pause_s=0.0, clock=lambda _s: None, szse_primary=BrokenThs(),
+    )
+
+    def boom(_trade_date):
+        raise FetchError("官方市场断连")
+
+    for method in ("_szse_basic", "_sse_basic", "_bse_basic"):
+        monkeypatch.setattr(adapter, method, boom)
+    with pytest.raises(FetchError) as caught:
+        adapter.fetch_lhb(TODAY)
+    assert caught.value.source_meta["szse_primary"] == {
+        "requested": "ths_fake", "source": "exchange", "rows": 0,
+        "error": "同花顺封禁",
+    }

@@ -93,6 +93,7 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
     for adapter in adapters:
         error = None
         kind = None
+        source_meta = None
         attempts = 0
         for attempt in range(max_retries + 1):
             if attempt:
@@ -109,6 +110,7 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
             except Exception as e:  # noqa: BLE001 - 适配器任何失败都收敛为"该源失败"
                 error = str(e)
                 kind = fetch_failure_kind(e)
+                source_meta = getattr(e, "source_meta", source_meta)
                 if kind == "unsupported":
                     break
         attempted.append(
@@ -119,6 +121,8 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
                 "failure_kind": kind,
             }
         )
+        if source_meta is not None:
+            attempted[-1]["source_meta"] = source_meta
     raise AllSourcesFailed(attempted)
 
 
