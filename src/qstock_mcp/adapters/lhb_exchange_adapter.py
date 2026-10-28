@@ -138,14 +138,27 @@ class ExchangeLhbAdapter:
             log.warning("lhb_basic 部分市场失败: %s", "; ".join(errors))
         return rows, errors
 
+    def _szse_summary(self, dash: str, page: int) -> dict:
+        # 性能验证（2026-10-27）：单线程、5 秒间隔请求 3 个汇总页均断连；
+        # 最小安全间隔、TPS 与并发能力待验证。3 次尝试及 0.5/1 秒退避是防御性
+        # 重试参数，不代表上游已验证性能指标。
+        for attempt in range(3):
+            try:
+                return _lhb_szse.fetch_summary(dash, dash, page=page)
+            except FetchError:
+                if attempt == 2:
+                    raise
+                self._clock(0.5 * (2 ** attempt))
+        raise AssertionError("unreachable")
+
     def _szse_basic(self, trade_date: str) -> list[dict]:
         """深交所：汇总翻页 + 个股席位明细。"""
         dash = dash_date(trade_date)
-        first = _lhb_szse.fetch_summary(dash, dash, page=1)
+        first = self._szse_summary(dash, page=1)
         pages = [first]
         for page in range(2, first["pagecount"] + 1):
             self._clock(self._pause)
-            pages.append(_lhb_szse.fetch_summary(dash, dash, page=page))
+            pages.append(self._szse_summary(dash, page=page))
         rows = []
         for pg in pages:
             for r in pg["rows"]:

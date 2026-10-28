@@ -256,3 +256,51 @@ def test_szse_missing_zbdm_row_skipped_not_market_killed(monkeypatch):
     codes = {r["stock_code"] for r in out["lhb_basic"]}
     assert "000530" in codes and "301313" not in codes
     assert "errors" not in out  # 深市其余行照常，不算 partial
+
+
+def test_szse_transient_summary_page_failure_retries(monkeypatch):
+    """汇总中途单页瞬时断连应原地重试，不能把整天深市判为不完整。"""
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+    attempts = []
+
+    def flaky_summary(dash, dash2, page=1):
+        attempts.append(page)
+        if page == 6 and attempts.count(6) == 1:
+            raise FetchError(
+                "深交所龙虎榜汇总解析失败（2026-10-20~2026-10-20 第6页）: "
+                "深交所请求失败: Remote end closed connection without response"
+            )
+        return {
+            "rows": [{
+                "zqdm": "000530", "zqjc": "冰山冷热", "cjje_yi": 20.42,
+                "plyy": "日价格振幅达到18.39%", "dqrq": dash, "zbdm": "0902",
+            }] if page == 6 else [],
+            "recordcount": 1,
+            "pagecount": 6,
+        }
+
+    monkeypatch.setattr(mod._lhb_szse, "fetch_summary", flaky_summary)
+    adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
+    out = adapter.fetch_lhb(TODAY)
+    assert attempts.count(6) == 2
+    assert "errors" not in out
+    assert any(r["stock_code"] == "000530" for r in out["lhb_basic"])
+
+
+def test_szse_persistent_summary_page_failure_stops_after_three_attempts(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+    attempts = []
+
+    def unavailable_summary(dash, dash2, page=1):
+        attempts.append(page)
+        if page == 2:
+            raise FetchError("Remote end closed connection without response")
+        return {"rows": [], "recordcount": 0, "pagecount": 2}
+
+    monkeypatch.setattr(mod._lhb_szse, "fetch_summary", unavailable_summary)
+    adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
+    out = adapter.fetch_lhb(TODAY)
+    assert attempts.count(2) == 3
+    assert any("szse" in error for error in out["errors"])
