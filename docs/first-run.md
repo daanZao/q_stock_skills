@@ -7,7 +7,22 @@
 
 完成快速引导后，库内应有最近 90 个交易日的全市场个股日线、7 大指数日线、申万一级/二级板块，以及龙虎榜 basic 与滚动统计。这里的目标是**历史分析就绪**，不表示过去 90 个交易日的每日复盘都能完整重做：全市场快照、实时板块快照和营业部累计榜等数据无法全部事后恢复。
 
-> 整窗刷新会重新抓取并覆盖窗口内同业务键数据，窗口外业务数据不动。已有库执行前请备份；各写库命令的还原方法见对应专项手册。
+> 显式 `--force` 才要求整窗重抓并覆盖窗口内同业务键数据，窗口外业务数据不动。龙虎榜非强制模式保留已确认的完整官方日（含确认空日）；已有库执行强制刷新前请备份，各写库命令的还原方法见对应专项手册。
+
+## 数据范围与一致性口径
+
+| 数据 | 形态 | 可补范围与前置依赖 | 一致性策略 |
+| --- | --- | --- | --- |
+| 股票清单 | 当前原始清单 | 全市场个股日线的前置；不代表历史 Universe | 先刷新清单，再执行 `daily --all` |
+| 个股、指数日线 | 原始行情 | 可按 90 日窗口或更深历史回补；复权口径分开 | 个股 `--force` 整窗覆盖同键；指数按业务键补采与覆盖核验 |
+| 申万板块历史 | 原始板块行情 | 申万官网趋势数据可回溯至 1999 年；限当前一级/二级口径 | `--force` 整窗重抓，默认逐板断点续跑；旧口径只读 |
+| 龙虎榜 basic | 原始披露 | 交易所官方源实测沪深可回溯至 2015 年、北交所至 2021 年开市；同花顺主采深度待验证；深圳失败才由官方补缺 | 同花顺校验通过即完整；完整官方日默认保留，`--force` 才替换；实际重抓日原子替换 |
+| 龙虎榜滚动统计 | 物化派生数据 | 由 basic 与窗前 60 日历日输入派生 | 按当前公式 DELETE+INSERT 重算；staging 复用完整输入且窗外零写入 |
+| 自算板块行情与指标 | 查询时计算 | 依赖当时库内行情、成分字典和指标输入 | 不物化刷新，由调用方按当前算法计算 |
+| 快照、涨停池、营业部累计榜 | 实时或受限数据 | 不能承诺事后补齐 90 日 | 通过日常采集逐日积累，不伪造历史 |
+| 历史分析结论 | 已存结论 | 不属于原始数据回补产物 | 不随数据刷新自动改写 |
+
+因此，**upsert 只保证同一业务键可重复写入，不能单独证明窗口完整、来源正确或派生结果已更新**；最后必须执行第 8 步的覆盖核验。
 
 ## 第一章：快速引导
 
@@ -48,6 +63,21 @@ export PG_DSN='postgresql://user:pass@host:5432/qstock'
 ```
 
 查看各数据面的 `missing_days` 和 `status`，再确认是否按本指南覆盖窗内数据。预检发现缺口时返回退出码 1，表示“覆盖不完整”，不是命令自身故障。空库可跳过本步。
+
+已有库还要保存窗外业务行与复权口径基线，供第 8 步做刷新前后对照。把 `START`/`END` 换成实际窗口：
+
+```bash
+psql "$PG_DSN" -c "
+SELECT 'stock_daily' AS section, md5(string_agg(md5(stock_daily::text), '' ORDER BY md5(stock_daily::text))) FROM stock_daily WHERE trade_date NOT BETWEEN 'START' AND 'END'
+UNION ALL SELECT 'index_daily', md5(string_agg(md5(index_daily::text), '' ORDER BY md5(index_daily::text))) FROM index_daily WHERE trade_date NOT BETWEEN 'START' AND 'END'
+UNION ALL SELECT 'market_boards', md5(string_agg(md5(market_boards::text), '' ORDER BY md5(market_boards::text))) FROM market_boards WHERE trade_date NOT BETWEEN 'START' AND 'END'
+UNION ALL SELECT 'lhb_basic', md5(string_agg(md5(lhb_basic::text), '' ORDER BY md5(lhb_basic::text))) FROM lhb_basic WHERE trade_date NOT BETWEEN 'START' AND 'END'
+UNION ALL SELECT 'lhb_stock_statistic', md5(string_agg(md5(lhb_stock_statistic::text), '' ORDER BY md5(lhb_stock_statistic::text))) FROM lhb_stock_statistic WHERE trade_date NOT BETWEEN 'START' AND 'END';
+SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
+" > /tmp/qstock_before.txt
+```
+
+这里用整行哈希做严格对照：仅比较行数或首末日期不足以证明窗外旧值未被修改。
 
 ### 4. 刷新股票清单
 
@@ -90,11 +120,13 @@ export PG_DSN='postgresql://user:pass@host:5432/qstock'
 # 申万一级/二级板块历史
 .venv/bin/qstock-scheduler backfill --source sw --trading-days 90 --force
 
-# 龙虎榜 basic 与滚动统计
-.venv/bin/qstock-scheduler lhb --trading-days 90
+# 龙虎榜 basic 与滚动统计（整窗重抓，包括保留官方日）
+.venv/bin/qstock-scheduler lhb --trading-days 90 --force
 ```
 
-每条命令成功后再执行下一条。`status="ok"` 表示执行成功；龙虎榜正常无数据的日期会记入 `empty_days`，不属于失败。申万 `--force` 会忽略同窗口成功台账并重抓；个股与申万不加 `--force` 时仍保留各自的默认补缺口/断点续跑行为。
+每条命令成功后再执行下一条。`status="ok"` 表示执行成功；龙虎榜正常无数据的日期会记入 `empty_days`，不属于失败。申万 `--force` 会忽略同窗口成功台账并重抓；个股与申万不加 `--force` 时仍保留各自的默认补缺口/断点续跑行为。龙虎榜不加 `--force` 时会保留完整官方日并优先复用 staging 输入，本指南的整窗刷新应显式带 force。
+
+执行龙虎榜命令时保留 stdout JSON，核对 `source`、`source_detail`、`preserved` 与采集台账：主采、后备和官方保留应如实标注，不得把同花顺或混合来源记成纯官方。个股、指数和申万也要检查各自命令的 `failed`、逐标的失败结果及部分失败明细，不能只凭最终退出码继续。
 
 上述命令省略 `--end` 时，都截止最近一个已收盘交易日。若要回补到指定截止日，给快速引导中的 `daily`、`index`、`backfill`、`lhb` 以及下一步的 `coverage` **全部添加同一个** `--end YYYYMMDD`，不要混用窗口。
 
@@ -104,9 +136,18 @@ export PG_DSN='postgresql://user:pass@host:5432/qstock'
 .venv/bin/qstock-scheduler coverage --trading-days 90
 ```
 
-**完成标准**：返回 `status="ok"`，且 `summary.gaps=0`。
+**完成标准**：返回 `status="ok"`，且 `summary.gaps=0`。逐项检查，而不是只看退出码：
+
+- 顶层 `range` 与 `calendar_days` 是预期的 90 个交易日窗口；
+- `stock_daily`、`index_daily`、`market_boards` 中各标的的 `first_date`、`last_date`、`rows` 和 `missing_days` 覆盖完整，`status="ok"`；
+- `lhb` 逐日的 `basic_rows`、`statistic_rows` 与 `ledger_status` 相互印证：有 basic 的日期必须有滚动统计，确认空日应有 `empty` 台账，不应残留 `error`；
+- 个股、指数和申万的刷新结果及相应采集台账也要无未处理的 `error`/`partial_error`，不能只检查龙虎榜台账。
+
+已有库将第 3 步的两条 SQL 再执行一次，保存为 `/tmp/qstock_after.txt`，然后运行 `diff -u /tmp/qstock_before.txt /tmp/qstock_after.txt`：无输出才证明窗外业务行未变，各复权口径行数也未被意外合并；如有差异，先停止验收并定位原因，不能用 `summary.gaps=0` 掩盖窗外改动。
 
 如果有缺口，`coverage` 返回 `status="error"`、退出码 1。查看 `sections` 中对应标的或日期的 `missing_days`、`status` 和采集台账状态，重跑对应刷新命令后再次验收。`coverage` 只读数据库，不会自动补数；其他命令退出码 0 也不能替代这一步。
+
+本章是用户执行生产初始化的完整路径，**不是要求每次开发测试都真实执行全市场流程**。项目测试按 [分层测试门禁](agents/testing.md) 选择 fake 全路径与隔离 live 样本；测试结论不得超出实际样本 Universe。
 
 首次回补完成后，日常采集使用 `morning`、`close`、`snapshot`、`index` 和 `limitpool` 等命令，见第二章及 [launchd 配置说明](scheduler-launchd.md)。
 
