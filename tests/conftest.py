@@ -6,7 +6,6 @@
 """
 
 import os
-from typing import Any
 
 import psycopg2
 import pytest
@@ -14,6 +13,7 @@ from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 from qstock_mcp.db import ensure_schema
+from qstock_mcp.testdb import TestRunnerConflict, reset_schema, test_runner_lock
 
 MAINT_DSN = os.environ.get("QSTOCK_TEST_MAINT_DSN", "postgresql://localhost/postgres")
 TEST_DSN = os.environ.get(
@@ -32,49 +32,22 @@ def _reachable(dsn: str) -> bool:
         return False
 
 
-# 测试库为全 runner 共享单例：并发 runner 会互相清数据，产生与业务无关的失败。
-# 会话级咨询锁保证同时只有一个 runner 持有测试库；持锁进程被 kill 时锁随连接释放。
-_TEST_RUNNER_LOCK_KEY = 0x71557  # 'qstock' 七进制梗：任意不冲突常量即可
-
-
-def _try_lock() -> tuple[Any | None, bool | None]:
-    """经维护库取会话级咨询锁。
-
-    返回 (conn, True) = 已持锁（conn 须保活到会话结束）；(None, None) = PG
-    不可达，交由各用例 pg_test fixture 自行 skip；(None, False) = 锁被其他
-    runner 持有，调用方应立即退出。
-    """
-    try:
-        conn = psycopg2.connect(MAINT_DSN, connect_timeout=2)
-    except Exception:
-        return None, None
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_try_advisory_lock(%s)", (_TEST_RUNNER_LOCK_KEY,))
-        got = bool(cur.fetchone()[0])
-    if not got:
-        conn.close()
-        return None, False
-    return conn, True
-
-
+# pytest 与 live-sample 共用同一把会话级咨询锁；同进程嵌套调用可重入。
 @pytest.fixture(scope="session", autouse=True)
 def _single_test_runner():
     """拒绝并发 runner：拿不到咨询锁直接退出（返回码 3），不产出误导性红结果。"""
-    conn, got = _try_lock()
-    if got is None:
+    if not _reachable(MAINT_DSN):
         yield  # PG 不可达：交由各用例 pg_test fixture 自行 skip
         return
-    if not got:
+    try:
+        with test_runner_lock(MAINT_DSN):
+            yield
+    except TestRunnerConflict:
         pytest.exit(
-            "另一个 pytest 进程正持有 qstock_test 测试库 runner 锁"
+            "另一个 pytest/live 进程正持有 qstock_test runner 锁"
             "（共享库不可并发，并发会互相清空数据制造假失败）；请先结束它再跑",
             returncode=3,
         )
-    try:
-        yield
-    finally:
-        conn.close()  # 会话连接关闭即释放咨询锁
 
 
 def _terminate_other_connections(cur, dbname: str) -> None:
@@ -87,14 +60,7 @@ def _terminate_other_connections(cur, dbname: str) -> None:
 
 def reset_test_schema(dsn: str) -> None:
     """重建空 public schema，仅供会话初始化和显式 schema 迁移用例使用。"""
-    conn = psycopg2.connect(dsn)
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    try:
-        with conn.cursor() as cur:
-            _terminate_other_connections(cur, conn.info.dbname)
-            cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-    finally:
-        conn.close()
+    reset_schema(dsn)
 
 
 def reset_test_db(dsn: str) -> None:

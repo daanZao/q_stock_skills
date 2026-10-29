@@ -41,7 +41,7 @@ git diff --check
 | schema / repository | 对应 repository 测试和所有受影响写入面的核心测试 |
 | MCP 输出契约 | 对应工具测试及消费方契约测试 |
 
-共享 PG 测试库持有 runner 锁，不并行启动多个 pytest 进程。测试失败时先缩短到失败用例定位，不以跳过失败或缩小断言收尾。
+共享 PG 测试库由 pytest 与 live-sample 共用 runner 锁，不并行启动多个触库进程。测试失败时先缩短到失败用例定位，不以跳过失败或缩小断言收尾。
 
 ## full：阶段性自动化回归
 
@@ -59,7 +59,14 @@ git diff --check
 1. 五个市场分组的代表股 90 日深度样本，固定种子、每组初始 3 只，异常股票最多增补一次；
 2. 2–3 个一级/二级板块的成分股全集 10 日广度样本，隔离库中的 `stock_list` 只包含本轮 Universe。
 
-live 不属于常规提交门禁。结果必须包含种子、代码、板块、替换原因、实际窗口、耗时和来源，不得写成“全市场通过”。
+live 不属于常规提交门禁。结果必须包含种子、代码、板块、替换原因、实际窗口、耗时和来源，不得写成“全市场通过”。固定入口如下，命令会清空指定的 `qstock_test*` 隔离库：
+
+```bash
+PG_DSN=postgresql://localhost/qstock_test \
+  qstock-scheduler live-sample --seed 134 --end 20261028
+```
+
+参数、样本限制和输出契约见 `docs/live-sample-cli.md`。
 
 ## 完成证据
 

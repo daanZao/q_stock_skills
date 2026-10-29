@@ -63,6 +63,9 @@
                              staging 优先复用库内数据（ADR 0016）。
   coverage [--start D --end D | --trading-days N]
                              历史分析窗口覆盖核验，纯读不触发抓取。
+  live-sample [--seed N] [--end D] [--throttle SEC]
+                             隔离库代表股 90 日 + 板块成分全集 10 日抽样；
+                             固定种子、异常每组最多补抽一次（issue #134）。
   limitpool [--date D] [--probe]
                              涨停池固定入口（issue #120，spec #111）：zt_pool
                              三池经同花顺涨停揭秘低频纪律抓取落库（每日每池
@@ -119,6 +122,7 @@ from .tools_board import fetch_board_snapshot
 from .tools_coverage import verify_history_coverage
 from .tools_daily import fetch_daily
 from .tools_lhb import compare_lhb_sources, fetch_lhb_backfill, fetch_lhb_day
+from .tools_live_sample import run_live_sample
 from .tools_morning import fetch_morning_batch
 from .tools_snapshot import fetch_market_snapshot
 
@@ -569,6 +573,34 @@ def cmd_coverage(
     return 0 if result.get("status") == "ok" else 1
 
 
+def cmd_live_sample(
+    seed: int,
+    end: str | None,
+    throttle: float,
+    daily_adapters: Sequence | None = None,
+    list_adapters: Sequence | None = None,
+    sw_adapters: Sequence | None = None,
+) -> int:
+    """隔离库代表股与板块成分全集 live 抽样验收（issue #134）。"""
+    if throttle < 0:
+        _emit({
+            "status": "error",
+            "job": "live-sample",
+            "error": "--throttle 不能为负数",
+        })
+        return 1
+    result = run_live_sample(
+        seed=seed,
+        end=end,
+        daily_adapters=daily_adapters,
+        list_adapters=list_adapters,
+        sw_adapters=sw_adapters,
+        throttle=throttle,
+    )
+    _emit({"job": "live-sample", "mode": "live", **result})
+    return 0 if result.get("status") == "ok" else 1
+
+
 def cmd_snapshot(
     date_arg: str | None = None,
     check: bool = False,
@@ -846,6 +878,14 @@ def main(argv: list[str] | None = None,
                             help="核验终点 yyyymmdd")
     p_coverage.add_argument("--trading-days", type=int, default=None,
                             help="最近 N 个交易日；可用 --end 指定截止日")
+    p_live = sub.add_parser(
+        "live-sample", help="隔离库代表股 90 日 + 板块成分全集 10 日 live 抽样")
+    p_live.add_argument("--seed", type=int, default=134,
+                        help="固定随机种子，换种子可轮换样本（缺省 134）")
+    p_live.add_argument("--end", default=None,
+                        help="共同截止交易日 yyyymmdd，缺省最近已收盘交易日")
+    p_live.add_argument("--throttle", type=float, default=1.0,
+                        help="逐股票查询后间隔秒，串行不并发（缺省 1.0）")
     p_lhb = sub.add_parser(
         "lhb", help="龙虎榜：沪深北交易所官方源抓取落库 / 历史回溯 / 新浪对拍")
     p_lhb.add_argument("--date", default=None,
@@ -967,6 +1007,15 @@ def main(argv: list[str] | None = None,
             return cmd_coverage(
                 start_arg=args.start, end_arg=args.end,
                 trading_days=args.trading_days,
+            )
+        if args.command == "live-sample":
+            return cmd_live_sample(
+                seed=args.seed,
+                end=args.end,
+                throttle=args.throttle,
+                daily_adapters=daily_adapters,
+                list_adapters=list_adapters,
+                sw_adapters=adapters,
             )
         if args.command == "limitpool":
             return cmd_limitpool(args.date, probe=args.probe)

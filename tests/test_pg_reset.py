@@ -109,4 +109,4 @@ def test_shared_runner_lock_rejects_second_pytest(pg_test):
     )
     output = result.stdout + result.stderr
     assert result.returncode == 3, output
-    assert "另一个 pytest 进程" in output
+    assert "另一个 pytest/live 进程" in output
