@@ -24,6 +24,7 @@ from qstock_mcp.ledger import record_collection
 from qstock_mcp.tools_board import fetch_board_snapshot
 from qstock_mcp.tools_ledger import query_collection_log
 
+from conftest import reset_test_schema
 from fakes import FakeBoardAdapter, INDEX_ROWS
 
 TODAY = date.today().strftime("%Y%m%d")
@@ -207,6 +208,7 @@ def test_record_collection_planned_absent_accepted_unknown_rejected(pg_test):
 def test_existing_db_three_value_check_migrated_by_016(pg_test):
     """现库旧形态（三值 CHECK）经 ensure_schema 的 sql/016 幂等迁移为四值：
     迁移后 planned_absent 可落账、存量行保留；重复执行不重复迁移。"""
+    reset_test_schema(pg_test)
     conn = psycopg2.connect(pg_test)
     with conn.cursor() as cur:
         cur.execute(

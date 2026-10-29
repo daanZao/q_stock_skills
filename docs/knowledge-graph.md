@@ -146,7 +146,7 @@ zt_pool/strong_stocks 承载切换（issue #120，ADR 0012，仅生产路径—�
 
 ### 测试与协作
 
-- **`tests/`**：`conftest.py` 的 `pg_test` fixture 连真实 PG 测试库 `qstock_test`（不可达自动 skip，`QSTOCK_TEST_PG_DSN`/`QSTOCK_TEST_MAINT_DSN` 可覆盖）；清库走 `reset_test_db`——DROP SCHEMA 前先 `pg_terminate_backend` 清掉本库残留会话，上个用例断言失败泄漏的连接不会阻塞后续 fixture（issue #30）（`tests/conftest.py:27-58`）；`fakes.py` 的 fake 适配器与真实适配器实现同一协议，另含 `FakeMxClient` 与 mx 实测响应 fixture。测试直接打 `tools_*` 核心层，不经 MCP 协议层；mx 三工具的接缝在 `test_mx_tools.py` / `test_mx_search.py` / `test_query_news.py` / `test_mx_quota.py`。
+- **`tests/`**：`conftest.py` 的 `pg_test` fixture 连真实 PG 测试库 `qstock_test`（不可达自动 skip，`QSTOCK_TEST_PG_DSN`/`QSTOCK_TEST_MAINT_DSN` 可覆盖）；会话开始预建标准 schema，每个用例经 `reset_test_db` 终止残留会话并 `TRUNCATE` 已提交数据，保留表结构且兼容业务 commit（issue #133）；只有空库创建与旧形态迁移用例显式调用 `reset_test_schema`。共享 runner 咨询锁继续禁止并发 pytest 清库；`fakes.py` 的 fake 适配器与真实适配器实现同一协议，另含 `FakeMxClient` 与 mx 实测响应 fixture。测试直接打 `tools_*` 核心层，不经 MCP 协议层；mx 三工具的接缝在 `test_mx_tools.py` / `test_mx_search.py` / `test_query_news.py` / `test_mx_quota.py`。
 - **协作面**：issue 走 GitHub Issues（`gh` CLI），triage 标签与 domain docs 消费约定见 `docs/agents/`（`AGENTS.md:1-13`）。`.agents/skills/` 下的协作 skill（来自 `skills-lock.json`）仅服务本仓库开发流程，不属于交付物。
 
 ## 关键流程

@@ -1,12 +1,41 @@
-"""pg_test 的 schema 重置兜底（issue #30）：用例断言失败泄漏的连接持锁时，
-reset_test_db 先 terminate 本库残留会话，DROP SCHEMA 不再永久阻塞。
-"""
+"""pg_test 的数据清理、显式 schema 重建与 runner 隔离回归。"""
+
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import psycopg2
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-from conftest import reset_test_db
+from qstock_mcp.db import ensure_schema
+
+from conftest import reset_test_db, reset_test_schema
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_reset_preserves_schema_and_clears_committed_rows(pg_test):
+    conn = psycopg2.connect(pg_test)
+    ensure_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO stock_list (stock_code, stock_name) VALUES ('600519', '贵州茅台')"
+        )
+    conn.commit()
+    conn.close()
+
+    reset_test_db(pg_test)
+    reset_test_db(pg_test)
+
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.stock_list') IS NOT NULL")
+        assert cur.fetchone()[0] is True
+        cur.execute("SELECT count(*) FROM stock_list")
+        assert cur.fetchone()[0] == 0
+    conn.close()
 
 
 def test_reset_terminates_leaked_connection(pg_test):
@@ -17,7 +46,7 @@ def test_reset_terminates_leaked_connection(pg_test):
     leaked = psycopg2.connect(pg_test)
     try:
         leaked.cursor().execute("CREATE TABLE leak_t (id int)")  # 未提交，持锁
-        reset_test_db(pg_test)  # 不阻塞即通过；fix 前这里会被 DROP SCHEMA 卡死
+        reset_test_db(pg_test)  # 不阻塞即通过；残留会话已被终止
         with pytest.raises(psycopg2.OperationalError):
             leaked.cursor().execute("SELECT 1")  # 连接已被 terminate
     finally:
@@ -25,13 +54,13 @@ def test_reset_terminates_leaked_connection(pg_test):
 
 
 def test_reset_recreates_empty_schema(pg_test):
-    """清库后 public schema 为空：上个用例的表不存在。"""
+    """显式 schema 迁移用例仍可取得空 public schema。"""
     conn = psycopg2.connect(pg_test)
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE leftover (id int)")
     conn.close()
-    reset_test_db(pg_test)
+    reset_test_schema(pg_test)
     conn = psycopg2.connect(pg_test)
     with conn.cursor() as cur:
         cur.execute(
@@ -39,3 +68,45 @@ def test_reset_recreates_empty_schema(pg_test):
         )
         assert cur.fetchone()[0] == 0
     conn.close()
+
+
+def test_pg_unreachable_skips_db_test():
+    env = os.environ.copy()
+    env["QSTOCK_TEST_MAINT_DSN"] = "postgresql://localhost:1/postgres"
+    env["QSTOCK_TEST_PG_DSN"] = "postgresql://localhost:1/qstock_test"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_init_database.py::test_init_creates_all_tables",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "1 skipped" in output
+
+
+def test_shared_runner_lock_rejects_second_pytest(pg_test):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_init_database.py::test_missing_pg_dsn_returns_clear_error",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 3, output
+    assert "另一个 pytest 进程" in output

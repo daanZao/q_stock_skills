@@ -12,6 +12,7 @@ from qstock_mcp.adapters.baostock_adapter import map_baostock_rows
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.tools_daily import query_daily
 
+from conftest import reset_test_schema
 from fakes import FakeAdapter
 
 
@@ -56,6 +57,7 @@ def test_schema_has_tradestatus_column(pg_test):
 
 def test_existing_db_migration_keeps_data(pg_test):
     """现库迁移：旧形态表（无 tradestatus 列）加列不丢数据，幂等重跑。"""
+    reset_test_schema(pg_test)
     conn = psycopg2.connect(pg_test)
     with conn.cursor() as cur:
         cur.execute(

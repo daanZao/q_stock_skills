@@ -10,7 +10,10 @@ from typing import Any
 
 import psycopg2
 import pytest
+from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
+from qstock_mcp.db import ensure_schema
 
 MAINT_DSN = os.environ.get("QSTOCK_TEST_MAINT_DSN", "postgresql://localhost/postgres")
 TEST_DSN = os.environ.get(
@@ -29,10 +32,8 @@ def _reachable(dsn: str) -> bool:
         return False
 
 
-# 测试库为全 runner 共享单例：每个用例都 terminate 他端连接 + DROP SCHEMA，
-# 两个 pytest 进程同跑会互相拆表（现象 = 大面积 psycopg2 OperationalError /
-# UndefinedTable，干扰诊断）。会话级咨询锁保证同时只有一个 runner 持有测试库；
-# 持锁进程被 kill 时锁随连接释放，不会死锁后续运行。
+# 测试库为全 runner 共享单例：并发 runner 会互相清数据，产生与业务无关的失败。
+# 会话级咨询锁保证同时只有一个 runner 持有测试库；持锁进程被 kill 时锁随连接释放。
 _TEST_RUNNER_LOCK_KEY = 0x71557  # 'qstock' 七进制梗：任意不冲突常量即可
 
 
@@ -67,8 +68,7 @@ def _single_test_runner():
     if not got:
         pytest.exit(
             "另一个 pytest 进程正持有 qstock_test 测试库 runner 锁"
-            "（共享库不可并发，并发会互相 DROP SCHEMA 制造假失败）；"
-            "请先结束它再跑",
+            "（共享库不可并发，并发会互相清空数据制造假失败）；请先结束它再跑",
             returncode=3,
         )
     try:
@@ -77,18 +77,62 @@ def _single_test_runner():
         conn.close()  # 会话连接关闭即释放咨询锁
 
 
-def reset_test_db(dsn: str) -> None:
-    """清空测试库：先 terminate 本库残留会话（上个用例断言失败泄漏的连接
-    持锁时 DROP SCHEMA 会被永久阻塞，issue #30），再重建 public schema。"""
+def _terminate_other_connections(cur, dbname: str) -> None:
+    cur.execute(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+        " WHERE datname = %s AND pid <> pg_backend_pid()",
+        (dbname,),
+    )
+
+
+def reset_test_schema(dsn: str) -> None:
+    """重建空 public schema，仅供会话初始化和显式 schema 迁移用例使用。"""
     conn = psycopg2.connect(dsn)
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    try:
+        with conn.cursor() as cur:
+            _terminate_other_connections(cur, conn.info.dbname)
+            cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    finally:
+        conn.close()
+
+
+def reset_test_db(dsn: str) -> None:
+    """终止残留会话并清空已提交数据，保留表结构；可重复执行。"""
+    conn = psycopg2.connect(dsn)
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    try:
+        with conn.cursor() as cur:
+            _terminate_other_connections(cur, conn.info.dbname)
+            cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            tables = [row[0] for row in cur.fetchall()]
+            if tables:
+                cur.execute(
+                    sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+                        sql.SQL(", ").join(sql.Identifier(table) for table in tables)
+                    )
+                )
+    finally:
+        conn.close()
+
+
+@pytest.fixture(scope="session")
+def _prepared_test_db(_single_test_runner):
+    if not _reachable(MAINT_DSN):
+        pytest.skip("PostgreSQL 不可达，跳过 DB 测试")
+    conn = psycopg2.connect(MAINT_DSN)
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname = %s AND pid <> pg_backend_pid()",
-            (conn.info.dbname,),
-        )
-        cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DB,))
+        if not cur.fetchone():
+            cur.execute(
+                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_DB))
+            )
+    conn.close()
+
+    reset_test_schema(TEST_DSN)
+    conn = psycopg2.connect(TEST_DSN)
+    ensure_schema(conn)
     conn.close()
 
 
@@ -100,19 +144,12 @@ def _no_backoff_sleep(monkeypatch):
 
 
 @pytest.fixture
-def pg_test(monkeypatch):
-    """提供一个干净的测试库 DSN 并注入 PG_DSN；库内所有表在测试前清空。"""
-    if not _reachable(MAINT_DSN):
-        pytest.skip("PostgreSQL 不可达，跳过 DB 测试")
-    conn = psycopg2.connect(MAINT_DSN)
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DB,))
-        if not cur.fetchone():
-            cur.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conn.close()
-
+def pg_test(monkeypatch, _prepared_test_db):
+    """提供无数据的标准 schema 并注入 PG_DSN，兼容业务代码提交。"""
     reset_test_db(TEST_DSN)
+    conn = psycopg2.connect(TEST_DSN)
+    ensure_schema(conn)
+    conn.close()
 
     monkeypatch.setenv("PG_DSN", TEST_DSN)
     return TEST_DSN
