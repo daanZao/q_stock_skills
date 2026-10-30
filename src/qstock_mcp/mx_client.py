@@ -2,7 +2,7 @@
 （issue #23/T1、issue #24/T2）。
 
 只用标准库（urllib.request），不加新依赖。api_key 缺省读环境变量 MX_APIKEY，
-缺失抛 MXError（懒加载报错先例见 adapters/akshare_adapter.py 的 _ak()）。
+缺失抛 MXError（懒加载报错先例见 adapters/base.py 的 import_akshare()）。
 上游业务码（body 里 code：0 成功 / 100 参数错误 / 113 配额上限 / 114 密钥无效）
 不在本层判定——client 只负责返回解析后的 body dict，判定在 tools 层。
 """

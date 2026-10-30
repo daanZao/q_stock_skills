@@ -1,7 +1,7 @@
 """stock_daily tradestatus 列 + query_daily 停牌标注（issue #80，spec #71/W2 MCP 侧）。
 
 - stock_daily 加 tradestatus 列（DDL 迁移幂等、现库不丢数据）；
-- baostock 路径写入权威停牌状态（0 停牌/1 正常），efinance/akshare 路径为 null；
+- baostock 路径写入权威停牌状态（0 停牌/1 正常），腾讯/新浪/akshare 路径为 null；
 - query_daily 输出的停牌标注 tradestatus 优先、启发式（OHLC 全等且 volume/
   change_percent 为 null）兜底，停牌占位行与数据缺失行在数据层可区分。
 """
@@ -12,6 +12,7 @@ from qstock_mcp.adapters.baostock_adapter import map_baostock_rows
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.tools_daily import query_daily
 
+from conftest import reset_test_schema
 from fakes import FakeAdapter
 
 
@@ -56,6 +57,7 @@ def test_schema_has_tradestatus_column(pg_test):
 
 def test_existing_db_migration_keeps_data(pg_test):
     """现库迁移：旧形态表（无 tradestatus 列）加列不丢数据，幂等重跑。"""
+    reset_test_schema(pg_test)
     conn = psycopg2.connect(pg_test)
     with conn.cursor() as cur:
         cur.execute(
@@ -79,7 +81,7 @@ def test_existing_db_migration_keeps_data(pg_test):
         )
         cur.execute(
             "INSERT INTO stock_daily (stock_code, trade_date, close, adj, source)"
-            " VALUES ('600519', '20261013', 1700.0, 'qfq', 'efinance')"
+            " VALUES ('600519', '20261013', 1700.0, 'qfq', 'akshare')"
         )
     conn.commit()
     ensure_schema(conn)  # 幂等迁移：加列

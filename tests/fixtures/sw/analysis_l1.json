@@ -1,0 +1,59 @@
+{
+ "code": "200",
+ "message": "ok",
+ "data": {
+  "count": 31,
+  "next": null,
+  "previous": null,
+  "results": [
+   {
+    "swindexcode": "801010",
+    "swindexname": "农林牧渔",
+    "bargaindate": "2026-10-23T08:00:00+08:00",
+    "closeindex": "2491.17",
+    "bargainamount": "29.63",
+    "markup": "-0.03",
+    "turnoverrate": "4.65",
+    "pe": "78.88",
+    "pb": "2.37",
+    "meanprice": "10.85",
+    "bargainsumrate": "1.14",
+    "negotiablessharesum1": "5664.54",
+    "negotiablessharesum2": "55.00",
+    "dp": "1.43"
+   },
+   {
+    "swindexcode": "801030",
+    "swindexname": "基础化工",
+    "bargaindate": "2026-10-23T08:00:00+08:00",
+    "closeindex": "3801.65",
+    "bargainamount": "65.04",
+    "markup": "1.54",
+    "turnoverrate": "4.07",
+    "pe": "23.24",
+    "pb": "1.95",
+    "meanprice": "18.08",
+    "bargainsumrate": "4.26",
+    "negotiablessharesum1": "19449.95",
+    "negotiablessharesum2": "47.21",
+    "dp": "1.68"
+   },
+   {
+    "swindexcode": "801040",
+    "swindexname": "钢铁",
+    "bargaindate": "2026-10-23T08:00:00+08:00",
+    "closeindex": "2039.45",
+    "bargainamount": "19.89",
+    "markup": "-0.19",
+    "turnoverrate": "2.51",
+    "pe": "28.65",
+    "pb": "0.93",
+    "meanprice": "6.28",
+    "bargainsumrate": "0.39",
+    "negotiablessharesum1": "2637.58",
+    "negotiablessharesum2": "59.95",
+    "dp": "2.15"
+   }
+  ]
+ }
+}

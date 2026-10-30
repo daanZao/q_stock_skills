@@ -1,6 +1,6 @@
 ---
 name: daily-review
-description: 每日复盘编排（午市/全天），市场级总结。当用户请求每日复盘/收盘复盘/午市复盘时使用；经 MCP 查询做数据就绪检查，agent 生成复盘结论与 markdown 报告，结论经 save_conclusion 落库（daily_review.close / daily_review.midday），报告由本 skill 落盘、路径记入结论 payload；核心数据上游不可达（三态契约）时中止复盘并落异常报告（files/daily_review_<date>_anomaly.md）；market_boards 当日缺失（非故障）时板块轮动节整节降级切换申万行业自算口径（query_sw_board_daily）；涨停/连板章节经 limit-up-analysis 子技能，指数历史经 query_index_daily，相关性矩阵、量价判定与偏离值累计经 indicator-tools 管道（corr/vol_price/deviation）计算。
+description: 每日复盘编排（午市/全天），市场级总结。当用户请求每日复盘/收盘复盘/午市复盘时使用；经 MCP 查询做数据就绪检查，agent 生成复盘结论与 markdown 报告，结论经 save_conclusion 落库（daily_review.close / daily_review.midday），报告由本 skill 落盘、路径记入结论 payload；核心数据上游不可达（三态契约）时中止复盘并落异常报告（files/daily_review_<date>_anomaly.md）；采集第四态 planned_absent（已定方向待接线的 section 占位缺席）非故障——不触发中止线、不进异常报告误报、按"计划缺席"降级出报；market_boards 当日缺失（非故障）时板块轮动节整节降级切换申万行业自算口径（query_sw_board_daily）；涨停/连板章节经 limit-up-analysis 子技能，指数历史经 query_index_daily，相关性矩阵、量价判定与偏离值累计经 indicator-tools 管道（corr/vol_price/deviation）计算。
 ---
 
 # 每日复盘
@@ -10,6 +10,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 ## 触发与模式
 
 - 由用户手动触发；技能不内置调度，收盘后定时执行的现成配置见末节"调度配置"。
+- **最佳复盘窗口 19:30 之后**（issue #121 落档）：各源当日数据就绪时间线为——腾讯 T+0（收盘后即可得当日行）、申万盘中实时、THS 涨停池盘后、baostock 日 K 约 17:30·复权约 18:00、交易所 lhb 约 16:30–18:00（详见仓库根 README「各源当日数据就绪时间线」）。19:30 前执行 close 模式可能遇 zt_pool 尚未就绪——核心 section 缺数据会走故障中止分支（宁可今日无复盘，不产出残缺复盘）。
 - `mode` 仅两个取值：`close`（默认，收盘后全天复盘）、`midday`（午市盘中复盘，产物须标注午市时点）。
 - 结论类型与模式一一对应：`daily_review.close` / `daily_review.midday`；subject 固定为 `subject_type="market"`、`subject_code="_market"`。
 - 同日两个模式各自独立成行（业务键含 conclusion_type），同日同模式重复跑为 upsert，不产生重复结论；close 不覆盖 midday。
@@ -18,9 +19,9 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 1. **确定交易日与模式**：先取当前日期时间，判断今日是否处于交易日交易时段——工作日 9:30–15:00（含午间休市）一律视为交易时段；周末与节假日为非交易日。**必须询问用户复盘哪一天，不得静默默认当日**。**若当前处于交易时段（或当日收盘数据尚未就绪），当日复盘不可执行**：明确提示用户只能选前一交易日或更早——盘中执行会拉取未完结的盘中 bar，污染指标与数据库。**收盘前（含以 midday 名义）不得对当日执行 close 内容**；midday 模式仅限午市时段（约 11:30–13:00 前后）对当日的盘中复盘。15:00 后的当日复盘仍须经步骤 2 数据就绪检查兜底。`trade_date` 格式 `yyyymmdd`。
    - **历史模式（`trade_date` < 今日）**：**禁用一切 fetch 步骤**（`fetch_board_snapshot`/`fetch_market_snapshot`/`init_database`/`mx_search` 一律不调；服务端防线（issue #78）只是第二道防线，skill 侧自觉不触发）——历史日期的缺失是既定事实，补抓只会污染或徒劳。就绪检查改为**读采集台账归因**（步骤 2 历史分支）；历史复盘可对缺失维度降级出报（见判定线），绝不补数。
-   - **判定线（历史模式）**：核心 section（`market_boards`/`zt_pool`/`strong_stocks`/`market_indices`/`market_snapshot`）经台账归因判为**永久缺失**（未采集/采集失败，非上游无数据）≥ 2 项时，**开工前提示用户确认是否仍出报**（默认继续，用户可否决）；< 2 项直接降级出报，报告显著标注 + `data_gaps` 全列。
+   - **判定线（历史模式）**：核心 section（`market_boards`/`zt_pool`/`strong_stocks`/`market_indices`/`market_snapshot`）经台账归因判为**永久缺失**（未采集/采集失败，非上游无数据）≥ 2 项时，**开工前提示用户确认是否仍出报**（默认继续，用户可否决）；< 2 项直接降级出报，报告显著标注 + `data_gaps` 全列。**第四态 `planned_absent`（计划缺席）不计入本条判定**——计划缺席是已定方向的迁移占位（非故障、非未采集），相关维度按"计划缺席"降级出报即可。
 2. **数据就绪检查**：
-   - **历史模式分支（`trade_date` < 今日，先读台账后探测）**：逐核心 section 调 `query_collection_log(trade_date=<复盘日>, section=<台账 section 名>)` 归因——台账 section 名用采集词汇（`boards`/`zt_pool`/`strong_stocks`/`indices`/`market_snapshot`，分别对应表 `market_boards`/`zt_pool`/`strong_stocks`/`market_indices`/`market_snapshot`）——`count=0`（无台账行）= **未采集**；末行 `status=error` = **采集失败**；`status=empty` = **上游确认无数据**（正常空数据，走降级规则）；`status=ok` = 就绪。"未采集/采集失败"表述为"**未采集（非正常空数据）**"并进 `data_gaps`，与"上游确认无数据"严格区分（不得混用）；台账启用日（20261017）之前的日期恒无台账行，归因写"台账启用前，采集情况不可考"，按"未采集"同等进 `data_gaps`。归因后逐表查行数确认（同下方当日模式的探测法，纯查询不 fetch）。**历史模式不调下方补抓/轮询/重试。**
+   - **历史模式分支（`trade_date` < 今日，先读台账后探测）**：逐核心 section 调 `query_collection_log(trade_date=<复盘日>, section=<台账 section 名>)` 归因——台账 section 名用采集词汇（`boards`/`zt_pool`/`strong_stocks`/`indices`/`market_snapshot`，分别对应表 `market_boards`/`zt_pool`/`strong_stocks`/`market_indices`/`market_snapshot`）——`count=0`（无台账行）= **未采集**；末行 `status=error` = **采集失败**；`status=empty` = **上游确认无数据**（正常空数据，走降级规则）；`status=ok` = 就绪；`status=planned_absent` = **计划缺席**（第四态：已定方向待接线的迁移占位，收盘后批每日落占位台账，非故障非未采集）——判定「计划缺席」，对应维度按降级规则出报、不计入"永久缺失"判定线，表述与"未采集/采集失败"严格区分（不得混用）。"未采集/采集失败"表述为"**未采集（非正常空数据）**"并进 `data_gaps`，与"上游确认无数据"严格区分（不得混用）；台账启用日（20261017）之前的日期恒无台账行，归因写"台账启用前，采集情况不可考"，按"未采集"同等进 `data_gaps`（第四态启用前的日期同理：无 planned_absent 行不臆断）。归因后逐表查行数确认（同下方当日模式的探测法，纯查询不 fetch）。**历史模式不调下方补抓/轮询/重试。**
    - 当日模式逐表查行数——
    - 核心 section（任一 `count=0` 即数据不全）：`market_boards` / `zt_pool` / `strong_stocks` 经 `query_board_data(table, trade_date)`；`market_indices` 整表必超结果预算，探测用单 code `query_board_data(table="market_indices", trade_date=<当日>, code="000001")`（`count>0` 即该 section 就绪，7 指数逐个取在步骤 3）；`market_snapshot` 经 `query_snapshot(trade_date=<当日>, aggregate="breadth,amount")` 探测（上涨+下跌+平盘家数 > 0 即就绪，结果同时是第一节广度/成交额数据源，复用不重查）。
    - 可选：`lhb_basic` 经 `query_board_data("lhb_basic", trade_date)`。
@@ -29,6 +30,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
    - **分段重试**：重试只用 `sections` 参数抓失败分段（单段 30s 内可返回），不整把重抓——已落库 section 幂等保留，重抓浪费上游调用。分段重试仍 `status=error` → 按三态中止线处理。
    - **boards 当日缺失判定线**：`market_boards` 经补抓、防竞态轮询与分段重试后仍 `count=0`，且 boards 段非 `status=error`（error 走下方三态中止线）→ 判「boards 当日缺失」，板块轮动节整节切换为申万行业自算口径，见"板块节降级：申万行业自算口径"节。
    - **三态判定与中止线**（三态契约见 ADR 0007）：补抓/分段重试后，任一核心 section `status=error`，或 `fetch_market_snapshot` 返回 `status=error`（`error_kind` 为 `upstream_unreachable` 或 `fetch_failed`）→ 进入"故障中止分支"（见下节），落异常报告、今日无复盘。`no_data_for_date`（上游正常响应但当日无数据，如非交易日/盘后未发布）与 `empty_ok`（查询条件合理的空集）为正常语义非失败，按"数据缺失红线"的降级规则继续，绝不触发中止。
+   - **第四态 `planned_absent`（计划缺席，非故障非空数据）**：补抓响应中某 section `status="planned_absent"`（`note` 含缺席原因）= 该 section 已定方向待接线、迁移占位——**不触发中止线、不进异常报告、不按缺失红线降级**：对应维度按"计划缺席"出报（报告"数据就绪台账"节判定列记「计划缺席」、`data_gaps` 注明占位原因与已定方向，不记"未采集/采集失败"）；分段重试**跳过** planned_absent 的 section（重试只会得到同样的占位响应）。当前 planned_absent 清单以 `fetch_board_snapshot` 响应与采集台账（`status=planned_absent` 行）为准。
    - `lhb_basic` 为 0 不阻断（lhb 永不进核心集）：close 模式仅记 warning（龙虎榜盘后发布，可能尚未更新），midday 模式属预期内。lhb 段 `status=error`（三态结构化错误）与"未发布"（`rows:0 + empty_kind=no_data_for_date + note`）可区分：前者记入 `data_gaps`，后者属正常语义。
    - 指数历史（相关性/量价复盘的前置）：7 个主要指数逐个 `query_index_daily(index_code, limit=60)`（000001/399001/399006/000300/000016/000905/000688），`count<60` 的指数标注出来。指数日线属 `init_database` 轻量初始化部分，缺失时可经 `init_database` 补齐后重查；仍缺则归因与量价复盘的相关性维度降级，列入 `data_gaps`，不阻断其余复盘。
    - 资讯搜索落库（可选）：就绪检查后 `mx_search(query=<资讯问句>)` 搜近期资讯并落库 `news_items`——大盘级用缺省 subject（`market`/`_market`，如"今日A股市场要闻"），焦点个股传 `subject_type="stock"` + `subject_code=<6 位代码>`。mx-search 配额与 mx-data **独立计数**（默认各 20 次/日，响应回显 `quota:{skill,used,limit}`），单次返回上限约 15 条（响应内重复条目落库前已按 news_code 去重）；本地配额触顶（`status:"error"`，不调上游）、上游自身日限（code=113）或 `MX_APIKEY`/`PG_DSN` 未配置时跳过本步，资讯缺失记入 `data_gaps`，不阻塞复盘。
@@ -43,8 +45,9 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
    - **成交额前 75 名单**：`query_snapshot(trade_date=<当日>, order_by="amount", limit=75)` 排序取前 75（落盘通道备用：从落盘 rows 本地按 `amount` 降序取）；名单（代码/名称/成交额/涨跌幅）即报告附录表格的数据源。
    - **前 75 个股历史序列**：逐股 `query_daily(stock_code, start=<trade_date 前推约 90 自然日>, end=<trade_date>)`（明确接受 75 次调用——热门股成交对其指数/板块影响大，是重要因子）；**历史场景一律用 start/end 显式区间**（`days` 与 `start/end` 互斥，且 `days` 以执行日为锚，历史复盘会带进执行日后的序列）；单股查询失败或行数不足时记入 `data_gaps` 并从相关个股分析中剔除，不中断其余个股。
    - **两市成交额环比基准**：`query_snapshot(<前一交易日>, aggregate="breadth,amount")` 取昨日聚合（前一交易日探测法与 limit-up-analysis 同：自然日回溯，最多 5 个自然日，命中上涨+下跌+平盘家数 > 0 即停）；环比 = 当日 `total_amount` ÷ 昨日 `total_amount` - 1。
-   - **板块历史（板块 5/10 日涨跌前置）**：`query_board_data("market_boards", trade_date=<逐日>)` 逐日取回最近 11 个交易日的全部板块行（**不加 code 过滤**，每日一次调用、本地按板块名过滤；前一交易日探测法同上；单日全板块行超结果预算时同样走落盘通道）；库内历史不足 11 个交易日时按实际可得日数降级，5/10 日涨跌栏标"—"并入 `data_gaps`（板块历史自初次落库日起逐日积累，初期大面积落"—"属预期）。boards 当日缺失的降级日不走本路径，板块历史改由 `query_sw_board_daily` 逐日调用取得（见"板块节降级"节）。
-   - **前 75 概念归属（可选，受 mx-data 配额约束）**：经 `mx_query` 批量查询个股所属概念板块（单问句携带多只股票以省配额）；返回标签混有指数/风格/交易属性类标签（如 HS300_、深股通、基金重仓、行业龙头），**须与 `market_boards` 概念板块清单求交过滤**后才算概念命中。配额不足、接口失败或返回不可解析时，概念相关栏目整栏删除并入 `data_gaps`，不得凭记忆归概念。
+   - **板块历史（板块 5/10 日涨跌前置）**：`query_board_data("market_boards", trade_date=<逐日>)` 逐日取回最近 11 个交易日的全部板块行（**不加 code 过滤**，每日一次调用、本地按板块名过滤；前一交易日探测法同上；单日全板块行约 155 行，远低于结果预算）。申万口径行（board_type=industry_l1/industry_l2）经 `backfill --source sw` 历史深至 1999，5/10 日涨跌常态化可算；库内历史不足 11 个交易日时按实际可得日数降级，5/10 日涨跌栏标"—"并入 `data_gaps`。存量东财口径行（industry/concept，source 为 NULL/'push2his'）仍是自初次落库日起逐日积累、初期大面积落"—"属预期——报告板块轮动节只消费申万口径行，东财存量行不参与本节计算。boards 当日缺失的降级日不走本路径，板块历史改由 `query_sw_board_daily` 逐日调用取得（见"板块节降级"节）。
+   - **板块估值维度（申万分析报表，T+1）**：`query_board_data("sw_board_valuation", trade_date=<当日>)` 取申万一级/二级板块的换手率/PE/PB/流通市值（万元）/股息率（次晨批 `morning` 落库；当日盘中/晚间复盘时该表当日行尚不存在——T+1 次晨才就绪，收盘版报告不消费本表，次日修订版可用）。
+   - **前 75 概念归属（已退役）**：概念板块维度已永久退役——东财口径随 #118 退役、THS 概念承接未过准入闸（issue #119：成分端点 IP 级封禁实测不通，按 #106 弃用方案定稿）——本块不再执行，概念相关栏目（第二节概念强度、第四节概念聚类）整栏不设；存量 market_boards 概念行与成分字典 'em' 体系行仅为历史数据保留只读，不参与求交。
 4. **涨停/连板子模块（close 模式）**：编排调用 limit-up-analysis 技能（其自行做数据就绪检查、promote 管道计算并落库 `limit_up.close`）；随后 `query_conclusions(conclusion_type="limit_up.close", trade_date=<当日>)` 读其 payload，取 `summary`/`ladder`/`promote_rate`/`attribution`/`leaders` 编入复盘。**midday 模式不调用**（该技能仅 close 模式）：涨停章节降级为 `zt_pool` 结构统计（涨停/跌停/炸板家数、连板高度、炸板率（口径见"口径附注"））加 `strong_stocks` 入选理由聚类。
 5. **指标管道计算**（输入经临时文件或 heredoc 传 stdin，与 limit-up-analysis 调 promote 同法；退出码语义：0 = ok / insufficient_data，1 = 输入错误，2 = 参数错误）：
    - **指数两两相关性**：7 份 `query_index_daily` 输出组装 corr 输入 `{"status":"ok","series":{<index_code>:{"status":"ok","rows":[...]}}}`；corr 窗口由传入序列长度控制（`--tail` 不适用），按序列尾部切 20 根 / 60 根各喂一次，得 20 日与 60 日两张矩阵（相关性标准口径为涨跌幅序列，两处都用 `--on change_percent`）：
@@ -72,7 +75,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 ## 故障中止分支与异常报告
 
-**触发线**：步骤 2 补抓/分段重试后，任一核心 section（`indices`/`boards`/`zt_pool`/`strong_stocks`）`status=error`，或 `fetch_market_snapshot` 返回 `status=error`（`error_kind` 为 `upstream_unreachable` 或 `fetch_failed`，三态契约见 ADR 0007）。
+**触发线**：步骤 2 补抓/分段重试后，任一核心 section（`indices`/`boards`/`zt_pool`/`strong_stocks`）`status=error`，或 `fetch_market_snapshot` 返回 `status=error`（`error_kind` 为 `upstream_unreachable` 或 `fetch_failed`，三态契约见 ADR 0007）。第四态 `planned_absent` **不在触发线内**——计划缺席非故障，失败 section 清单不得收录 planned_absent 的 section（见模板末"计划缺席（非故障）"节）。
 
 **动作（顺序执行）**：
 
@@ -99,31 +102,46 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 ## 关键证据
 
 - 工具返回：`error_kind` / `retry_advice` / `attempted_sources` 逐源明细（含逐源 failure_kind）原样摘录，区分单源问题与集群性故障。
-- 主机侧可达性复测（在主机执行并附结果）：
+- 主机侧可达性复测（在主机执行并附结果；探针覆盖收盘后批五 section 的承载源与 fallback 链，issue #121 定稿——不再探测东财）：
   ```bash
+  # 腾讯（快照/指数/个股日线主源；200 即通）
+  curl -s -m 8 -o /dev/null -w "%{http_code}\n" "https://qt.gtimg.cn/q=sh000001"
+  # 新浪（快照/指数 fallback 第 2 位；上游校验 Referer，缺省 403）
+  curl -s -m 8 -o /dev/null -w "%{http_code}\n" -H "Referer: https://finance.sina.com.cn" "https://hq.sinajs.cn/list=sh000001"
+  # 申万官网（boards 行业段单源；WAF 要求浏览器 UA，裸 curl 可能 508——带 UA 复测）
+  curl -sk -m 8 -o /dev/null -w "%{http_code}\n" -H "User-Agent: Mozilla/5.0" -H "Referer: https://www.swsresearch.com/institute_sw/allIndex/releasedIndex" "https://www.swsresearch.com/institute-sw/api/index_publish/current/?indextype=%E4%B8%80%E7%BA%A7%E8%A1%8C%E4%B8%9A&page=1&page_size=1"
+  # THS 涨停揭秘 dataapi（zt_pool 单源；WAF 校验浏览器 UA，缺 UA 即 403 非封禁；
+  # 封禁口径 = 带 UA 仍 403/forbidden 页。连续探测会触发风控，仅各测一次）
   curl -s -m 8 -o /dev/null -w "%{http_code}\n" \
-    "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=3&fltt=2&invt=2&fid=f12&fs=m:1+s:2&fields=f12,f14,f2"
-  curl -s -m 8 -o /dev/null -w "%{http_code}\n" "https://quote.eastmoney.com/"
+    -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+    -H "Referer: https://data.10jqka.com.cn/datacenterph/limitup/limtupInfo.html" \
+    "https://data.10jqka.com.cn/dataapi/limit_up/limit_up_pool?page=1&limit=1&field=199112,10,9001"
+  # 交易所官方（lhb 主源，深所 JSON 零鉴权探活）
+  curl -s -m 8 -o /dev/null -w "%{http_code}\n" -H "Referer: https://www.szse.cn/disclosure/deal/public/" "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1842_xxpl&TABKEY=tab1&PAGENO=1&random=0.1"
   ```
 
 ## 已落库部分
 
 <本次已成功 section 与行数；已落库数据保留，恢复后经 sections 参数分段幂等补抓缺失分段，不必整把重抓>
+
+## 计划缺席（非故障，不触发中止）
+
+<当日 status=planned_absent 的 section 及缺席原因（note 原样摘录）；计划缺席是已定方向待接线的迁移占位，本节仅为信息记录——该类 section 不进入上方"失败 section 清单"，无本节时整个删掉>
 ````
 
 ## 板块节降级：申万行业自算口径（boards 当日缺失）
 
 **触发条件**：步骤 2 中 `market_boards` 当日经补抓、防竞态轮询与分段重试后仍 `count=0`，且 boards 段非 `status=error`（error 走故障中止分支，不降级）→ 板块轮动节**整节切换**为 `query_sw_board_daily` 自算口径。前置依赖：成分字典与行业名称表已导入（`import_board_classification` / `import_sw_industry_meta`）；未导入时 `query_sw_board_daily` 恒 `count:0`，板块节按原缺口规则降级并在 `data_gaps` 注明"自算前置未就绪"。
 
-**切换方式（取数）**：`query_sw_board_daily(trade_date=<当日>, level=1)` 取申万一级行业全表作为板块节主表（行业码/行业名/加权涨跌幅/涨平跌家数/成分成交额/成分数）；需要明细时加调 `level=2`。**概念板块强度与主力资金净流入栏目随东财口径一并缺失**：整栏删除并入 `data_gaps`（自算口径无概念板块与资金流数据）。
+**切换方式（取数）**：`query_sw_board_daily(trade_date=<当日>, level=1)` 取申万一级行业全表作为板块节主表（行业码/行业名/加权涨跌幅/涨平跌家数/成分成交额/成分数）；需要明细时加调 `level=2`。**概念板块强度栏目已永久退役**（issue #119，见口径附注）：整栏不设、不入 `data_gaps`（弃用面非数据缺口，自算口径同样无概念板块数据）。
 
 **口径标注模板**（板块节开头原样标注，不得省略）：
 
-> 本节为申万行业自算口径（成交额加权）：按申万成分字典 point-in-time 归属 × 库内个股日线聚合（basis=sw_amount_weighted），行业涨跌幅为成分股成交额加权、停牌股（无成交）剔除后归一；与东财板块指数口径不可直接比较，本节数值不与报告内东财口径栏目交叉引用。
+> 本节为申万行业自算口径（成交额加权）：按申万成分字典 point-in-time 归属 × 库内个股日线聚合（basis=sw_amount_weighted），行业涨跌幅为成分股成交额加权、停牌股（无成交）剔除后归一；与申万官网发布指数口径（market_boards 申万行）不可直接比较，本节数值不与报告内申万官网口径栏目交叉引用。
 
 行内 `adj` 字段为本次实际使用的复权口径（issue #92 起按当日 stock_daily 各 adj 行数动态选择、多者胜平局取 qfq）；`adj ≠ 'qfq'` 时在模板后追加一句"个股日线口径为 adj=<实际值>"（截面涨跌/成交额与复权方式无关，数值不受影响）。顶层 `dict_as_of` 为成分字典最近生效日，明显早于当日（如超过一个季度）时在 `data_gaps` 注明"成分字典陈旧"。
 
-**叙述层断交**（降级日强制）：东财口径栏目 = `market_boards` 板块涨跌与主力资金、涨停/强势股行业聚类（`zt_pool.industry` / `strong_stocks.industry`）、mx-data 概念强度与数值验证、前 75 行业聚类中经 `market_boards` 交叉确认的部分。降级日规则：板块节数值不与上述栏目交叉引用、不做涨跌对照；报告内出现两套行业口径时，自算节措辞用"申万一级行业（自算）"，其他节维持东财行业口径原样；总论的板块主线一句话可引用自算口径的领涨/领跌方向，但须带"（申万自算口径）"后缀。
+**叙述层断交**（降级日强制）：申万官网口径栏目 = `market_boards` 申万板块涨跌（industry_l1/l2）、涨停/强势股行业聚类（`zt_pool.industry` / `strong_stocks.industry`，东财行业名经成分字典换口径后可用）、前 75 行业聚类。降级日规则：板块节数值不与上述栏目交叉引用、不做涨跌对照；报告内出现两套行业口径时，自算节措辞用"申万一级行业（自算）"，其他节维持申万官网口径原样；总论的板块主线一句话可引用自算口径的领涨/领跌方向，但须带"（申万自算口径）"后缀。
 
 **5/10 日窗口**：对上榜行业逐日调用 `query_sw_board_daily(trade_date=<逐日>, level=1, industry_code=<2 位一级前缀>)`（最近 11 个有效交易日，前一交易日探测法与板块历史同），把逐日 `change_pct` 连乘重排为 `query_daily` 契约的 `close` 净值序列（基数任意，如 1000 起；数据重排不属于指标计算），喂 chg 管道 `--window 5` / `--window 10` 取末点。窗口内某日该行业无行（stock_daily 缺当日）则对应栏标"—"并入 `data_gaps`，不得手算连乘凑数。注意每日权重随当日成交额变动，连乘语义为"日度再平衡的成交额加权收益"，口径标注已涵盖、不另行声明。
 
@@ -139,9 +157,9 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 0. **总体立场**（≤5 行摘要）：递进结构——大盘一句话 → 分类指数一句话 → 板块主线一句话 → 一句归因推论。涨跌停家数、连板梯队、龙虎榜等细节**不进总论**。
 1. **一、指数表现**：`market_indices` 七指数合并单表（收盘点位 / 涨跌幅 / 振幅 / 量比 / 成交额 / **20 日涨跌** / **20 日区间位置**——区间上下沿与今日所处位置，经 `query_index_daily` 60 日序列与 chg/rolling 管道）；**涨跌家数**（全市场及分市场、环比昨日）与**两市成交额及环比**并入本节（`market_snapshot` 聚合）。
-2. **二、板块轮动**：`market_boards` 行业板块表带**当日 + 5 日 + 10 日涨跌**（chg 管道口径，历史不足标"—"，见红线）；**boards 当日缺失时整节切换申万行业自算口径**（`query_sw_board_daily` 一级行业表 + 口径标注 + 叙述层断交，见"板块节降级"节）；**概念板块强度**（当日涨幅 + 前 75 命中家数的相对强弱口径，标注"个股可属多概念、勿加总、不报占比"；mx-data 概念查询不可行或配额不足时整栏删除）；**主力资金净流入/流出前列**并入本节；领涨个股不在本节展开（见三、四节）。
-3. **三、涨停/连板与龙虎榜**：close 模式引用 limit-up-analysis 子技能的 `limit_up.close` 结论——`summary`、连板梯队、晋级率、归因三维、龙头点评原样引用并注明来源；midday 模式降级为 `zt_pool` 结构统计（涨停/跌停/炸板家数、连板高度、炸板率（口径见"口径附注"））；`strong_stocks` 入选理由聚类两种模式均保留。**涨停/跌停/炸板率与封板节奏为全报告唯一出处**。**严重异动监控（仅 close 模式）**：连板股 10/30 日偏离值累计（deviation 管道输出）与临近阈值预警（达交易所阈值 80% 即预警）；**高标躲异动回调时提示观察同概念后排承接**（一两句提示，不展开）。**龙虎榜并入本节**：`lhb_basic` 净买卖前列、`lhb_stock_statistic` 近三月常客、`lhb_yyb_capital` / `lhb_yyb_most` 席位动向，与情绪结构交叉阅读；数据缺失则标注，不强行展开。
-4. **四、成交额前 75 结构分析**：口径为 `query_snapshot` 当日快照按成交额（`amount`）降序前 75（`order_by="amount", limit=75`，落盘通道备用，见步骤 3）。**行业聚类分一级/二级两档**——"前 75 中 X 行业占 N 只、合计成交 Y 亿"；**概念强度**同第二节口径（命中家数，勿加总）；结合热门股对其指数的影响因子（成交额占两市比例、经 corr 与所属指数的 20 日相关性）；异常放量、量价背离标注保留。定性分析为主；完整 75 只名单放报告附录表格。行业归属经数据交叉确认——`zt_pool.industry` / `strong_stocks.industry` 命中、`market_boards` 领涨/领跌板块与名单的交叉、妙想 mx-data 行业分类查询补齐；无法确认归属的个股单列"归属未确认"，不得凭记忆归类。
+2. **二、板块轮动**：`market_boards` 申万双级口径行业表（board_type=industry_l1 一级 31 / industry_l2 二级 124，issue #118 东财口径退役）带**当日 + 5 日 + 10 日涨跌**（chg 管道口径，申万口径行经 `backfill --source sw` 历史深至 1999、常态化可算，见步骤 3"板块历史"）；抓取响应的 `planned_absent_fields` 已机器可读声明申万不发布的三字段（主力资金净流入/量比/领涨股，永久弃用口径）——本节不设对应栏目、不入 `data_gaps`、列恒 NULL 不表述为缺口；**boards 当日缺失时整节切换申万行业自算口径**（`query_sw_board_daily` 一级行业表 + 口径标注 + 叙述层断交，见"板块节降级"节）；**概念板块强度栏目已永久退役**（issue #119 准入闸未过，#106 弃用方案定稿）：整栏不设、不入 `data_gaps`（弃用面非数据缺口）。
+3. **三、涨停/连板与龙虎榜**：close 模式引用 limit-up-analysis 子技能的 `limit_up.close` 结论——`summary`、连板梯队、晋级率、归因三维、龙头点评原样引用并注明来源；midday 模式降级为 `zt_pool` 结构统计（涨停/跌停/炸板家数、连板高度、炸板率（口径见"口径附注"））；`strong_stocks` 入选理由聚类两种模式均保留。**涨停/跌停/炸板率与封板节奏为全报告唯一出处**。**严重异动监控（仅 close 模式）**：连板股 10/30 日偏离值累计（deviation 管道输出）与临近阈值预警（达交易所阈值 80% 即预警）；**高标躲异动回调时提示观察同题材后排承接**（题材以 `reason_type` 为准，一两句提示，不展开）。**龙虎榜并入本节**：`lhb_basic` 净买卖前列、`lhb_stock_statistic` 近三月常客、`lhb_yyb_capital` / `lhb_yyb_most` 席位动向，与情绪结构交叉阅读；数据缺失则标注，不强行展开。
+4. **四、成交额前 75 结构分析**：口径为 `query_snapshot` 当日快照按成交额（`amount`）降序前 75（`order_by="amount", limit=75`，落盘通道备用，见步骤 3）。**行业聚类分一级/二级两档**——"前 75 中 X 行业占 N 只、合计成交 Y 亿"（行业归属经申万成分字典 `sw_industry_class` point-in-time 归属换口径，一级按行业码前 2 位、二级按前 4 位，与 boards 主口径同源）；**概念强度栏目已随概念板块永久退役**（issue #119，同第二节，不设栏目、不入 `data_gaps`）；结合热门股对其指数的影响因子（成交额占两市比例、经 corr 与所属指数的 20 日相关性）；异常放量、量价背离标注保留。定性分析为主；完整 75 只名单放报告附录表格。无法确认归属的个股单列"归属未确认"，不得凭记忆归类。
 5. **五、归因与量价复盘**：
    - **相关性**：7 个主要指数两两相关性矩阵（20 日/60 日，corr 输出），看市场共振/分化；前 75 个股与所属指数的 20 日相关性，识别跟涨指数还是独立行情。
    - **量价**：大盘以上证指数日线喂 vol_price，得当日成交额环比与量价形态（放量上涨/缩量上涨等）及 `divergence` 判定，与两市成交额环比印证；前 75 中异常放量个股标注。
@@ -153,6 +171,9 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 ## 口径附注（W6）
 
 - **振幅口径**：`market_indices.amplitude` 与 `index_daily.amplitude` 字段存在但长期为 null（无来源）。报告中需要振幅时按**派生口径**自算并注明"（派生）"：振幅 =（当日最高 − 当日最低）÷ 昨收 × 100%（经 20261013 创业板指数据交叉验证：派生 4.6885% ≈ 东财口径 4.69%）。字段为 null 属现状，不报错不入 `data_gaps`；派生所需 high/low/pre_close 同行为 null 时该栏标"—"。
+- **资金流字段永久弃用**（issue #113，spec #111/#102）：板块/概念维度的主力资金净流入等资金流字段为永久弃用面——已从采集清单删除（无任何抓取/落库路径），报告不设该栏目、`data_gaps` 不列、不降级表述；历史报告中该栏目为弃用前产物。类似弃用面（整 section）从采集清单删除后同样不得出现在任何报告/落库尝试中。
+- **概念维度永久退役**（issue #119，spec #111；调研 #106）：概念板块维度（概念强度栏目、前 75 概念聚类、个股概念归属）为永久弃用面——THS 概念成分端点准入闸实测未过（q.10jqka.com.cn 成分分页端点对本机 IP 级封禁，带有效 hexin-v + Referer 首请求即 403 Nginx forbidden，2026-10-20/10-25 两次独立实测同结论），按 #106 弃用方案定稿。报告不设概念栏目、`data_gaps` 不列（弃用面非数据缺口）、不按缺失降级；存量 market_boards 概念行与成分字典 'em' 体系行保留只读，不参与任何计算；领涨股/成分交叉命中无自算来源，一并弃用。
+- **申万板块口径与三字段缺席**（issue #118，spec #111）：boards 行业维度主口径为申万官网双级（board_type=industry_l1 一级 31 / industry_l2 二级 124），历史经 `backfill --source sw` 深至 1999；申万不发布的量比/领涨股/资金流三字段按 planned_absent 语义处理——`fetch_board_snapshot` 响应 `planned_absent_fields` 与采集台账 detail 机器可读声明，列恒 NULL，不设栏目、不入 `data_gaps`、不表述为数据缺口；板块估值维度（换手率/PE/PB/流通市值/股息率）为 T+1（次晨批落 `sw_board_valuation`），收盘版报告不消费、次日修订版可用。
 - **炸板率**（单点定义）：炸板率 = 炸板家数 ÷（涨停家数 + 炸板家数）。全报告唯一数值出处在涨停/连板节，其他节引用结论不复述。
 - **corr 序列末日剔除**：corr 输入序列末日早于 `trade_date` 的（该标的当日无有效数据），剔除该序列并在矩阵旁标注覆盖率（如"4/7"）；与"行数不足 20/60 窗口剔除"同属剔除规则，分别注明原因。
 
@@ -163,10 +184,10 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），建议�
 - `mode`、`report_path`（必填；报告落盘路径）
 - `overall_stance`（总体立场一句话）、`core_logic`（核心逻辑）
 - `indices`（第一节：指数点位/涨跌幅 + 20 日涨跌/区间位置摘要，**并入涨跌家数与两市成交额及环比**，原 `breadth` 字段不再单列）
-- `sectors`（第二节：行业板块当日/5 日/10 日涨跌要点 + 概念强度 + 主力资金流向；概念强度不可行时置 null 并入 `data_gaps`；降级日（申万自算口径）注明 `basis: "sw_amount_weighted"`，概念强度与主力资金置 null）
+- `sectors`（第二节：申万双级行业当日/5 日/10 日涨跌要点；概念强度恒置 null——概念维度永久退役（issue #119），非降级语义；降级日（申万自算口径）注明 `basis: "sw_amount_weighted"`，概念强度同样恒 null）
 - `limit_up_lhb`（第三节，合并原涨停与龙虎榜字段）：close 模式含 `limit_up.close` 结论的摘要与关键数字（`summary`/`ladder`/`promote_rate`，原样引用）+ `deviation_alerts`（连板股偏离值预警列表：`[{stock_code, dev10, dev30, threshold, ratio}]`，无临近标的为空数组）+ `lhb`（净买卖前列/常客/席位动向摘要）；midday 模式为 `zt_pool` 降级统计，deviation 不做、`deviation_alerts` 置 null
 - `limit_up_ref`（对 limit_up.close 结论键的引用）：close 模式为 `{"conclusion_type": "limit_up.close", "trade_date": <yyyymmdd>, "summary": <原样引用>}`；midday 模式或子模块未跑/失败时置 null 并在 `data_gaps` 标注
-- `top75_structure`（第四节）：`{"clusters": [{"板块", "家数", "合计成交额"}], "industry_level2": [...], "concept_strength": [...] 或 null, "coverage": <可归属家数/75>, "index_influence": <热门股对指数影响要点>}`；快照缺失时置 null 并入 `data_gaps`
+- `top75_structure`（第四节）：`{"clusters": [{"板块", "家数", "合计成交额"}], "industry_level2": [...], "concept_strength": null（恒置，概念维度永久退役 issue #119，非降级语义）, "coverage": <可归属家数/75>, "index_influence": <热门股对指数影响要点>}`；快照缺失时置 null 并入 `data_gaps`
 - `attribution_vol_price`（第五节）：`{"index_corr": {"window_20": <矩阵或摘要>, "window_60": <矩阵或摘要>}, "market_vol_price": {"price_chg", "amount_chg", "vol_price", "divergence"}, "abnormal_amount": <异常放量代码列表>, "attribution": <定性归因要点>}`；各子项缺失置 null 并入 `data_gaps`
 - `risk_alerts`（第六节：**仅增量风险**，禁止复述前文）
 - `data_gaps`（缺失块/子项列表，无缺失为空数组）
@@ -181,15 +202,15 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），建议�
 
 ## 报告格式
 
-固定章节：标题 `## <yyyymmdd> 每日复盘（收盘）` / `## <yyyymmdd> 每日复盘（午市）`（含日期与时点）→ **总体立场**（≤5 行摘要，递进：大盘→分类指数→板块主线→一句归因推论，无论据无细节数字）→ 一、指数表现（七指数合并单表 + 涨跌家数与两市成交额）→ 二、板块轮动（行业当日/5 日/10 日涨跌 + 概念强度 + 主力资金流向）→ 三、涨停/连板与龙虎榜（close 模式注明"本节梯队与晋级率引自 limit_up.close 结论"；午市为 zt_pool 结构统计；含严重异动监控与龙虎榜资金）→ 四、成交额前 75 结构 → 五、归因与量价复盘 → 六、风险提示（仅增量）→ 数据缺口（逐条列出缺失维度及其对结论的影响）→ **数据就绪台账**（各核心表/section 一行：count / 判定（就绪·未采集·采集失败·上游确认无数据）/ 归因（台账 source、error_kind 或"台账启用前不可考"）；历史模式此节为台账归因的落盘记录，当日模式记录探测与补抓结果）→ 附录：成交额前 75 完整名单（表格：代码/名称/成交额/涨跌幅/行业归属/与所属指数 20 日相关性，缺失列标"—"）→ 末尾注明数据来源表与快照时点。引用资讯按上节约定随文标注。**数据点唯一出处**：炸板率/涨跌停家数只在第三节，成交额环比只在第一节，各节引用结论不复述数字。
+固定章节：标题 `## <yyyymmdd> 每日复盘（收盘）` / `## <yyyymmdd> 每日复盘（午市）`（含日期与时点）→ **总体立场**（≤5 行摘要，递进：大盘→分类指数→板块主线→一句归因推论，无论据无细节数字）→ 一、指数表现（七指数合并单表 + 涨跌家数与两市成交额）→ 二、板块轮动（申万一级+二级行业当日/5 日/10 日涨跌；概念强度栏目已退役不设）→ 三、涨停/连板与龙虎榜（close 模式注明"本节梯队与晋级率引自 limit_up.close 结论"；午市为 zt_pool 结构统计；含严重异动监控与龙虎榜资金）→ 四、成交额前 75 结构 → 五、归因与量价复盘 → 六、风险提示（仅增量）→ 数据缺口（逐条列出缺失维度及其对结论的影响）→ **数据就绪台账**（各核心表/section 一行：count / 判定（就绪·未采集·采集失败·上游确认无数据·计划缺席）/ 归因（台账 source、error_kind、planned_absent 原因或"台账启用前不可考"）；历史模式此节为台账归因的落盘记录，当日模式记录探测与补抓结果）→ 附录：成交额前 75 完整名单（表格：代码/名称/成交额/涨跌幅/行业归属/与所属指数 20 日相关性，缺失列标"—"）→ 末尾注明数据来源表与快照时点。引用资讯按上节约定随文标注。**数据点唯一出处**：炸板率/涨跌停家数只在第三节，成交额环比只在第一节，各节引用结论不复述数字。
 
 ## 数据缺失红线
 
 - **数据缺失不编造**：某维度数据缺失时，在结论 `data_gaps` 与报告"数据缺口"章节标注，该维度结论降级为定性描述，不得编造点位、金额或家数。
 - **指标只认管道输出**：相关系数矩阵、`price_chg`/`amount_chg`、`vol_price` 形态与 `divergence`、板块 5/10 日涨跌（chg）、偏离值累计（deviation）一律取自 indicator-tools 管道输出，agent 不得手算；管道返回 `insufficient_data`（如指数历史不足窗口、序列交集过短）时如实标注降级，不得用其他口径凑数。
 - **停牌表述**：`query_daily` 每行带 `tradestatus`/`suspended`/`suspended_basis`（停牌占位行，词汇见 CONTEXT.md）；指标管道入口已自动剔除停牌占位行（剔除明细见响应 `excluded_suspended`），无需也不许手工预处理。报告中个股停牌统一表述为"停牌"（不写"无数据"）；停牌期间序列末点不前的个股（序列末日早于 `trade_date`）按口径附注的 corr 剔除规则处理。
-- **板块历史不足降级**：`market_boards` 可用交易日不足 5/10 日窗口时，对应涨跌栏标"—"并入 `data_gaps`，不得硬算（板块历史自初次落库日起逐日积累，初期落"—"属预期）。`market_boards` **当日**缺失（非故障，判定线见步骤 2）不按本条降级，板块轮动节整节切换申万自算口径（见"板块节降级"节）；自算口径自身无源（stock_daily 当日亦无行，故障日限制）时才回到本条标"—"。
-- **概念栏目降级**：mx-data 概念查询不可行、配额不足或返回不可解析时，概念强度相关栏目整栏删除并入 `data_gaps`，不得凭记忆归概念。
+- **板块历史不足降级**：申万口径行（industry_l1/l2）经 `backfill --source sw` 历史深至 1999，可用交易日不足 5/10 日窗口时对应涨跌栏标"—"并入 `data_gaps`，不得硬算（正常回补后不应出现；若出现先查回补台账）。`market_boards` **当日**缺失（非故障，判定线见步骤 2）不按本条降级，板块轮动节整节切换申万自算口径（见"板块节降级"节）；自算口径自身无源（stock_daily 当日亦无行，故障日限制）时才回到本条标"—"。
+- **概念栏目已退役（无降级路径）**：概念维度为永久弃用面（issue #119，口径附注）——概念强度相关栏目整栏不设、无 mx-data 降级路径、不入 `data_gaps`、不按缺失降级；报告任何位置不得凭记忆归概念。
 - **指数历史缺失降级**：某指数 `query_index_daily` 行数不足 20/60 日窗口时，该指数从对应 corr 矩阵剔除并在矩阵旁标注；不足 7 个指数时矩阵按可得子集出，注明覆盖率。
 - **前 75 个股序列部分缺失**：单股 `query_daily` 失败或行数不足时，该股从相关性与量价标注中剔除、名单表格对应列标"—"，聚类的"合计成交"仍以快照为准（快照在则名单在），覆盖率在报告中注明。
 - **归因只定性**：`market_boards` 无板块权重，指数涨跌归因只做"领涨/领跌板块 + 板块内涨停家数"的定性表述，不得编造板块对指数点数的贡献值。
@@ -199,7 +220,7 @@ payload 结构由本 skill 约定（server 不校验，见 ADR 0003），建议�
 
 ## 调度配置
 
-本技能**不内置调度**；本节是给用户自行安装定时任务的现成配置，按需选用其一。定时触发等价于手动触发 close 模式——交易日判断与数据就绪检查由技能自身流程兜底（核心缺失先补抓后重查、故障即中止，见"编排流程""故障中止分支"与"数据缺失红线"），调度侧无需判断交易日、无需等数据就绪。
+本技能**不内置调度**；本节是给用户自行安装定时任务的现成配置，按需选用其一。定时触发等价于手动触发 close 模式——交易日判断与数据就绪检查由技能自身流程兜底（核心缺失先补抓后重查、故障即中止，见"编排流程""故障中止分支"与"数据缺失红线"），调度侧无需判断交易日、无需等数据就绪。样例按收盘后 15:45 唤起给出；**数据最全的复盘窗口是 19:30 之后**（THS 涨停池与 baostock 复权此时均已就绪，见"触发与模式"），追求完整涨停/连板章节可把下方时刻改为 19:35 之后。
 
 ### macOS launchd
 

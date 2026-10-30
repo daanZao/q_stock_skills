@@ -1,9 +1,8 @@
 """抓取 fallback 编排：按给定适配器顺序尝试，每源最多重试 2 次（最多 3 次尝试）。
 
 只依赖适配器协议（name + fetch_daily / fetch_market_snapshot / fetch_<section> /
-fetch_fundamentals / fetch_index_daily / fetch_board_history / fetch_board_cons），
-不感知具体数据库/第三方库，测试注入 fake 适配器即可覆盖
-fallback 顺序、重试次数、全失败报错。
+fetch_fundamentals / fetch_index_daily），不感知具体数据库/第三方库，
+测试注入 fake 适配器即可覆盖 fallback 顺序、重试次数、全失败报错。
 
 空结果视为成功（该区间无交易日或停牌），不触发 fallback；
 全失败抛 AllSourcesFailed，携带 attempted_sources（每源尝试次数、错误与
@@ -20,8 +19,6 @@ from typing import Callable, Sequence
 
 from .adapters.base import (
     BoardAdapter,
-    BoardConsAdapter,
-    BoardHistoryAdapter,
     DailyAdapter,
     FundamentalsAdapter,
     IndexDailyAdapter,
@@ -96,6 +93,7 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
     for adapter in adapters:
         error = None
         kind = None
+        source_meta = None
         attempts = 0
         for attempt in range(max_retries + 1):
             if attempt:
@@ -112,6 +110,7 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
             except Exception as e:  # noqa: BLE001 - 适配器任何失败都收敛为"该源失败"
                 error = str(e)
                 kind = fetch_failure_kind(e)
+                source_meta = getattr(e, "source_meta", source_meta)
                 if kind == "unsupported":
                     break
         attempted.append(
@@ -122,6 +121,8 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
                 "failure_kind": kind,
             }
         )
+        if source_meta is not None:
+            attempted[-1]["source_meta"] = source_meta
     raise AllSourcesFailed(attempted)
 
 
@@ -133,17 +134,25 @@ def fetch_with_fallback(
     adj: str = "qfq",
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
-    """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。"""
+    """按顺序尝试各数据源，成功返回 {rows, source, attempted_sources}。
+
+    获胜适配器带 adjust_fallback 标记（腾讯复权键缺失回落 day，issue #112）
+    时结果带 "adjust_fallback": True，由工具层落 segment 并出 note。
+    """
     r = _with_fallback(
         adapters,
         lambda a: a.fetch_daily(stock_code, start, end, adj),
         max_retries,
     )
-    return {
+    out = {
         "rows": r["result"],
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
+    winner = next((a for a in adapters if a.name == r["source"]), None)
+    if winner is not None and getattr(winner, "adjust_fallback", False):
+        out["adjust_fallback"] = True
+    return out
 
 
 def fetch_snapshot_with_fallback(
@@ -215,10 +224,10 @@ def fetch_index_spot_with_fallback(
     """单 code 指数行情补抓（issue #49 白名单定点补漏），成功返回
     {rows, source, attempted_sources}。
 
-    与 fetch_section_with_fallback 不同：空结果（源口径不含该指数，如 efinance
-    沪深系列指数口径系统性排除科创板系列）不视为成功，立即转下一源并记
-    failure_kind "empty"（口径性缺失，重试无意义）；异常仍按每源最多重试 2 次。
-    全源无果抛 AllSourcesFailed，error_kind 由 aggregate_patch_error_kind 判定。
+    与 fetch_section_with_fallback 不同：空结果（源口径不含该指数）不视为
+    成功，立即转下一源并记 failure_kind "empty"（口径性缺失，重试无意义）；
+    异常仍按每源最多重试 2 次。全源无果抛 AllSourcesFailed，error_kind 由
+    aggregate_patch_error_kind 判定。
     """
     attempted: list[dict] = []
     for adapter in adapters:
@@ -285,36 +294,34 @@ def fetch_index_daily_with_fallback(
     }
 
 
-def fetch_board_history_with_fallback(
-    adapters: Sequence[BoardHistoryAdapter],
-    board_type: str,
-    board_name: str,
-    start: str,
-    end: str,
+def fetch_sw_board_list_with_fallback(
+    adapters: Sequence,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
-    """板块历史 K 线抓取（issue #84 回补），成功返回 {rows, source, attempted_sources}。"""
+    """申万双级板块清单抓取（issue #118），成功返回 {boards, source, attempted}。"""
     r = _with_fallback(
-        adapters,
-        lambda a: a.fetch_board_history(board_type, board_name, start, end),
-        max_retries,
+        adapters, lambda a: a.fetch_sw_board_list(), max_retries
     )
     return {
-        "rows": r["result"],
+        "boards": r["result"],
         "source": r["source"],
         "attempted_sources": r["attempted_sources"],
     }
 
 
-def fetch_board_cons_with_fallback(
-    adapters: Sequence[BoardConsAdapter],
-    board_name: str,
+def fetch_sw_board_history_with_fallback(
+    adapters: Sequence,
+    board: dict,
+    start: str,
+    end: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
-    """概念板块成分抓取（issue #84），成功返回 {rows, source, attempted_sources}。"""
+    """申万指数历史 K 线抓取（issue #118 回补），成功返回
+    {rows, source, attempted_sources}。board 为 board_code/board_name/level
+    的 dict（trend 接口按指数代码取数）；空区间返回 [] 视为成功。"""
     r = _with_fallback(
         adapters,
-        lambda a: a.fetch_board_cons(board_name),
+        lambda a: a.fetch_sw_board_history(board, start, end),
         max_retries,
     )
     return {

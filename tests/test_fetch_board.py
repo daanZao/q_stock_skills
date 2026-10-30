@@ -49,20 +49,35 @@ def test_fetch_all_sections_land_and_report(pg_test):
         "boards": len(BOARD_ROWS),
         "zt_pool": len(ZT_POOL_ROWS),
         "strong_stocks": len(STRONG_ROWS),
-        "lhb": sum(len(v) for v in LHB_ROWS.values()),
+        # lhb rows 保持 basic/yyb/statistic 口径，详情由 detail_rows 单列
+        "lhb": sum(
+            len(v) for k, v in LHB_ROWS.items() if k != "lhb_stock_detail"
+        ) + 1,
     }
     for section, n in expected_rows.items():
-        assert result["sections"][section] == {
+        expected = {
             "rows": n,
             "source": "akshare",
             "status": "ok",
         }
+        if section == "boards":
+            # 字段级第四态声明（issue #118）：boards 段响应额外携带
+            # planned_absent_fields（申万不发布的三字段，见 tools_board）
+            assert result["sections"][section].pop("planned_absent_fields")
+        if section == "lhb":
+            expected.update({
+                "detail_rows": len(LHB_ROWS["lhb_stock_detail"]),
+                "detail_status": "ok", "detail_missing": 0,
+                "detail_source": "akshare",
+            })
+        assert result["sections"][section] == expected
     assert _count(pg_test, "market_indices") == len(INDEX_ROWS)
     assert _count(pg_test, "market_boards") == len(BOARD_ROWS)
     assert _count(pg_test, "zt_pool") == len(ZT_POOL_ROWS)
     assert _count(pg_test, "strong_stocks") == len(STRONG_ROWS)
     assert _count(pg_test, "lhb_basic") == len(LHB_ROWS["lhb_basic"])
-    assert _count(pg_test, "lhb_stock_statistic") == len(LHB_ROWS["lhb_stock_statistic"])
+    # statistic 库内自算（issue #114 定稿）：basic 1 股入窗 → 1 快照行
+    assert _count(pg_test, "lhb_stock_statistic") == 1
     assert _count(pg_test, "lhb_yyb_capital") == len(LHB_ROWS["lhb_yyb_capital"])
     assert _count(pg_test, "lhb_yyb_most") == len(LHB_ROWS["lhb_yyb_most"])
 
@@ -126,17 +141,17 @@ def test_fetch_lhb_partial_failure_is_reported(pg_test):
 
 def test_fetch_section_failure_is_isolated(pg_test):
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", fail_sections=("zt_pool", "lhb"))
+    ef = FakeBoardAdapter("tencent", fail_sections=("zt_pool", "lhb"))
     ak = FakeBoardAdapter("akshare", fail_sections=("zt_pool", "lhb"))
     result = fetch_board_snapshot(trade_date=TODAY, adapters=[ef, ak])
     assert result["status"] == "ok"  # 单 section 失败不拖垮其他
     assert sorted(result["failed_sections"]) == ["lhb", "zt_pool"]
     assert result["sections"]["zt_pool"]["status"] == "error"
-    assert "efinance" in result["sections"]["zt_pool"]["error"]
+    assert "tencent" in result["sections"]["zt_pool"]["error"]
     assert "akshare" in result["sections"]["zt_pool"]["error"]
     assert result["sections"]["indices"] == {
         "rows": len(INDEX_ROWS),
-        "source": "efinance",
+        "source": "tencent",
         "status": "ok",
     }
     assert _count(pg_test, "market_indices") == len(INDEX_ROWS)
@@ -158,7 +173,7 @@ def test_fetch_all_sections_failed_returns_error(pg_test):
 
 def test_fetch_section_falls_back_to_next_source(pg_test):
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", fail_sections=("indices",))
+    ef = FakeBoardAdapter("tencent", fail_sections=("indices",))
     ak = FakeBoardAdapter("akshare")
     result = fetch_board_snapshot(
         trade_date=TODAY, sections="indices", adapters=[ef, ak]
@@ -191,6 +206,10 @@ def test_fetch_intraday_empty_lhb_is_ok_with_note(pg_test):
         "status": "ok",
         "empty_kind": "no_data_for_date",
         "note": "当日无龙虎榜数据（龙虎榜盘后发布）",
+        "detail_rows": 0,
+        "detail_status": "ok",
+        "detail_missing": 0,
+        "detail_source": "akshare",
     }
     assert _count(pg_test, "lhb_basic") == 0
 
@@ -211,7 +230,8 @@ def test_fetch_repeated_is_idempotent_and_updates_values(pg_test):
         ("zt_pool", len(ZT_POOL_ROWS)),
         ("strong_stocks", len(STRONG_ROWS)),
         ("lhb_basic", len(LHB_ROWS["lhb_basic"])),
-        ("lhb_stock_statistic", len(LHB_ROWS["lhb_stock_statistic"])),
+        # statistic 库内自算：basic 1 股入窗 → 1 快照行（重跑 DELETE+INSERT 仍 1）
+        ("lhb_stock_statistic", 1),
         ("lhb_yyb_capital", len(LHB_ROWS["lhb_yyb_capital"])),
         ("lhb_yyb_most", len(LHB_ROWS["lhb_yyb_most"])),
     ]:

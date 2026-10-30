@@ -232,18 +232,15 @@ LHB_ROWS = {
             "total_amount": 3.0e8,
         }
     ],
-    "lhb_stock_statistic": [
-        {
-            "stock_code": "600519",
-            "stock_name": "贵州茅台",
-            "appear_count_3m": 3,
-            "buy_amount_3m": 5.0e8,
-            "sell_amount_3m": 3.0e8,
-            "net_buy_3m": 2.0e8,
-            "buy_seat_count": 2,
-            "sell_seat_count": 1,
-        }
-    ],
+    "lhb_stock_detail": [{
+        "stock_code": "600519", "lhb_reason": "涨幅偏离值达7%",
+        "seat_name": "上海席位", "seat_code": None, "seat_type": "buy",
+        "amount": 2.0e8, "amount_percent": None, "buy_count_3m": None,
+        "sell_count_3m": None, "buy_amount": 2.0e8, "sell_amount": None,
+        "net_buy_amount": None,
+    }],
+    # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内 lhb_basic
+    # 滚动自算，fake 数据无需提供
     "lhb_yyb_capital": [
         {"rank": 1, "seat_name": "机构专用", "total_amount": 1.0e9, "buy_amount": 6.0e8}
     ],
@@ -265,62 +262,6 @@ _BOARD_DEFAULTS = {
     "strong_stocks": STRONG_ROWS,
     "lhb": LHB_ROWS,
 }
-
-
-def _board_history_row(d, close=2000.0):
-    """板块历史 K 线（push2his 回补）的已映射行（trade_date 自带，逐日行）。"""
-    return {
-        "trade_date": d,
-        "latest_price": close,
-        "change_percent": 1.5,
-        "change_amount": 30.0,
-        "volume": 1234500,
-        "amount": 100.0,
-        "amplitude": 2.0,
-        "high": close + 10.0,
-        "low": close - 10.0,
-        "open": close - 5.0,
-        "pre_close": None,
-        "volume_ratio": None,
-        "stock_count": None,
-        "leading_stock": None,
-        "leading_change": None,
-    }
-
-
-class FakeBoardHistoryAdapter:
-    """板块历史回补（push2his）与概念成分（cons）的 fake 源（issue #84）。
-
-    history: {(board_type, board_name): [逐日行]}，缺省回退 default_history；
-    cons: {board_name: [{"stock_code": ...}]}，缺省回退 default_cons；
-    fail_history/fail_cons: 指定板块名抓取即抛 FetchError。
-    """
-
-    def __init__(self, name="akshare", *, history=None, cons=None,
-                 fail_history=(), fail_cons=()):
-        self.name = name
-        self._history = history or {}
-        self._cons = cons or {}
-        self._fail_history = set(fail_history)
-        self._fail_cons = set(fail_cons)
-        self.history_calls = []
-        self.cons_calls = []
-
-    def fetch_board_history(self, board_type, board_name, start, end):
-        self.history_calls.append((board_type, board_name, start, end))
-        if board_name in self._fail_history:
-            raise FetchError(f"{self.name} history {board_name} boom")
-        rows = self._history.get((board_type, board_name))
-        if rows is None:
-            rows = [_board_history_row(end)]
-        return [dict(r, board_type=board_type, board_name=board_name)
-                for r in rows]
-
-    def fetch_board_cons(self, board_name):
-        self.cons_calls.append(board_name)
-        if board_name in self._fail_cons:
-            raise FetchError(f"{self.name} cons {board_name} boom")
-        return list(self._cons.get(board_name, [{"stock_code": "600519"}]))
 
 
 class FakeBoardAdapter:
@@ -396,9 +337,10 @@ FUNDAMENTALS_PAYLOAD = {
         {"选项": "常用指标", "指标": "营业总收入", "20251231": 1.7e11},
         {"选项": "常用指标", "指标": "归母净利润", "20251231": 8.6e10},
     ],
-    "valuation_indicator": [
-        {"trade_date": "2024-01-05", "pe": 30.0, "pb": 10.0, "total_mv": 2.1e12}
-    ],
+    "valuation": {
+        "总市值": [{"date": "2026-10-20", "value": 1.64e12}],
+        "市盈率(TTM)": [{"date": "2026-10-20", "value": 20.1}],
+    },
 }
 
 
@@ -493,6 +435,180 @@ class FakeInitAdapter:
             if self._daily_rows is not None
             else weekday_rows(start, end)
         )
+
+
+# ---------------------------------------------------------------- 申万官网板块（issue #118）
+
+SW_BOARD_LIST = [
+    {"board_code": "801010", "board_name": "农林牧渔", "level": 1},
+    {"board_code": "801880", "board_name": "汽车", "level": 1},
+    {"board_code": "801011", "board_name": "种植业与林业", "level": 2},
+    {"board_code": "801881", "board_name": "汽车整车", "level": 2},
+]
+
+
+def _sw_history_row(d, close=1000.0):
+    """申万 trend 已映射行（trade_date 自带，逐日）：与 _sw_board.map_sw_trend_rows
+    输出同键集（board 盖戳由 fake 完成）。"""
+    return {
+        "trade_date": d,
+        "latest_price": close,
+        "change_percent": -0.5,
+        "change_amount": -5.0,
+        "volume": 2_963_000_000,
+        "amount": 2_235_270.7,
+        "amplitude": 2.1,
+        "high": close + 10.0,
+        "low": close - 12.0,
+        "open": close - 5.0,
+        "pre_close": close + 5.0,
+        "volume_ratio": None,
+        "stock_count": None,
+        "leading_stock": None,
+        "leading_change": None,
+    }
+
+
+SW_BOARD_ROWS = [
+    {
+        "board_type": "industry_l1",
+        "board_code": "801010",
+        "board_name": "农林牧渔",
+        "latest_price": 2491.17,
+        "change_percent": -0.03,
+        "change_amount": -0.75,
+        "volume": 2_963_000_000,
+        "amount": 2_235_270.7,
+        "amplitude": 2.11,
+        "high": 2493.67,
+        "low": 2442.52,
+        "open": 2475.69,
+        "pre_close": 2491.92,
+        "volume_ratio": None,
+        "stock_count": None,
+        "leading_stock": None,
+        "leading_change": None,
+    },
+    {
+        "board_type": "industry_l2",
+        "board_code": "801880",
+        "board_name": "汽车",
+        "latest_price": 5800.0,
+        "change_percent": 0.5,
+        "change_amount": 29.0,
+        "volume": 1_500_000_000,
+        "amount": 1_800_000.0,
+        "amplitude": 1.5,
+        "high": 5810.0,
+        "low": 5750.0,
+        "open": 5760.0,
+        "pre_close": 5771.0,
+        "volume_ratio": None,
+        "stock_count": None,
+        "leading_stock": None,
+        "leading_change": None,
+    },
+]
+
+SW_VALUATION_ROWS = [
+    {
+        "trade_date": "20261023",
+        "board_code": "801010",
+        "board_name": "农林牧渔",
+        "level": 1,
+        "close_index": 2491.17,
+        "turnover_rate": 4.65,
+        "pe_ratio": 78.88,
+        "pb_ratio": 2.37,
+        "float_cap": 5_664_540_000.0,
+        "dividend_yield": 1.43,
+    },
+    {
+        "trade_date": "20261023",
+        "board_code": "801881",
+        "board_name": "汽车整车",
+        "level": 2,
+        "close_index": 8300.0,
+        "turnover_rate": 6.0,
+        "pe_ratio": 25.0,
+        "pb_ratio": 2.0,
+        "float_cap": 2_000_000_000.0,
+        "dividend_yield": 2.0,
+    },
+]
+
+
+class FakeSwBoardsAdapter:
+    """申万官网板块的 fake（issue #118）：实现 BoardAdapter.fetch_boards +
+    SwBoardsAdapter 申万专属协议（测试注入缝，不触网）。
+
+    boards/history/analysis/class_content 覆盖默认返回；fail_* 指定能力失败；
+    class_content 为 None 时返回内置 xls fixture 字节（成分字典刷新用）。
+    """
+
+    def __init__(
+        self,
+        name="swsresearch",
+        *,
+        boards=None,
+        history=None,
+        analysis=None,
+        class_content=None,
+        fail=(),
+        exc=None,
+    ):
+        self.name = name
+        self._boards = boards
+        self._history = history
+        self._analysis = analysis
+        self._class_content = class_content
+        self._fail = set(fail)
+        self._exc = exc
+        self.calls = []
+
+    def _check(self, capability):
+        self.calls.append(capability)
+        if capability in self._fail:
+            if self._exc is not None:
+                raise self._exc
+            raise FetchError(f"{self.name} {capability} boom")
+
+    def fetch_boards(self, trade_date):
+        self._check("boards")
+        rows = self._boards if self._boards is not None else SW_BOARD_ROWS
+        return [dict(r) for r in rows]
+
+    def fetch_sw_board_list(self):
+        self._check("board_list")
+        return [dict(b) for b in SW_BOARD_LIST]
+
+    def fetch_sw_board_history(self, board, start, end):
+        self._check("history")
+        if self._history is not None:
+            return [dict(r) for r in self._history]
+        rows = [_sw_history_row(end)]
+        for r in rows:
+            r.setdefault("board_type", {1: "industry_l1", 2: "industry_l2"}[board["level"]])
+            r["board_code"] = board["board_code"]
+            r["board_name"] = board["board_name"]
+        return rows
+
+    def fetch_sw_board_analysis(self, start, end):
+        self._check("analysis")
+        if self._analysis is not None:
+            return [dict(r) for r in self._analysis]
+        return [dict(r, trade_date=start) for r in SW_VALUATION_ROWS]
+
+    def fetch_sw_class_file(self, url):
+        self._check("class_file")
+        if self._class_content is not None:
+            return self._class_content
+        from pathlib import Path
+
+        fixture = (
+            Path(__file__).parent / "fixtures" / "StockClassifyUse_stock.xls"
+        )
+        return fixture.read_bytes()
 
 
 # ---------------------------------------------------------------- 妙想 mx-data 透传（issue #23/T1）

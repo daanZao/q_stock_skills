@@ -1,0 +1,52 @@
+{
+  "status_code": 0,
+  "status_msg": "success",
+  "data": {
+    "info": [
+      {
+        "page": 1,
+        "pages": 1,
+        "per_page": 500,
+        "total": 2,
+        "items": [
+          {
+            "code": "603123",
+            "name": "示例涨停连板",
+            "latest": 12.1,
+            "change_rate": 10.01,
+            "high_days": "2天2板",
+            "open_num": 0,
+            "first_limit_up_time": 1792114200,
+            "last_limit_up_time": 1792114200,
+            "order_amount": 125000000.0,
+            "order_volume": 10330578,
+            "reason_type": "医药+原料药",
+            "limit_up_type": "换手板",
+            "is_again_limit": 0,
+            "limit_up_suc_rate": 0.75,
+            "currency_value": 4500000000.0,
+            "turnover_rate": 8.5
+          },
+          {
+            "code": "000555",
+            "name": "示例涨停首板",
+            "latest": 6.66,
+            "change_rate": 9.96,
+            "high_days": "首板",
+            "open_num": 2,
+            "first_limit_up_time": 1792133820,
+            "last_limit_up_time": 1792135500,
+            "order_amount": 68000000.0,
+            "order_volume": 10210210,
+            "reason_type": "人工智能",
+            "limit_up_type": "一字板",
+            "is_again_limit": 1,
+            "limit_up_suc_rate": 0.5,
+            "currency_value": 2000000000.0,
+            "turnover_rate": 3.2
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -17,6 +17,7 @@ from .adapters.base import (
     BOARD_FIELDS,
     INDEX_FIELDS,
     LHB_BASIC_FIELDS,
+    LHB_DETAIL_FIELDS,
     LHB_STATISTIC_FIELDS,
     LHB_YYB_CAPITAL_FIELDS,
     LHB_YYB_MOST_FIELDS,
@@ -215,12 +216,20 @@ def select_snapshot(
         ]
 
 
+# 涨跌判定（issue #48；issue #116 zdf 回退）：有昨收按 最新价 vs 昨收；
+# 昨收缺失（腾讯 rank 榜单行不带 pre_close）改由 change_percent（上游 zdf）
+# 判定——>0 涨、<0 跌、=0 平；最新价缺失、或昨收与涨跌幅双双缺失（无法判定）
+# 计入 no_price 桶。up + down + flat + no_price = 过滤后总行数不变。
 _SNAPSHOT_AGGREGATE_SQL = """
 SELECT {market} AS market,
-    count(*) FILTER (WHERE latest_price > pre_close) AS up,
-    count(*) FILTER (WHERE latest_price < pre_close) AS down,
-    count(*) FILTER (WHERE latest_price = pre_close) AS flat,
-    count(*) FILTER (WHERE latest_price IS NULL OR pre_close IS NULL) AS no_price,
+    count(*) FILTER (WHERE latest_price > pre_close
+        OR (pre_close IS NULL AND latest_price IS NOT NULL AND change_percent > 0)) AS up,
+    count(*) FILTER (WHERE latest_price < pre_close
+        OR (pre_close IS NULL AND latest_price IS NOT NULL AND change_percent < 0)) AS down,
+    count(*) FILTER (WHERE latest_price = pre_close
+        OR (pre_close IS NULL AND latest_price IS NOT NULL AND change_percent = 0)) AS flat,
+    count(*) FILTER (WHERE latest_price IS NULL
+        OR (pre_close IS NULL AND change_percent IS NULL)) AS no_price,
     sum(amount) AS total_amount
 FROM market_snapshot
 {{where}}
@@ -237,9 +246,11 @@ def select_snapshot_aggregate(
 ) -> dict:
     """快照聚合（issue #48）下推到数据库：涨跌家数与成交额合计，全市场 + 分市场。
 
-    上涨/下跌/平盘按最新价 vs 昨收判定；最新价或昨收为 NULL 的行（停牌等）计入
-    no_price 桶，up + down + flat + no_price = 过滤后总行数（total 与 by_market
-    同口径），调用方无需假设三桶之和即全部家数。成交额合计为库内万元口径
+    上涨/下跌/平盘按最新价 vs 昨收判定；昨收缺失（腾讯 rank 榜单行）改由
+    change_percent（上游 zdf）判定（issue #116）；最新价缺失、或昨收与涨跌幅
+    双双缺失的行（停牌等）计入 no_price 桶，
+    up + down + flat + no_price = 过滤后总行数（total 与 by_market 同口径），
+    调用方无需假设三桶之和即全部家数。成交额合计为库内万元口径
     （ADR 0006）。无行时各项为 0 / 0.0。
     返回 {"breadth": {"total", "by_market"}, "amount": {"total_amount", "by_market"}}，
     by_market 恒含 sh/sz/bj 三键。
@@ -417,7 +428,8 @@ BOARD_SECTION_TABLES: dict[str, list[tuple[str, str, tuple, tuple]]] = {
     ],
     "lhb": [
         ("lhb_basic", "trade_date", ("stock_code", "lhb_reason"), LHB_BASIC_FIELDS),
-        ("lhb_stock_statistic", "trade_date", ("stock_code",), LHB_STATISTIC_FIELDS),
+        # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内
+        # lhb_basic 滚动自算，见 recompute_lhb_statistic（tools_board 落库后调用）
         ("lhb_yyb_capital", "fetch_date", ("seat_name",), LHB_YYB_CAPITAL_FIELDS),
         ("lhb_yyb_most", "fetch_date", ("seat_name",), LHB_YYB_MOST_FIELDS),
     ],
@@ -470,6 +482,254 @@ def upsert_board_rows(
     return len(values)
 
 
+def _insert_lhb_details(
+    cur, trade_date: str, detail_rows: list[dict], parents: dict[tuple[str, str], int]
+) -> int:
+    detail_cols = (
+        "lhb_basic_id", "trade_date", "stock_code"
+    ) + LHB_DETAIL_FIELDS
+    values = []
+    for row in detail_rows:
+        if row.get("trade_date", trade_date) != trade_date:
+            continue
+        key = (row["stock_code"], row.get("lhb_reason") or "")
+        if key not in parents:
+            continue
+        values.append(
+            [parents[key], trade_date, row["stock_code"]]
+            + [row.get(field) for field in LHB_DETAIL_FIELDS]
+        )
+    if values:
+        execute_values(
+            cur,
+            f"INSERT INTO lhb_stock_detail ({', '.join(detail_cols)}) VALUES %s",
+            values,
+            template="(" + ", ".join(["%s"] * len(detail_cols)) + ")",
+        )
+    return len(values)
+
+
+def upsert_lhb_day(
+    conn, trade_date: str, rows: list[dict], detail_rows: list[dict]
+) -> tuple[int, int]:
+    """按业务键 upsert 当日 basic，并整体替换其父记录的席位详情。"""
+    cols = ("trade_date",) + LHB_BASIC_FIELDS
+    deduped = {}
+    for row in rows:
+        values = [trade_date] + [row.get(field) for field in LHB_BASIC_FIELDS]
+        deduped[(row["stock_code"], row.get("lhb_reason") or "")] = values
+    values = list(deduped.values())
+    updates = [field for field in LHB_BASIC_FIELDS if field not in ("stock_code", "lhb_reason")]
+    try:
+        with conn.cursor() as cur:
+            if values:
+                execute_values(
+                    cur,
+                    f"INSERT INTO lhb_basic ({', '.join(cols)}) VALUES %s "
+                    "ON CONFLICT (trade_date, stock_code, lhb_reason) DO UPDATE SET "
+                    + ", ".join(f"{field} = EXCLUDED.{field}" for field in updates),
+                    values,
+                    template="(" + ", ".join(["%s"] * len(cols)) + ")",
+                )
+            cur.execute(
+                "SELECT id, stock_code, lhb_reason FROM lhb_basic WHERE trade_date = %s",
+                (trade_date,),
+            )
+            parents = {
+                (stock_code, reason): basic_id
+                for basic_id, stock_code, reason in cur.fetchall()
+                if (stock_code, reason) in deduped
+            }
+            if parents:
+                cur.execute(
+                    "DELETE FROM lhb_stock_detail WHERE lhb_basic_id = ANY(%s)",
+                    (list(parents.values()),),
+                )
+            detail_written = _insert_lhb_details(
+                cur, trade_date, detail_rows, parents
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(values), detail_written
+
+
+def replace_lhb_details_day(
+    conn, trade_date: str, detail_rows: list[dict]
+) -> int:
+    """复用当日 basic 父记录，仅整体替换其席位详情。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, stock_code, lhb_reason FROM lhb_basic WHERE trade_date = %s",
+                (trade_date,),
+            )
+            parents = {
+                (stock_code, reason): basic_id
+                for basic_id, stock_code, reason in cur.fetchall()
+            }
+            if parents:
+                cur.execute(
+                    "DELETE FROM lhb_stock_detail WHERE lhb_basic_id = ANY(%s)",
+                    (list(parents.values()),),
+                )
+            detail_written = _insert_lhb_details(
+                cur, trade_date, detail_rows, parents
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return detail_written
+
+
+LHB_STATISTIC_WINDOW_DAYS = 60
+
+_LHB_STATISTIC_INSERT_TEMPLATE = """
+INSERT INTO lhb_stock_statistic (
+    trade_date, stock_code, stock_name,
+    appear_count_3m, buy_amount_3m, sell_amount_3m, net_buy_3m,
+    buy_seat_count, sell_seat_count, updated_at
+)
+SELECT %s, stock_code, MAX(stock_name), COUNT(*),
+       SUM(buy_amount), SUM(sell_amount), SUM(net_buy_amount),
+       NULL, NULL, CURRENT_TIMESTAMP
+FROM {source}
+WHERE trade_date >= %s AND trade_date <= %s
+GROUP BY stock_code
+"""
+
+_LHB_STATISTIC_INSERT_SQL = _LHB_STATISTIC_INSERT_TEMPLATE.format(source="lhb_basic")
+_LHB_STATISTIC_STAGING_INSERT_SQL = _LHB_STATISTIC_INSERT_TEMPLATE.format(
+    source="""
+    (
+        SELECT trade_date, stock_code, stock_name, lhb_reason,
+               buy_amount, sell_amount, net_buy_amount
+        FROM lhb_basic
+        UNION ALL
+        SELECT s.trade_date, s.stock_code, s.stock_name, s.lhb_reason,
+               s.buy_amount, s.sell_amount, s.net_buy_amount
+        FROM lhb_stat_staging AS s
+        WHERE NOT EXISTS (
+            SELECT 1 FROM lhb_basic AS b
+            WHERE b.trade_date = s.trade_date
+              AND b.stock_code = s.stock_code
+              AND b.lhb_reason = s.lhb_reason
+        )
+    ) AS statistic_input
+    """
+)
+
+
+def replace_lhb_basic_day(
+    conn, trade_date: str, rows: list[dict], staging_rows: list[dict] | None = None,
+    detail_rows: list[dict] | None = None,
+) -> tuple[int, int, int]:
+    """原子替换当日 basic 与席位详情并重算 statistic；staging 只进临时表。"""
+    cols = ("trade_date",) + LHB_BASIC_FIELDS
+    values = [[trade_date] + [row.get(f) for f in LHB_BASIC_FIELDS] for row in rows]
+    staging_values = [
+        [row.get("trade_date"), row.get("stock_code"), row.get("stock_name"),
+         row.get("lhb_reason") or "", row.get("buy_amount"),
+         row.get("sell_amount"), row.get("net_buy_amount")]
+        for row in (staging_rows or [])
+    ]
+    window_start = add_days(trade_date, -LHB_STATISTIC_WINDOW_DAYS)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS lhb_stat_staging ("
+                "trade_date text, stock_code text, stock_name text, lhb_reason text, "
+                "buy_amount real, sell_amount real, net_buy_amount real"
+                ") ON COMMIT DELETE ROWS"
+            )
+            cur.execute("DELETE FROM lhb_stat_staging")
+            if staging_values:
+                execute_values(
+                    cur,
+                    "INSERT INTO lhb_stat_staging VALUES %s",
+                    staging_values,
+                )
+            cur.execute("DELETE FROM lhb_stock_statistic WHERE trade_date = %s",
+                        (trade_date,))
+            cur.execute("DELETE FROM lhb_basic WHERE trade_date = %s", (trade_date,))
+            if values:
+                execute_values(
+                    cur,
+                    f"INSERT INTO lhb_basic ({', '.join(cols)}) VALUES %s",
+                    values,
+                    template="(" + ", ".join(["%s"] * len(cols)) + ")",
+                )
+            cur.execute(
+                "SELECT id, stock_code, lhb_reason FROM lhb_basic WHERE trade_date = %s",
+                (trade_date,),
+            )
+            parents = {
+                (stock_code, reason): basic_id
+                for basic_id, stock_code, reason in cur.fetchall()
+            }
+            detail_written = _insert_lhb_details(
+                cur, trade_date, detail_rows or [], parents
+            )
+            cur.execute(
+                _LHB_STATISTIC_STAGING_INSERT_SQL,
+                (trade_date, window_start, trade_date),
+            )
+            statistic_rows = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(values), statistic_rows, detail_written
+
+
+# ---------------------------------------------------------------- lhb 统计子表（库内自算）
+
+def recompute_lhb_statistic(conn, trade_date: str) -> int:
+    """lhb_stock_statistic 库内滚动自算（issue #114 定稿口径）：以 lhb_basic
+    近 60 日历日窗口（含当日）按股聚合——appear=行数（业务键含 lhb_reason，
+    同股当日多榜单各计一次）、buy/sell/net=窗口合计（万元，ADR 0006）。
+    先删当日快照再插入：幂等可重跑，窗口滑出/上游修订自愈（旧快照股票不再
+    入窗即删除，不残留）。buy/sell_seat_count 恒 NULL：官方汇总无席位计数
+    来源、不伪造；详情接线不隐式改变本统计口径。返回写入行数。"""
+    window_start = add_days(trade_date, -LHB_STATISTIC_WINDOW_DAYS)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM lhb_stock_statistic WHERE trade_date = %s",
+                    (trade_date,))
+        cur.execute(
+            _LHB_STATISTIC_INSERT_SQL,
+            (trade_date, window_start, trade_date),
+        )
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
+def select_lhb_statistic(conn, trade_date: str) -> list[dict]:
+    """读某日 statistic 自算快照（`lhb --check` 对拍的库内侧；纯读）。"""
+    cols = ("trade_date",) + LHB_STATISTIC_FIELDS
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(cols)} FROM lhb_stock_statistic"
+            " WHERE trade_date = %s ORDER BY stock_code",
+            (trade_date,),
+        )
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def select_lhb_detail_parent_keys(conn, trade_date: str) -> set[tuple[str, str]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT d.stock_code, b.lhb_reason"
+            " FROM lhb_stock_detail AS d"
+            " JOIN lhb_basic AS b ON b.id = d.lhb_basic_id"
+            " WHERE d.trade_date = %s",
+            (trade_date,),
+        )
+        return set(cur.fetchall())
+
+
 _BOARD_HISTORY_COLS = ("trade_date",) + BOARD_FIELDS
 
 _BOARD_HISTORY_UPSERT_SQL = """
@@ -489,9 +749,10 @@ ON CONFLICT (trade_date, board_type, board_name) DO UPDATE SET
 
 
 def upsert_board_history(conn, rows: list[dict], source: str) -> int:
-    """板块历史回补落库（issue #84）：行自带 trade_date/board_type/board_name，
-    按业务键幂等 upsert 并写 source 标注（'push2his'，与实时采集行的 NULL 区分）。
-    """
+    """板块历史回补落库（issue #84，issue #121 起仅申万 sw 源使用）：行自带
+    trade_date/board_type/board_name，按业务键幂等 upsert 并写 source 标注
+    （'swsresearch'，与实时采集行的 NULL 区分；存量 'push2his' 行为东财回补
+    退役前产物，保留只读）。"""
     values = [[row.get(c) for c in _BOARD_HISTORY_COLS] + [source] for row in rows]
     if not values:
         return 0
@@ -506,62 +767,12 @@ def upsert_board_history(conn, rows: list[dict], source: str) -> int:
     return len(values)
 
 
-def select_distinct_boards(conn, trade_date: str | None = None) -> list[dict]:
-    """market_boards 去重板块清单（board_type/board_code/board_name），
-    供回补与成分积累确定目标集；trade_date 给定时只取当日出现过的板块。
-
-    去重键为 (board_type, board_name)：backfill 回补行无 board_code（push2his
-    K 线不带板块代码），与同板块实时行（有 code）并存，按 (type, name) 去重
-    并优先取有 code 的行（issue #91）。"""
-    sql = (
-        "SELECT DISTINCT ON (board_type, board_name)"
-        " board_type, board_code, board_name FROM market_boards"
-    )
-    args: tuple = ()
-    if trade_date is not None:
-        sql += " WHERE trade_date = %s"
-        args = (trade_date,)
-    sql += " ORDER BY board_type, board_name, board_code NULLS LAST"
-    with conn.cursor() as cur:
-        cur.execute(sql, args)
-        return [
-            {"board_type": t, "board_code": c, "board_name": n}
-            for t, c, n in cur.fetchall()
-        ]
-
-
-def upsert_em_cons(conn, rows: list[dict], effective_date: str) -> int:
-    """概念成分积累入成分字典（issue #84）：source_system='em'，
-    ON CONFLICT DO NOTHING（point-in-time 行已存在则不动），返回新插入行数。
-
-    rows 元素：{"stock_code": ..., "board_code": ...}；effective_date 为
-    yyyy-mm-dd（PG date 列）。
-    """
-    values = [
-        ("em", row["stock_code"], row["board_code"], effective_date)
-        for row in rows
-    ]
-    if not values:
-        return 0
-    with conn.cursor() as cur:
-        execute_values(
-            cur,
-            "INSERT INTO sw_industry_class"
-            " (source_system, stock_code, board_code, effective_date)"
-            " VALUES %s ON CONFLICT DO NOTHING",
-            values,
-            template="(%s, %s, %s, %s)",
-        )
-        inserted = cur.rowcount
-    conn.commit()
-    return inserted
-
-
 # 可查询的盘面表 → (日期列, 代码列)；表名/列名为内部常量。lhb_stock_detail 无业务
 # 唯一键（忠于 appdb），仅随父表存在，供查询。
 BOARD_QUERY_TABLES: dict[str, tuple[str, str]] = {
     "market_indices": ("trade_date", "index_code"),
     "market_boards": ("trade_date", "board_name"),
+    "sw_board_valuation": ("trade_date", "board_code"),
     "zt_pool": ("trade_date", "stock_code"),
     "strong_stocks": ("trade_date", "stock_code"),
     "lhb_basic": ("trade_date", "stock_code"),
@@ -570,6 +781,46 @@ BOARD_QUERY_TABLES: dict[str, tuple[str, str]] = {
     "lhb_yyb_capital": ("fetch_date", "seat_name"),
     "lhb_yyb_most": ("fetch_date", "seat_name"),
 }
+
+
+_SW_BOARD_VALUATION_COLS = (
+    "trade_date",
+    "board_code",
+    "board_name",
+    "level",
+    "close_index",
+    "turnover_rate",
+    "pe_ratio",
+    "pb_ratio",
+    "float_cap",
+    "dividend_yield",
+)
+
+
+def upsert_sw_board_valuation(conn, rows: list[dict]) -> int:
+    """申万板块分析报表（估值维度）落库（issue #118）：业务键
+    (trade_date, board_code) 幂等 upsert，返回写入行数。"""
+    values = [[row.get(c) for c in _SW_BOARD_VALUATION_COLS] for row in rows]
+    if not values:
+        return 0
+    sql = (
+        f"INSERT INTO sw_board_valuation ({', '.join(_SW_BOARD_VALUATION_COLS)})"
+        " VALUES %s ON CONFLICT (trade_date, board_code) DO UPDATE SET "
+        + ", ".join(
+            f"{c} = EXCLUDED.{c}"
+            for c in _SW_BOARD_VALUATION_COLS
+            if c != "board_code"
+        )
+    )
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            sql,
+            values,
+            template="(" + ", ".join(["%s"] * len(_SW_BOARD_VALUATION_COLS)) + ")",
+        )
+    conn.commit()
+    return len(values)
 
 _INTERNAL_COLS = ("id", "created_at", "updated_at")
 

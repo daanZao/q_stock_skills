@@ -9,6 +9,7 @@ import psycopg2
 
 from qstock_mcp.tools_init import init_database
 
+from conftest import reset_test_schema
 from fakes import FakeInitAdapter
 
 EXPECTED_TABLES = {
@@ -39,6 +40,7 @@ def test_missing_pg_dsn_returns_clear_error(monkeypatch):
 
 
 def test_init_creates_all_tables(pg_test):
+    reset_test_schema(pg_test)
     result = init_database(adapters=[FakeInitAdapter("fake")])
     assert result["status"] == "ok"
 

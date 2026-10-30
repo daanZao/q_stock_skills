@@ -9,6 +9,8 @@ import psycopg2
 
 from qstock_mcp.db import ensure_schema
 
+from conftest import reset_test_schema
+
 CLASS_COLUMNS = {
     "source_system",
     "stock_code",
@@ -71,6 +73,7 @@ def test_legacy_sw_industry_class_migrated(pg_test):
     """旧形态（stock_code/effective_date/industry_code/updated_at，PK 二元组）：
     迁移后行完整保留、industry_code 改名 board_code、source_system 回填 'sw'、
     主键扩为四元组；再执行一次 ensure_schema 不重复迁移。"""
+    reset_test_schema(pg_test)
     conn = psycopg2.connect(pg_test)
     with conn.cursor() as cur:
         cur.execute(

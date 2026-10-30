@@ -1,6 +1,8 @@
 """fetch_board_snapshot indices 段 MAJOR_INDICES 白名单定点补漏测试（issue #49）。
 
-主源 efinance「沪深系列指数」口径系统性排除科创板系列指数（缺 000688），备选
+生产链（issue #117 前 efinance 主源时代）曾出现主源口径系统性排除科创板
+系列指数（缺 000688）、备选源补位的场景；#117 后腾讯口径全量覆盖白名单，本
+文件的补漏分支测试沿用注入 fake 复现该结构：主源
 akshare「沪深重要指数」含 000688 但主源成功时轮不到。定点补漏：indices 段抓取
 后对照 tools_init.MAJOR_INDICES 白名单（单一事实来源，不复制清单）检查覆盖，
 缺谁按单 code 补抓补落库，保证 7 大指数每日齐整。
@@ -62,10 +64,10 @@ def test_patch_whitelist_is_single_source_of_truth():
 
 
 def test_missing_major_index_is_patched_and_landed(pg_test):
-    """主源口径缺 000688 → 触发单 code 补抓，efinance 口径也不含 → 转到 akshare，
+    """主源口径缺 000688 → 触发单 code 补抓，主源补抓口径也不含 → 转到备选源，
     000688 落库；重跑幂等。"""
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", rows={"indices": ROWS_MISSING_KC50})
+    ef = FakeBoardAdapter("tencent", rows={"indices": ROWS_MISSING_KC50})
     ak = FakeBoardAdapter(
         "akshare", rows={"indices": ROWS_MISSING_KC50}, spot_rows=INDEX_ROWS
     )
@@ -75,7 +77,7 @@ def test_missing_major_index_is_patched_and_landed(pg_test):
     assert result["status"] == "ok"
     sec = result["sections"]["indices"]
     assert sec["status"] == "ok"
-    assert sec["source"] == "efinance"  # 主源结构不变
+    assert sec["source"] == "tencent"  # 主源结构不变
     assert sec["rows"] == len(INDEX_ROWS)  # 主源 6 行 + 补抓 1 行
     assert sec["patch"]["patched"] == [{"index_code": "000688", "source": "akshare"}]
     assert "failed" not in sec["patch"]
@@ -86,7 +88,7 @@ def test_missing_major_index_is_patched_and_landed(pg_test):
         trade_date=TODAY,
         sections="indices",
         adapters=[
-            FakeBoardAdapter("efinance", rows={"indices": ROWS_MISSING_KC50}),
+            FakeBoardAdapter("tencent", rows={"indices": ROWS_MISSING_KC50}),
             FakeBoardAdapter(
                 "akshare", rows={"indices": ROWS_MISSING_KC50}, spot_rows=INDEX_ROWS
             ),
@@ -117,7 +119,7 @@ def test_patch_connection_failure_keeps_section_ok_no_failfast(pg_test):
     均维持 ok，其他 section 正常落库。"""
     _init(pg_test)
     ef = FakeBoardAdapter(
-        "efinance", rows={"indices": ROWS_MISSING_KC50}, spot_exc=_conn_exc("efinance")
+        "tencent", rows={"indices": ROWS_MISSING_KC50}, spot_exc=_conn_exc("tencent")
     )
     ak = FakeBoardAdapter(
         "akshare", rows={"indices": ROWS_MISSING_KC50}, spot_exc=_conn_exc("akshare")
@@ -133,9 +135,9 @@ def test_patch_connection_failure_keeps_section_ok_no_failfast(pg_test):
     assert failed["error_kind"] == "upstream_unreachable"
     assert failed["retry_advice"]
     attempted = {a["source"]: a for a in failed["attempted_sources"]}
-    assert attempted["efinance"]["failure_kind"] == "connection"
+    assert attempted["tencent"]["failure_kind"] == "connection"
     assert attempted["akshare"]["failure_kind"] == "connection"
-    assert "Connection aborted" in attempted["efinance"]["error"]
+    assert "Connection aborted" in attempted["tencent"]["error"]
     assert result["sections"]["boards"]["status"] == "ok"
     assert "000688" not in _index_codes(pg_test, TODAY)
 
@@ -144,7 +146,7 @@ def test_patch_all_sources_empty_is_no_data_for_date(pg_test):
     """补漏全源口径不含该指数（空结果）→ no_data_for_date（正常语义非失败），
     不带 retry_advice；section 维持 ok。"""
     _init(pg_test)
-    ef = FakeBoardAdapter("efinance", rows={"indices": ROWS_MISSING_KC50})
+    ef = FakeBoardAdapter("tencent", rows={"indices": ROWS_MISSING_KC50})
     ak = FakeBoardAdapter("akshare", rows={"indices": ROWS_MISSING_KC50})
     result = fetch_board_snapshot(
         trade_date=TODAY, sections="indices", adapters=[ef, ak]
