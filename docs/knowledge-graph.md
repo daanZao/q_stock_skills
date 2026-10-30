@@ -93,6 +93,7 @@ flowchart LR
 
 - **`server.py`**：stdio MCP server，18 个工具只做薄包装，核心逻辑全在 `tools_*` 模块（`src/qstock_mcp/server.py:1-5`）；数据库连接按工具调用建立，启动不依赖 PG 可达（`server.py:4`）。入口 `qstock-mcp = qstock_mcp.server:main`（`pyproject.toml:17`）。
 - **`output.py`**：统一错误输出契约——`status:"error"` + 工具名 + 参数回显 + 原因，工具层不抛异常（`output.py:4-6`、`db.py:31-41`）。
+- **`cli_output.py`**：业务无关的 CLI 输出类 `CliOutput`，统一最终 JSON、stderr 四列日志与可注入时钟的双阈值阶段进度（issue #136）；`scheduler._emit` 共用 JSON 出口，`lhb` 首个完整接入 staging/backfill/fetch/check 日志，其他子命令不新增进度。
 - **`dates.py`**：日期统一 `yyyymmdd`（接受 `yyyy-mm-dd`）；`days` 按交易日≈自然日 7/5 加 buffer 换算区间，宁多抓不少抓，换算落点是非交易日时 start 向前对齐到最近交易日（周末 + `_MARKET_CLOSURES` 已知休市表，issue #51）（`dates.py:62-73`、`dates.py:75-97`）。`is_trading_time`/`today_str`：交易时段判定（交易日 09:30–15:00 东八区），盘中禁写防线（issue #78）的判定内核，时钟可注入。`trading_day_window` 为 CLI 的 `--trading-days N` 生成含截止日在内的 N 个交易日闭区间，缺省截止最近已收盘交易日。
 - **`db.py`**：连接串只从 `PG_DSN` 环境变量读（ADR 0002）；`ensure_schema` 幂等执行 `sql/*.sql` 全部 DDL（`db.py:21-28`、`db.py:44-54`）。
 

@@ -94,7 +94,6 @@ section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数
 """
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -102,6 +101,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, SnapshotAdapter
+from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
 from .dates import normalize_date, today_str, trading_day_window
 from .db import connect
@@ -128,9 +128,11 @@ from .tools_snapshot import fetch_market_snapshot
 
 CLOSE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
 
+cli_output = CliOutput()
+
 
 def _emit(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False))
+    cli_output.emit(payload)
 
 
 def cmd_close(date_arg: str | None,
@@ -238,7 +240,8 @@ def cmd_lhb(
                "error": "--trading-days 与 --start 互斥；可用 --end 指定截止日"})
         return 1
     if check:
-        result = compare_lhb_sources(trade_date=date_arg)
+        with cli_output.logs("lhb.check"):
+            result = compare_lhb_sources(trade_date=date_arg)
         _emit({"job": tool, "mode": "check", **result})
         return 0 if result.get("status") == "ok" else 1
     if trading_days is not None:
@@ -252,13 +255,15 @@ def cmd_lhb(
             _emit({"status": "error", "job": tool,
                    "error": "--start 与 --end 需成对提供"})
             return 1
-        result = fetch_lhb_backfill(
-            start_arg, end_arg, lhb_adapters=lhb_adapters, fallback=fallback,
-            force=force,
-        )
+        with cli_output.logs("lhb.backfill"):
+            result = fetch_lhb_backfill(
+                start_arg, end_arg, lhb_adapters=lhb_adapters, fallback=fallback,
+                force=force, cli_output=cli_output,
+            )
         _emit({"job": tool, "mode": "backfill", "trading_days": trading_days, **result})
         return 0 if result.get("status") == "ok" else 1
-    result = fetch_lhb_day(date_arg, lhb_adapters=lhb_adapters)
+    with cli_output.logs("lhb.fetch"):
+        result = fetch_lhb_day(date_arg, lhb_adapters=lhb_adapters)
     _emit({"job": tool, "mode": "fetch", **result})
     lhb = result.get("lhb") or {}
     return 0 if lhb.get("status") == "ok" else 1

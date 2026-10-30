@@ -13,15 +13,14 @@ CLI（qstock-scheduler lhb，手册 docs/lhb-source-cli.md）直调本层，不�
   容差沿用 daily_parity 口径（成交额 rel 0.005；净买 rel 0.005，万元）。
 """
 
-import logging
 from datetime import datetime, timezone
-from time import monotonic
 from typing import Sequence
 
 from .adapters import BoardAdapter, default_lhb_adapters, default_lhb_history_adapters
 from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
 from .adapters.lhb_ths_adapter import ThsLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
+from .cli_output import CliOutput
 from .dates import add_days, is_trading_day, normalize_date, today_str
 from .daily_parity import _within_tolerance
 from .db import connect
@@ -40,9 +39,7 @@ from .tools_board import (
     fetch_board_snapshot,
 )
 
-log = logging.getLogger(__name__)
-
-PROGRESS_LOG_EVERY = 20  # 回溯每 N 日报告一次进度
+PROGRESS_LOG_EVERY = 20  # staging/正式回溯每 N 日报告一次进度
 PROGRESS_LOG_INTERVAL_S = 60  # 距上条 ≥N 秒也报（慢路径可观测，issue #89）
 
 _AMOUNT_TOL = ("rel", 0.005)  # 成交额/净买额相对容差（daily_parity 同口径）
@@ -62,14 +59,6 @@ _STATISTIC_NOTE = (
     "非同日对拍差异含窗口滑移成分，供人工核对；buy/sell_seat_count 自算恒 "
     "NULL（官方汇总无席位计数来源）不参与比对"
 )
-
-
-def _progress_due(i: int, total: int, last_logged: float, now_m: float) -> bool:
-    return (
-        i % PROGRESS_LOG_EVERY == 0
-        or i == total
-        or now_m - last_logged >= PROGRESS_LOG_INTERVAL_S
-    )
 
 
 def _latest_lhb_success(conn, trade_date: str) -> dict | None:
@@ -149,16 +138,30 @@ def fetch_lhb_day(
 
 
 def _lhb_staging_rows(
-    start: str, end: str, adapters: Sequence[BoardAdapter], lhb_fallback=None,
+    start: str,
+    end: str,
+    adapters: Sequence[BoardAdapter],
+    output: CliOutput,
+    lhb_fallback=None,
     existing_rows: dict[str, list[dict]] | None = None,
 ) -> tuple[list[dict], dict | None]:
-    rows: list[dict] = []
+    days = []
     d = start
     while d <= end:
         if is_trading_day(d):
+            days.append(d)
+        d = add_days(d, 1)
+    rows: list[dict] = []
+    with output.phase(
+        "lhb.staging",
+        total=len(days),
+        every=PROGRESS_LOG_EVERY,
+        interval=PROGRESS_LOG_INTERVAL_S,
+    ) as progress:
+        for i, d in enumerate(days, 1):
             if existing_rows is not None and d in existing_rows:
                 rows.extend(existing_rows[d])
-                d = add_days(d, 1)
+                progress.update(i, date=d, reused=1)
                 continue
             try:
                 result = fetch_section_with_fallback(adapters, "lhb", d)
@@ -183,7 +186,9 @@ def _lhb_staging_rows(
                     "error_kind": "partial_error", "detail": message,
                 }
             rows.extend(data["lhb_basic"])
-        d = add_days(d, 1)
+            progress.update(
+                i, date=d, source=result["source"], rows=len(data["lhb_basic"])
+            )
     return rows, None
 
 
@@ -194,10 +199,12 @@ def fetch_lhb_backfill(
     fallback: str | None = None,
     lhb_fallback=None,
     force: bool = False,
+    cli_output: CliOutput | None = None,
 ) -> dict:
     """区间历史回溯：逐交易日抓取，单日失败不中断；逐日结果+汇总台账由
     fetch_board_snapshot 内联记录（本层不重复落账）。"""
     tool = "fetch_lhb_backfill"
+    output = cli_output or CliOutput()
     params: dict = {"start": start, "end": end}
     if force:
         params["force"] = True
@@ -242,7 +249,7 @@ def fetch_lhb_backfill(
     finally:
         conn.close()
     staging_rows, staging_error = _lhb_staging_rows(
-        lookback_start, lookback_end, adapters,
+        lookback_start, lookback_end, adapters, output,
         lhb_fallback=other_markets_fallback, existing_rows=reusable_rows,
     )
     if staging_error:
@@ -263,50 +270,52 @@ def fetch_lhb_backfill(
         }
     total = len(days)
     results = []
-    last_logged = monotonic()
-    for i, d in enumerate(days, 1):
-        if not force and d in official_days:
-            results.append({
-                "trade_date": d,
-                "status": "ok",
-                "rows": len(reusable_rows[d]) + official_statistic[d],
-                "source": official_days[d].get("source"),
-                "empty_kind": (
-                    "no_data_for_date" if not reusable_rows[d] else None
-                ),
-                "error_kind": None,
-                "error": None,
-                "partial_error": None,
-                "preserved": True,
-                "source_detail": {"preserved_official": True},
-            })
-            now_m = monotonic()
-            if _progress_due(i, total, last_logged, now_m):
-                log.info("lhb 回溯进度 %d/%d（%s，保留官方）", i, total, d)
-                last_logged = now_m
-            continue
-        r = fetch_lhb_day(
-            d, lhb_adapters=adapters, history=True, staging_rows=staging_rows,
-            lhb_fallback=other_markets_fallback,
-        )
-        lhb = r.get("lhb") or {}
-        entry = {
-            "trade_date": r.get("trade_date", d),
-            "status": lhb.get("status", "error"),
-            "rows": lhb.get("rows", 0),
-            "source": lhb.get("source"),
-            "empty_kind": lhb.get("empty_kind"),
-            "error_kind": lhb.get("error_kind"),
-            "error": lhb.get("error"),
-            "partial_error": lhb.get("partial_error"),
-        }
-        if lhb.get("source_detail"):
-            entry["source_detail"] = lhb["source_detail"]
-        results.append(entry)
-        now_m = monotonic()
-        if _progress_due(i, total, last_logged, now_m):
-            log.info("lhb 回溯进度 %d/%d（%s）", i, total, d)
-            last_logged = now_m
+    with output.phase(
+        "lhb.backfill",
+        total=total,
+        every=PROGRESS_LOG_EVERY,
+        interval=PROGRESS_LOG_INTERVAL_S,
+    ) as progress:
+        for i, d in enumerate(days, 1):
+            if not force and d in official_days:
+                results.append({
+                    "trade_date": d,
+                    "status": "ok",
+                    "rows": len(reusable_rows[d]) + official_statistic[d],
+                    "source": official_days[d].get("source"),
+                    "empty_kind": (
+                        "no_data_for_date" if not reusable_rows[d] else None
+                    ),
+                    "error_kind": None,
+                    "error": None,
+                    "partial_error": None,
+                    "preserved": True,
+                    "source_detail": {"preserved_official": True},
+                })
+                progress.update(i, date=d, preserved=1)
+                continue
+            r = fetch_lhb_day(
+                d, lhb_adapters=adapters, history=True, staging_rows=staging_rows,
+                lhb_fallback=other_markets_fallback,
+            )
+            lhb = r.get("lhb") or {}
+            entry = {
+                "trade_date": r.get("trade_date", d),
+                "status": lhb.get("status", "error"),
+                "rows": lhb.get("rows", 0),
+                "source": lhb.get("source"),
+                "empty_kind": lhb.get("empty_kind"),
+                "error_kind": lhb.get("error_kind"),
+                "error": lhb.get("error"),
+                "partial_error": lhb.get("partial_error"),
+            }
+            if lhb.get("source_detail"):
+                entry["source_detail"] = lhb["source_detail"]
+            results.append(entry)
+            progress.update(
+                i, date=d, status=entry["status"], rows=entry["rows"],
+                source=entry["source"],
+            )
     failed = [r for r in results if r["status"] != "ok"]
     status = aggregate_batch_status(total, len(failed))
     return {

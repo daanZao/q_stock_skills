@@ -54,7 +54,8 @@ qstock-scheduler lhb --date 20261020 --check
 - `--date`：单日 yyyymmdd；与 `--start/--end/--trading-days` 互斥。盘中/非交易日三所全空是
   **正常语义**（status ok + `empty_kind=no_data_for_date` + note，非失败）。
 - `--start/--end`：回溯闭区间（自然日），区间内逐交易日抓取；缺省无（不传即
-  单日模式）。进度经 stderr 双阈值报（每 20 日或 ≥60s，issue #89）。
+  单日模式）。统计前置 staging 与正式回溯分别报告开始、进度和结束；进度经
+  stderr 双阈值报（每 20 日或 ≥60s，issue #89）。
 - `--trading-days N`：含截止日在内 N 个 A 股交易日，可用 `--end` 改截止日，
   缺省截止最近已收盘交易日；与 `--start` 互斥。
 - `--fallback ths`：仅历史回溯及统计前置 staging 可用，单日与 `--check` 拒绝。
@@ -79,7 +80,16 @@ qstock-scheduler lhb --date 20261020 --check
 
 ## 输出与退出码
 
-stdout 只输出一份 JSON（日志走 stderr）。fetch/backfill 模式示例：
+stdout 只输出一份 JSON（日志走 stderr）。stderr 统一为“当前本地时间（含时区）｜
+任务类型｜进度或事件｜key=value 上下文”四列，普通追加、不做单行刷新；WARNING
+等非进度事件也使用同一格式。例如：
+
+```text
+2026-10-29T15:04:05+08:00 | lhb.staging | start | total=39
+2026-10-29T15:04:25+08:00 | lhb.backfill | 20/90 | date=20260714 status=ok rows=45 source=exchange
+```
+
+fetch/backfill 模式 JSON 示例：
 
 ```json
 {"job":"lhb","mode":"fetch","status":"ok","trade_date":"20261020",

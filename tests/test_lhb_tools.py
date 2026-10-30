@@ -6,7 +6,7 @@ test_scheduler.py 模式）。
 """
 
 import json
-from datetime import date
+from datetime import date, datetime
 
 import psycopg2
 import pytest
@@ -1121,6 +1121,26 @@ class TestLhbCli:
             lhb_adapters=[FakeLhbAdapter()],
         )
         assert rc == 0 and out["mode"] == "backfill" and out["total_days"] == 3
+
+    def test_backfill_reports_staging_and_target_phases(self, pg_ready, capsys):
+        rc = scheduler.main(
+            ["lhb", "--start", "2026-10-16", "--end", "2026-10-20"],
+            lhb_adapters=[FakeLhbAdapter()],
+        )
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert json.loads(captured.out)["total_days"] == 3
+        columns = [line.split(" | ") for line in captured.err.splitlines()]
+        assert all(len(parts) == 4 for parts in columns)
+        for timestamp, _task, _event, context in columns:
+            assert datetime.fromisoformat(timestamp).tzinfo is not None
+            assert context
+        assert {parts[1] for parts in columns} == {"lhb.staging", "lhb.backfill"}
+        events = [parts[2] for parts in columns]
+        assert events.count("start") == 2
+        assert events.count("done") == 2
+        assert "3/3" in events
 
     def test_backfill_force(self, pg_ready, capsys):
         rc, out = _run(
