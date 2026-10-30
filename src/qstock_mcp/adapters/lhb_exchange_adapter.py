@@ -52,14 +52,44 @@ def _sum_yuan(seats: list[dict]) -> float | None:
     return sum(vals) / 1e4
 
 
+def _detail_rows(trade_date, code, reason, buy_seats, sell_seats):
+    rows = []
+    for seat_type, seats in (("buy", buy_seats), ("sell", sell_seats)):
+        for seat in seats:
+            directional = seat.get("yuan")
+            buy_yuan = seat.get("buy_yuan") if "buy_yuan" in seat else (
+                directional if seat_type == "buy" else None
+            )
+            sell_yuan = seat.get("sell_yuan") if "sell_yuan" in seat else (
+                directional if seat_type == "sell" else None
+            )
+            net_yuan = seat.get("net_yuan")
+            rows.append({
+                "trade_date": trade_date,
+                "stock_code": code,
+                "lhb_reason": reason or "",
+                "seat_name": seat.get("seat") or "",
+                "seat_code": seat.get("seat_code"),
+                "seat_type": seat_type,
+                "amount": None if directional is None else directional / 1e4,
+                "amount_percent": None,
+                "buy_count_3m": None,
+                "sell_count_3m": None,
+                "buy_amount": None if buy_yuan is None else buy_yuan / 1e4,
+                "sell_amount": None if sell_yuan is None else sell_yuan / 1e4,
+                "net_buy_amount": None if net_yuan is None else net_yuan / 1e4,
+            })
+    return rows
+
+
 def _basic_row(trade_date, code, name, reason, buy_seats, sell_seats,
-               day_amount=None, seat_day_amount=None):
+               day_amount=None, seat_day_amount=None, include_details=False):
     """席位明细 → lhb_basic 行（万元口径 + day_amount 对拍元数据键）。"""
     buy = _sum_yuan(buy_seats)
     sell = _sum_yuan(sell_seats)
     net = None if (buy is None and sell is None) else (buy or 0.0) - (sell or 0.0)
     m = _TURNOVER_RE.search(reason or "")
-    return {
+    row = {
         "trade_date": trade_date,
         "stock_code": code,
         "stock_name": name,
@@ -74,13 +104,18 @@ def _basic_row(trade_date, code, name, reason, buy_seats, sell_seats,
         # 对拍元数据（非落库列）：上游给出的全日成交金额（万元）
         "day_amount": day_amount if day_amount is not None else seat_day_amount,
     }
+    if include_details:
+        row["_detail_rows"] = _detail_rows(
+            trade_date, code, reason, buy_seats, sell_seats
+        )
+    return row
 
 
 class ExchangeLhbAdapter:
     """沪深北交易所官方龙虎榜适配器（BoardAdapter.fetch_lhb 契约）。
 
-    返回 lhb_basic + lhb_yyb_capital + lhb_yyb_most 三子表；lhb_stock_statistic
-    由库内自算（见模块 docstring），不在本适配器抓取范围。
+    返回 lhb_basic + 沪深 lhb_stock_detail + 两个 yyb 子表；
+    lhb_stock_statistic 由库内自算，不在本适配器抓取范围。
     """
 
     name = "exchange"
@@ -95,18 +130,22 @@ class ExchangeLhbAdapter:
     # ---------------------------------------------------------------- 入口
 
     def fetch_lhb(self, trade_date: str) -> dict:
-        """三子表抓取；子项/单所级失败记入 errors（工具层报 partial_error），
-        拿到什么落什么；basic/yyb 全空且全部失败才抛 FetchError。"""
+        """basic、沪深详情与 yyb 抓取；basic 子项失败入 errors，详情失败入
+        detail_errors；拿到什么落什么，basic/yyb 全空且全败才抛 FetchError。"""
         result: dict = {}
         errors: list[str] = []
         try:
-            result["lhb_basic"], basic_errs, source_meta = self._fetch_basic(trade_date)
+            (
+                result["lhb_basic"], basic_errs, source_meta,
+                result["lhb_stock_detail"],
+            ) = self._fetch_basic(trade_date)
             result.update(source_meta)
             errors += basic_errs
         except Exception as e:  # noqa: BLE001 - 单子项失败不拖垮其他
             errors.append(f"lhb_basic: {e}")
             result.update(getattr(e, "source_meta", {}))
             result["lhb_basic"] = []
+            result["lhb_stock_detail"] = []
         for table, fn in [
             ("lhb_yyb_capital", self._fetch_yyb_capital),
             ("lhb_yyb_most", self._fetch_yyb_most),
@@ -133,11 +172,14 @@ class ExchangeLhbAdapter:
 
     # ---------------------------------------------------------------- lhb_basic
 
-    def _fetch_basic(self, trade_date: str) -> tuple[list[dict], list[str], dict]:
+    def _fetch_basic(
+        self, trade_date: str
+    ) -> tuple[list[dict], list[str], dict, list[dict]]:
         rows: list[dict] = []
         errors: list[str] = []
         metadata: dict = {}
         szse_rows: list[dict] = []
+        primary_details: list[dict] = []
         primary_succeeded = False
         if self._szse_primary is not None:
             requested = self._szse_primary.name
@@ -145,7 +187,18 @@ class ExchangeLhbAdapter:
                 "requested": requested, "source": self.name, "rows": 0,
             }
             try:
-                ths_rows = self._szse_primary.fetch_lhb_basic(trade_date)
+                fetch_primary = getattr(self._szse_primary, "fetch_lhb", None)
+                if fetch_primary is not None:
+                    primary_data = fetch_primary(trade_date)
+                    ths_rows = primary_data["lhb_basic"]
+                    primary_details = [
+                        row for row in primary_data.get("lhb_stock_detail") or []
+                        if market_of(row["stock_code"]) == "sz"
+                    ]
+                    if primary_data.get("detail_errors"):
+                        metadata["detail_errors"] = list(primary_data["detail_errors"])
+                else:
+                    ths_rows = self._szse_primary.fetch_lhb_basic(trade_date)
                 if any(row.get("trade_date") != trade_date for row in ths_rows):
                     raise FetchError("深圳主源返回日期错位")
                 szse_rows = [
@@ -179,7 +232,12 @@ class ExchangeLhbAdapter:
             raise error
         if errors:
             log.warning("lhb_basic 部分市场失败: %s", "; ".join(errors))
-        return rows, errors, metadata
+        details = primary_details + [
+            detail
+            for row in rows
+            for detail in row.pop("_detail_rows", [])
+        ]
+        return rows, errors, metadata, details
 
     def _szse_summary(self, dash: str, page: int) -> dict:
         # 性能验证（2026-10-27）：单线程、5 秒间隔请求 3 个汇总页均断连；
@@ -225,6 +283,7 @@ class ExchangeLhbAdapter:
                         d["buy_seats"],
                         d["sell_seats"],
                         day_amount=d["day_amount"],
+                        include_details=True,
                     )
                 )
         return rows
@@ -242,6 +301,7 @@ class ExchangeLhbAdapter:
                     s["buy_seats"],
                     s["sell_seats"],
                     day_amount=s["amount_wan"],
+                    include_details=True,
                 )
             )
         return rows

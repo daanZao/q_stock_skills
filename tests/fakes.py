@@ -232,6 +232,13 @@ LHB_ROWS = {
             "total_amount": 3.0e8,
         }
     ],
+    "lhb_stock_detail": [{
+        "stock_code": "600519", "lhb_reason": "涨幅偏离值达7%",
+        "seat_name": "上海席位", "seat_code": None, "seat_type": "buy",
+        "amount": 2.0e8, "amount_percent": None, "buy_count_3m": None,
+        "sell_count_3m": None, "buy_amount": 2.0e8, "sell_amount": None,
+        "net_buy_amount": None,
+    }],
     # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内 lhb_basic
     # 滚动自算，fake 数据无需提供
     "lhb_yyb_capital": [

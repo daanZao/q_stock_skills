@@ -108,8 +108,12 @@ _Avoid_: 临时补数、窗外落库
 _Avoid_: 全量覆盖、整链兜底（不加限定时）
 
 **深圳历史主采**:
-深圳历史回溯及 staging 的 `lhb_basic` 默认请求链为同花顺 → 深交所官方；同花顺成功即完成，失败才尝试官方，已有完整官方日缺省保留、`--force` 才替换（ADR 0016）。
+深圳历史回溯及 staging 的 `lhb_basic` 默认请求链为同花顺 → 深交所官方；同花顺成功即完成，失败才尝试官方。历史正式回溯同时保存深圳席位详情，staging 不保存详情（ADR 0016/0017）。
 _Avoid_: 官方唯一主源、后备默认关闭（现行深圳历史语义）
+
+**席位详情修复**:
+默认历史窗口内 basic 完整但沪深席位详情缺失或部分失败时，复用库内 basic，只按父记录整体替换详情；basic 与详情均完整才保留，`--force` 同时重抓两者。北交所不保存详情，也不计缺失。
+_Avoid_: 强制整窗重抓、逐席位 upsert
 
 **收盘后批**:
 `qstock-scheduler close` 执行的交易日收盘后采集：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照，直调 tools_* 核心层、不经 MCP 协议层，逐 section 独立成败并落采集台账。调度安装（launchd）为用户侧动作，见 `docs/scheduler-launchd.md`。

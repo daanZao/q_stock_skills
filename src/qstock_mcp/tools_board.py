@@ -13,7 +13,8 @@ fetch_failed（非连接级）与 no_data_for_date（上游正常响应空结果
 盘中 lhb_basic 为空返回 rows:0 + note + empty_kind=no_data_for_date
 （龙虎榜盘后发布是正常语义），lhb 抓取失败按三态结构化返回
 （status error + error_kind + 逐源明细），与"未发布"可区分；
-单日实时 lhb 子项部分失败落已得数据并报 partial_error；历史回溯则保留旧日。
+lhb 子项或席位详情部分失败落已得数据并报 partial_error；历史 basic 部分失败
+保留旧日，详情部分失败保存有效 basic 与其他父记录详情。
 
 indices 段白名单定点补漏（issue #49）：生产链腾讯批量报价口径已全量覆盖
 7 大指数白名单（含科创50 000688），全命中时零补抓请求；补漏机制为口径性
@@ -77,6 +78,7 @@ from .adapters import (
     default_lhb_adapters,
 )
 from .adapters._bse_codes import market_of
+from .adapters._lhb_detail import seat_problem
 from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
@@ -94,9 +96,12 @@ from .repository import (
     BOARD_SECTION_TABLES,
     recompute_lhb_statistic,
     replace_lhb_basic_day,
+    replace_lhb_details_day,
     select_board_rows,
     select_latest_board_date,
+    select_lhb_statistic,
     upsert_board_rows,
+    upsert_lhb_day,
 )
 from .tools_init import MAJOR_INDICES
 
@@ -333,6 +338,44 @@ def _lhb_market(stock_code: str) -> str:
     return {"sh": "sse", "sz": "szse", "bj": "bse"}[market_of(stock_code)]
 
 
+def _validated_lhb_details(data: dict) -> tuple[list[dict], list[str]]:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in data.get("lhb_stock_detail") or []:
+        if market_of(row["stock_code"]) == "bj":
+            continue
+        key = (row["stock_code"], row.get("lhb_reason") or "")
+        groups.setdefault(key, []).append(row)
+    invalid = {
+        (row["stock_code"], row.get("lhb_reason") or "")
+        for row in data.get("detail_invalid") or []
+    }
+    errors = list(data.get("detail_errors") or [])
+    for key, rows in groups.items():
+        if key in invalid:
+            continue
+        problem = seat_problem(rows)
+        if problem:
+            invalid.add(key)
+            errors.append(f"{key[0]} {key[1]}: {problem}")
+    return [
+        row for key, rows in groups.items() if key not in invalid for row in rows
+    ], errors
+
+
+def _lhb_detail_source(data, primary_source, szse_primary, basic_fallback) -> str:
+    sources = []
+    for row in data.get("lhb_stock_detail") or []:
+        source = primary_source
+        if _lhb_market(row["stock_code"]) == "szse":
+            if szse_primary and szse_primary["source"] != primary_source:
+                source = szse_primary["source"]
+            if basic_fallback and "szse" in basic_fallback["markets"]:
+                source = basic_fallback["source"]
+        if source not in sources:
+            sources.append(source)
+    return "+".join(sources) if sources else primary_source
+
+
 def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_date: str) -> dict:
     errors = list(data.get("errors") or [])
     failed_markets = [
@@ -350,10 +393,19 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
     if not failed_markets:
         return data
     merged = dict(data)
+    fallback_details: list[dict] = []
+    fallback_detail_errors: list[str] = []
     try:
         fallback_rows = data.get("ths_basic_rows")
         if fallback_rows is None:
-            fallback_rows = fallback.fetch_lhb_basic(trade_date)
+            fetch_fallback = getattr(fallback, "fetch_lhb", None)
+            if fetch_fallback is not None:
+                fallback_data = fetch_fallback(trade_date)
+                fallback_rows = fallback_data["lhb_basic"]
+                fallback_details = list(fallback_data.get("lhb_stock_detail") or [])
+                fallback_detail_errors = list(fallback_data.get("detail_errors") or [])
+            else:
+                fallback_rows = fallback.fetch_lhb_basic(trade_date)
     except Exception as exc:  # noqa: BLE001 - 后备失败保留官方错误并中止当日历史写入
         merged["errors"] = errors + [f"ths: {exc}"]
         return merged
@@ -404,6 +456,12 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
             )
         )
     ]
+    if "szse" in resolved:
+        merged["lhb_stock_detail"] = list(data.get("lhb_stock_detail") or []) + [
+            row for row in fallback_details if _lhb_market(row["stock_code"]) == "szse"
+        ]
+        if fallback_detail_errors:
+            merged["detail_errors"] = list(data.get("detail_errors") or []) + fallback_detail_errors
     if patched_markets:
         merged["basic_fallback"] = {
             "source": fallback.name,
@@ -435,6 +493,8 @@ def fetch_board_snapshot(
     lhb_history: bool = False,
     lhb_staging_rows: list[dict] | None = None,
     lhb_fallback=None,
+    lhb_detail_only: bool = False,
+    lhb_basic_source: str | None = None,
 ) -> dict:
     """抓取盘面快照并落库：各 section 独立 fallback 重试、独立成败报告。
 
@@ -602,6 +662,11 @@ def fetch_board_snapshot(
                 data = _merge_lhb_basic_fallback(
                     data, r["source"], lhb_fallback, effective
                 )
+            if name == "lhb":
+                data = dict(data)
+                (
+                    data["lhb_stock_detail"], data["detail_errors"],
+                ) = _validated_lhb_details(data)
             source = r["source"]
             szse_primary = data.get("szse_primary") if name == "lhb" else None
             if szse_primary and szse_primary["source"] != r["source"]:
@@ -639,7 +704,7 @@ def fetch_board_snapshot(
                         "detail": "date_mismatch",
                     }
                     continue
-            if name == "lhb" and lhb_history and data.get("errors"):
+            if name == "lhb" and lhb_history and not lhb_detail_only and data.get("errors"):
                 message = "; ".join(data["errors"])
                 error_detail = message
                 source_detail = {}
@@ -673,10 +738,37 @@ def fetch_board_snapshot(
                     results[name]["source_detail"] = source_detail
                 continue
             statistic_written = 0
-            if name == "lhb" and lhb_history:
-                written, statistic_written = replace_lhb_basic_day(
-                    conn, effective, data["lhb_basic"], lhb_staging_rows
+            detail_written = 0
+            detail_source = (
+                _lhb_detail_source(data, r["source"], szse_primary, basic_fallback)
+                if name == "lhb" else source
+            )
+            detail_parent_rows = data["lhb_basic"] if name == "lhb" else []
+            if name == "lhb" and lhb_detail_only:
+                source = lhb_basic_source or source
+                detail_parent_rows = select_board_rows(
+                    conn, "lhb_basic", "trade_date", "stock_code", effective
                 )
+                written = len(detail_parent_rows)
+                statistic_written = len(select_lhb_statistic(conn, effective))
+                detail_written = replace_lhb_details_day(
+                    conn, effective, data.get("lhb_stock_detail") or []
+                )
+            elif name == "lhb" and lhb_history:
+                written, statistic_written, detail_written = replace_lhb_basic_day(
+                    conn, effective, data["lhb_basic"], lhb_staging_rows,
+                    data.get("lhb_stock_detail") or [],
+                )
+            elif name == "lhb":
+                written, detail_written = upsert_lhb_day(
+                    conn, effective, data["lhb_basic"],
+                    data.get("lhb_stock_detail") or [],
+                )
+                for table, date_col, key_cols, fields in BOARD_SECTION_TABLES["lhb"][1:]:
+                    written += upsert_board_rows(
+                        conn, table, date_col, key_cols, fields, effective,
+                        data[table],
+                    )
             else:
                 written = _upsert_section(conn, name, data, effective)
             res: dict = {
@@ -691,6 +783,9 @@ def fetch_board_snapshot(
                     "primary": data["primary_source"],
                     "fallback": basic_fallback,
                 })
+            if name == "lhb" and lhb_detail_only:
+                res["detail_repaired"] = True
+                res.setdefault("source_detail", {})["preserved_basic"] = True
             if name == "boards":
                 # 字段级第四态（issue #118）：申万不发布的三字段机器可读声明
                 # （量比重申万官网不发布、领涨股不发布、资金流永久弃用），
@@ -701,9 +796,34 @@ def fetch_board_snapshot(
             if r["attempted_sources"]:
                 res["attempted_sources"] = r["attempted_sources"]
             if name == "lhb":
-                if data.get("errors"):
-                    # 子项部分失败：拿到什么落什么，但失败原因必须报告
-                    res["partial_error"] = "; ".join(data["errors"])
+                expected_details = {
+                    (row["stock_code"], row.get("lhb_reason") or "")
+                    for row in detail_parent_rows
+                    if market_of(row["stock_code"]) != "bj"
+                }
+                actual_details = {
+                    (row["stock_code"], row.get("lhb_reason") or "")
+                    for row in data.get("lhb_stock_detail") or []
+                    if (row["stock_code"], row.get("lhb_reason") or "") in expected_details
+                }
+                detail_missing = len(expected_details - actual_details)
+                detail_status = (
+                    "ok" if detail_missing == 0
+                    else "partial" if detail_written else "missing"
+                )
+                res.update({
+                    "detail_rows": detail_written,
+                    "detail_status": detail_status,
+                    "detail_missing": detail_missing,
+                    "detail_source": detail_source,
+                })
+                detail_errors = list(data.get("detail_errors") or [])
+                if detail_missing:
+                    detail_errors.append(f"席位详情缺失 {detail_missing} 个父记录")
+                partial_errors = list(data.get("errors") or []) + detail_errors
+                if partial_errors:
+                    # 子项或席位详情部分失败：拿到什么落什么，但失败原因必须报告
+                    res["partial_error"] = "; ".join(partial_errors)
                 if not data["lhb_basic"]:
                     res["empty_kind"] = "no_data_for_date"
                     res["note"] = _LHB_EMPTY_NOTE
@@ -734,6 +854,14 @@ def fetch_board_snapshot(
                 detail = f"{detail}; {note}" if detail else note
             if name == "lhb" and data.get("errors"):
                 note = "partial_error=" + "; ".join(data["errors"])
+                detail = f"{detail}; {note}" if detail else note
+            if name == "lhb":
+                note = (
+                    f"detail_rows={detail_written}; detail_status={detail_status}; "
+                    f"detail_missing={detail_missing}; detail_source={detail_source}"
+                )
+                if detail_errors:
+                    note += "; detail_error=" + "; ".join(detail_errors)
                 detail = f"{detail}; {note}" if detail else note
             if name == "boards":
                 note = "planned_absent_fields=" + ",".join(

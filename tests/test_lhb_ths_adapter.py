@@ -10,6 +10,84 @@ from qstock_mcp.adapters.lhb_ths_adapter import ThsLhbAdapter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "lhb" / "ths_daily_basic.html"
 COMPLEX_FIXTURE = Path(__file__).parent / "fixtures" / "lhb" / "ths_daily_complex.html"
+SEATS_FIXTURE = Path(__file__).parent / "fixtures" / "lhb" / "ths_daily_seats.html"
+
+
+def test_fetch_lhb_maps_basic_and_szse_details_from_same_page():
+    calls = []
+
+    def load(url):
+        calls.append(url)
+        return SEATS_FIXTURE.read_text(encoding="utf-8").encode("gb18030")
+
+    out = ThsLhbAdapter(page_loader=load, clock=lambda _s: None).fetch_lhb(
+        "20261020"
+    )
+
+    assert len(calls) == 1
+    assert out["lhb_basic"][0]["buy_amount"] == pytest.approx(17800.0)
+    assert out["lhb_stock_detail"] == [
+        {
+            "trade_date": "20261020",
+            "stock_code": "000530",
+            "lhb_reason": "日振幅值达15%的证券;日换手率达20%的证券",
+            "seat_name": "国信证券股份有限公司浙江互联网分公司",
+            "seat_code": "9ef239188b9d9bcf",
+            "seat_type": "buy",
+            "amount": pytest.approx(3797.51),
+            "amount_percent": None,
+            "buy_count_3m": None,
+            "sell_count_3m": None,
+            "buy_amount": pytest.approx(3797.51),
+            "sell_amount": pytest.approx(3342.48),
+            "net_buy_amount": pytest.approx(455.03),
+        },
+        {
+            "trade_date": "20261020",
+            "stock_code": "000530",
+            "lhb_reason": "日振幅值达15%的证券;日换手率达20%的证券",
+            "seat_name": "机构专用",
+            "seat_code": None,
+            "seat_type": "buy",
+            "amount": pytest.approx(2601.51),
+            "amount_percent": None,
+            "buy_count_3m": None,
+            "sell_count_3m": None,
+            "buy_amount": pytest.approx(2601.51),
+            "sell_amount": pytest.approx(4668.97),
+            "net_buy_amount": pytest.approx(-2067.46),
+        },
+        {
+            "trade_date": "20261020",
+            "stock_code": "000530",
+            "lhb_reason": "日振幅值达15%的证券;日换手率达20%的证券",
+            "seat_name": "国信证券股份有限公司浙江互联网分公司",
+            "seat_code": "9ef239188b9d9bcf",
+            "seat_type": "sell",
+            "amount": pytest.approx(3342.48),
+            "amount_percent": None,
+            "buy_count_3m": None,
+            "sell_count_3m": None,
+            "buy_amount": pytest.approx(3797.51),
+            "sell_amount": pytest.approx(3342.48),
+            "net_buy_amount": pytest.approx(455.03),
+        },
+        {
+            "trade_date": "20261020",
+            "stock_code": "000530",
+            "lhb_reason": "日振幅值达15%的证券;日换手率达20%的证券",
+            "seat_name": "东亚前海证券有限责任公司苏州分公司",
+            "seat_code": "cdab1cd0cb07204d",
+            "seat_type": "sell",
+            "amount": pytest.approx(3250.10),
+            "amount_percent": None,
+            "buy_count_3m": None,
+            "sell_count_3m": None,
+            "buy_amount": pytest.approx(37.02),
+            "sell_amount": pytest.approx(3250.10),
+            "net_buy_amount": pytest.approx(-3213.08),
+        },
+    ]
 
 
 def test_fetch_lhb_basic_maps_recorded_daily_page():
@@ -119,3 +197,35 @@ def test_invalid_page_is_rejected_as_whole(scenario):
     )
     with pytest.raises(FetchError):
         adapter.fetch_lhb_basic("20261020")
+
+
+def test_duplicate_seat_invalidates_only_its_parent_details():
+    html = SEATS_FIXTURE.read_text(encoding="utf-8")
+    seat = html.index("国信证券股份有限公司浙江互联网分公司")
+    start = html.rfind("<tr>", 0, seat)
+    end = html.index("</tr>", seat) + len("</tr>")
+    html = html[:end] + html[start:end] + html[end:]
+
+    out = ThsLhbAdapter(
+        page_loader=lambda _url: html.encode("gb18030"), clock=lambda _s: None
+    ).fetch_lhb("20261020")
+
+    assert len(out["lhb_basic"]) == 1
+    assert out["lhb_stock_detail"] == []
+    assert len(out["detail_errors"]) == 1
+    assert "席位重复" in out["detail_errors"][0]
+
+
+def test_malformed_seat_row_invalidates_parent_details():
+    html = SEATS_FIXTURE.read_text(encoding="utf-8").replace(
+        "</tbody>", "<tr><td>残缺席位行</td></tr></tbody>", 1
+    )
+
+    out = ThsLhbAdapter(
+        page_loader=lambda _url: html.encode("gb18030"), clock=lambda _s: None
+    ).fetch_lhb("20261020")
+
+    assert len(out["lhb_basic"]) == 1
+    assert out["lhb_stock_detail"] == []
+    assert len(out["detail_errors"]) == 1
+    assert "席位行不完整" in out["detail_errors"][0]

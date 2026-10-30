@@ -141,6 +141,19 @@ LHB_BASIC_FIELDS = (
     "total_amount",
 )
 
+LHB_DETAIL_FIELDS = (
+    "seat_name",
+    "seat_code",
+    "seat_type",
+    "amount",
+    "amount_percent",
+    "buy_count_3m",
+    "sell_count_3m",
+    "buy_amount",
+    "sell_amount",
+    "net_buy_amount",
+)
+
 LHB_STATISTIC_FIELDS = (
     "stock_code",
     "stock_name",

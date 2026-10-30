@@ -93,6 +93,23 @@ class TestCloseHappyPath:
 
 
 class TestClosePartialFailure:
+    def test_lhb_detail_partial_exits_1(self, pg_ready, capsys):
+        lhb = {
+            "lhb_basic": [{
+                "stock_code": "600519", "stock_name": "贵州茅台",
+                "lhb_reason": "涨幅偏离值达7%", "buy_amount": 2.0,
+                "sell_amount": 1.0, "net_buy_amount": 1.0, "total_amount": 3.0,
+            }],
+            "lhb_yyb_capital": [], "lhb_yyb_most": [],
+        }
+        rc, out = _run(
+            capsys, ["close"], adapters=[FakeBoardAdapter("fake", rows={"lhb": lhb})]
+        )
+        assert rc == 1
+        assert out["status"] == "error"
+        assert out["partial_sections"] == ["lhb"]
+        assert out["sections"]["lhb"]["detail_status"] == "missing"
+
     def test_one_section_fails_exit_1(self, pg_ready, capsys):
         adapters = [FakeBoardAdapter("fake", fail_sections=("lhb",))]
         rc, out = _run(capsys, ["close"], adapters=adapters)

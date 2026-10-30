@@ -49,8 +49,10 @@ def test_fetch_all_sections_land_and_report(pg_test):
         "boards": len(BOARD_ROWS),
         "zt_pool": len(ZT_POOL_ROWS),
         "strong_stocks": len(STRONG_ROWS),
-        # lhb：适配器三子表 + statistic 库内自算 1 行（basic 1 股入 60 日窗）
-        "lhb": sum(len(v) for v in LHB_ROWS.values()) + 1,
+        # lhb rows 保持 basic/yyb/statistic 口径，详情由 detail_rows 单列
+        "lhb": sum(
+            len(v) for k, v in LHB_ROWS.items() if k != "lhb_stock_detail"
+        ) + 1,
     }
     for section, n in expected_rows.items():
         expected = {
@@ -62,6 +64,12 @@ def test_fetch_all_sections_land_and_report(pg_test):
             # 字段级第四态声明（issue #118）：boards 段响应额外携带
             # planned_absent_fields（申万不发布的三字段，见 tools_board）
             assert result["sections"][section].pop("planned_absent_fields")
+        if section == "lhb":
+            expected.update({
+                "detail_rows": len(LHB_ROWS["lhb_stock_detail"]),
+                "detail_status": "ok", "detail_missing": 0,
+                "detail_source": "akshare",
+            })
         assert result["sections"][section] == expected
     assert _count(pg_test, "market_indices") == len(INDEX_ROWS)
     assert _count(pg_test, "market_boards") == len(BOARD_ROWS)
@@ -198,6 +206,10 @@ def test_fetch_intraday_empty_lhb_is_ok_with_note(pg_test):
         "status": "ok",
         "empty_kind": "no_data_for_date",
         "note": "当日无龙虎榜数据（龙虎榜盘后发布）",
+        "detail_rows": 0,
+        "detail_status": "ok",
+        "detail_missing": 0,
+        "detail_source": "akshare",
     }
     assert _count(pg_test, "lhb_basic") == 0
 

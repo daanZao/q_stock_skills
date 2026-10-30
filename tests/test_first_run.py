@@ -48,6 +48,14 @@ class LhbAdapter:
                 "net_buy_amount": 100.0,
                 "total_amount": 300.0,
             }],
+            "lhb_stock_detail": [{
+                "trade_date": trade_date, "stock_code": "600519",
+                "lhb_reason": "日涨幅偏离值达到7%", "seat_name": "上海席位",
+                "seat_code": None, "seat_type": "buy", "amount": 200.0,
+                "amount_percent": None, "buy_count_3m": None,
+                "sell_count_3m": None, "buy_amount": 200.0,
+                "sell_amount": None, "net_buy_amount": None,
+            }],
             "lhb_yyb_capital": [{"rank": 1, "seat_name": "历史禁写"}],
             "lhb_yyb_most": [{"rank": 1, "seat_name": "历史禁写"}],
         }
@@ -111,6 +119,8 @@ def test_first_run_90_trading_day_path(pg_test, capsys, monkeypatch):
             cur.execute("SELECT COUNT(*) FROM market_boards")
             assert cur.fetchone()[0] == len(SW_BOARD_LIST) * 90
             cur.execute("SELECT COUNT(*) FROM lhb_basic")
+            assert cur.fetchone()[0] == 90
+            cur.execute("SELECT COUNT(*) FROM lhb_stock_detail")
             assert cur.fetchone()[0] == 90
             cur.execute("SELECT COUNT(*) FROM lhb_yyb_capital")
             assert cur.fetchone()[0] == 0

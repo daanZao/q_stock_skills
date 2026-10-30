@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, default_lhb_adapters, default_lhb_history_adapters
+from .adapters._bse_codes import market_of
 from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
 from .adapters.lhb_ths_adapter import ThsLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
@@ -31,7 +32,8 @@ from .ledger import record_collection, select_collection_log, summarize_attempte
 from .output import aggregate_batch_status
 from .output import error as _error
 from .repository import (
-    LHB_STATISTIC_WINDOW_DAYS, select_board_rows, select_lhb_statistic,
+    LHB_STATISTIC_WINDOW_DAYS, select_board_rows, select_lhb_detail_parent_keys,
+    select_lhb_statistic,
 )
 from .tools_board import (
     _lhb_all_markets_failure_result,
@@ -68,6 +70,14 @@ def _latest_lhb_success(conn, trade_date: str) -> dict | None:
     return None
 
 
+def _ledger_detail_value(entry: dict, key: str) -> str | None:
+    for raw_part in (entry.get("detail") or "").split(";"):
+        part = raw_part.strip()
+        if part.startswith(f"{key}="):
+            return part.split("=", 1)[1]
+    return None
+
+
 def _is_complete_lhb_day(entry: dict) -> bool:
     source = entry.get("source") or ""
     return (
@@ -95,9 +105,13 @@ def _is_official_lhb_day(entry: dict) -> bool:
 
 def _existing_lhb_inputs(
     conn, start: str, end: str
-) -> tuple[dict[str, list[dict]], dict[str, dict]]:
+) -> tuple[
+    dict[str, list[dict]], dict[str, dict], dict[str, dict], dict[str, dict]
+]:
     reusable: dict[str, list[dict]] = {}
     official: dict[str, dict] = {}
+    entries: dict[str, dict] = {}
+    detail_meta: dict[str, dict] = {}
     d = start
     while d <= end:
         rows = select_board_rows(conn, "lhb_basic", "trade_date", "stock_code", d)
@@ -107,10 +121,29 @@ def _existing_lhb_inputs(
             or (not rows and entry["status"] == "empty")
         ):
             reusable[d] = rows
+            entries[d] = entry
             if _is_official_lhb_day(entry):
                 official[d] = entry
+            details = select_board_rows(
+                conn, "lhb_stock_detail", "trade_date", "stock_code", d
+            )
+            expected_keys = {
+                (row["stock_code"], row.get("lhb_reason") or "")
+                for row in rows if market_of(row["stock_code"]) != "bj"
+            }
+            actual_keys = select_lhb_detail_parent_keys(conn, d)
+            ledger_detail = entry.get("detail") or ""
+            detail_incomplete = any(
+                part.strip().startswith(("detail_status=partial", "detail_status=missing"))
+                for part in ledger_detail.split(";")
+            )
+            detail_meta[d] = {
+                "complete": expected_keys <= actual_keys and not detail_incomplete,
+                "rows": len(details),
+                "missing": len(expected_keys - actual_keys),
+            }
         d = add_days(d, 1)
-    return reusable, official
+    return reusable, official, entries, detail_meta
 
 
 def fetch_lhb_day(
@@ -119,12 +152,15 @@ def fetch_lhb_day(
     history: bool = False,
     staging_rows: list[dict] | None = None,
     lhb_fallback=None,
+    detail_only: bool = False,
+    basic_source: str | None = None,
 ) -> dict:
-    """单日龙虎榜抓取落库；history=True 时仅 basic 按日完整替换。"""
+    """单日龙虎榜抓取落库；history=True 时按日完整替换 basic 与详情。"""
     result = fetch_board_snapshot(
         trade_date=trade_date, sections=["lhb"], lhb_adapters=lhb_adapters,
         lhb_history=history, lhb_staging_rows=staging_rows,
         lhb_fallback=lhb_fallback if history else None,
+        lhb_detail_only=detail_only, lhb_basic_source=basic_source,
     )
     if result.get("sections") is None:
         return result  # 参数级 error 契约原样上抛
@@ -240,11 +276,11 @@ def fetch_lhb_backfill(
     if db_error:
         return _error(tool, params, db_error)
     try:
-        reusable_rows, official_days = _existing_lhb_inputs(
+        reusable_rows, official_days, existing_entries, detail_meta = _existing_lhb_inputs(
             conn, lookback_start, end_d
         )
-        official_statistic = {
-            d: len(select_lhb_statistic(conn, d)) for d in official_days
+        existing_statistic = {
+            d: len(select_lhb_statistic(conn, d)) for d in reusable_rows
         }
     finally:
         conn.close()
@@ -277,26 +313,39 @@ def fetch_lhb_backfill(
         interval=PROGRESS_LOG_INTERVAL_S,
     ) as progress:
         for i, d in enumerate(days, 1):
-            if not force and d in official_days:
+            if not force and d in reusable_rows and detail_meta[d]["complete"]:
+                source_detail = (
+                    {"preserved_official": True} if d in official_days
+                    else {"preserved_basic": True}
+                )
                 results.append({
                     "trade_date": d,
                     "status": "ok",
-                    "rows": len(reusable_rows[d]) + official_statistic[d],
-                    "source": official_days[d].get("source"),
+                    "rows": len(reusable_rows[d]) + existing_statistic[d],
+                    "source": existing_entries[d].get("source"),
                     "empty_kind": (
                         "no_data_for_date" if not reusable_rows[d] else None
                     ),
                     "error_kind": None,
                     "error": None,
                     "partial_error": None,
+                    "detail_rows": detail_meta[d]["rows"],
+                    "detail_status": "ok",
+                    "detail_missing": 0,
+                    "detail_source": (
+                        _ledger_detail_value(existing_entries[d], "detail_source")
+                        or existing_entries[d].get("source")
+                    ),
                     "preserved": True,
-                    "source_detail": {"preserved_official": True},
+                    "source_detail": source_detail,
                 })
                 progress.update(i, date=d, preserved=1)
                 continue
+            detail_repair = not force and d in reusable_rows
             r = fetch_lhb_day(
                 d, lhb_adapters=adapters, history=True, staging_rows=staging_rows,
-                lhb_fallback=other_markets_fallback,
+                lhb_fallback=other_markets_fallback, detail_only=detail_repair,
+                basic_source=existing_entries[d].get("source") if detail_repair else None,
             )
             lhb = r.get("lhb") or {}
             entry = {
@@ -308,16 +357,38 @@ def fetch_lhb_backfill(
                 "error_kind": lhb.get("error_kind"),
                 "error": lhb.get("error"),
                 "partial_error": lhb.get("partial_error"),
+                "detail_rows": lhb.get("detail_rows", 0),
+                "detail_status": lhb.get("detail_status", "missing"),
+                "detail_missing": lhb.get("detail_missing", 0),
+                "detail_source": lhb.get("detail_source"),
             }
             if lhb.get("source_detail"):
                 entry["source_detail"] = lhb["source_detail"]
+            if lhb.get("detail_repaired"):
+                entry["detail_repaired"] = True
             results.append(entry)
             progress.update(
                 i, date=d, status=entry["status"], rows=entry["rows"],
                 source=entry["source"],
             )
-    failed = [r for r in results if r["status"] != "ok"]
-    status = aggregate_batch_status(total, len(failed))
+    hard_failed = [r for r in results if r["status"] != "ok"]
+    partial_days = [
+        r for r in results if r["status"] == "ok" and r.get("partial_error")
+    ]
+    failed = hard_failed + partial_days
+    status = (
+        "partial_error" if partial_days and not hard_failed
+        else aggregate_batch_status(total, len(failed))
+    )
+    detail_rows = sum(r.get("detail_rows", 0) for r in results)
+    detail_missing = sum(r.get("detail_missing", 0) for r in results)
+    detail_status = (
+        "ok" if all(r.get("detail_status") == "ok" for r in results)
+        else "partial" if detail_rows or any(
+            r.get("detail_status") == "partial" for r in results
+        )
+        else "missing"
+    )
     return {
         "tool": tool,
         "status": status,
@@ -329,6 +400,9 @@ def fetch_lhb_backfill(
         "succeeded": total - len(failed),
         "failed": len(failed),
         "empty_days": sum(1 for r in results if r.get("empty_kind")),
+        "detail_rows": detail_rows,
+        "detail_status": detail_status,
+        "detail_missing": detail_missing,
         "results": results,
     }
 

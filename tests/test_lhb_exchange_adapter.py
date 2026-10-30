@@ -153,6 +153,43 @@ def test_fetch_lhb_merges_three_exchanges_and_tables(monkeypatch):
     assert out["lhb_yyb_most"][0]["buy_amount"] == pytest.approx(52600.0)
 
 
+def test_fetch_lhb_maps_szse_and_sse_details_but_excludes_bse(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+
+    out = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None).fetch_lhb(TODAY)
+    details = out["lhb_stock_detail"]
+
+    assert {row["stock_code"] for row in details} == {"000530", "301001", "600302"}
+    assert not {"920454", "920096"} & {row["stock_code"] for row in details}
+    szse_buy = next(
+        row for row in details
+        if row["stock_code"] == "000530" and row["seat_type"] == "buy"
+        and row["seat_name"] == "机构专用"
+    )
+    assert szse_buy == {
+        "trade_date": TODAY,
+        "stock_code": "000530",
+        "lhb_reason": "日价格振幅达到18.39%",
+        "seat_name": "机构专用",
+        "seat_code": None,
+        "seat_type": "buy",
+        "amount": pytest.approx(2601.5072),
+        "amount_percent": None,
+        "buy_count_3m": None,
+        "sell_count_3m": None,
+        "buy_amount": pytest.approx(2601.5072),
+        "sell_amount": None,
+        "net_buy_amount": None,
+    }
+    sse_sell = next(row for row in details if row["stock_code"] == "600302"
+                    and row["seat_type"] == "sell")
+    assert sse_sell["buy_amount"] is None
+    assert sse_sell["sell_amount"] == pytest.approx(352.2574)
+    assert sse_sell["net_buy_amount"] is None
+    assert sse_sell["amount"] == pytest.approx(352.2574)
+
+
 def test_single_market_failure_is_partial(monkeypatch):
     _patch_markets(monkeypatch)
     _patch_akshare(monkeypatch)
@@ -304,6 +341,49 @@ def test_szse_persistent_summary_page_failure_stops_after_three_attempts(monkeyp
     out = adapter.fetch_lhb(TODAY)
     assert attempts.count(2) == 3
     assert any("szse" in error for error in out["errors"])
+
+
+def test_szse_primary_reuses_ths_page_for_details(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def fetch_lhb(self, trade_date):
+            basic = _basic_row(
+                trade_date, "000530", "同花顺深圳", "深圳主采", [],
+                [{"seat": "卖一", "yuan": 10000.0}], day_amount=1234.0,
+            )
+            return {
+                "lhb_basic": [basic],
+                "lhb_stock_detail": [{
+                    "trade_date": trade_date, "stock_code": "000530",
+                    "lhb_reason": "深圳主采", "seat_name": "同花顺席位",
+                    "seat_code": "ths-seat-1", "seat_type": "sell", "amount": 1.0,
+                    "amount_percent": None, "buy_count_3m": None,
+                    "sell_count_3m": None, "buy_amount": 2.0,
+                    "sell_amount": 1.0, "net_buy_amount": 1.0,
+                }],
+                "detail_errors": ["另一深圳父记录: 席位重复"],
+            }
+
+        def fetch_lhb_basic(self, _trade_date):
+            raise AssertionError("不得为 basic 再请求一次同花顺页面")
+
+    adapter = ExchangeLhbAdapter(
+        pause_s=0.0, clock=lambda _s: None, szse_primary=FakeThs(),
+    )
+    out = adapter.fetch_lhb(TODAY)
+
+    ths_detail = next(
+        row for row in out["lhb_stock_detail"] if row["stock_code"] == "000530"
+    )
+    assert ths_detail["seat_code"] == "ths-seat-1"
+    assert ths_detail["buy_amount"] == pytest.approx(2.0)
+    assert any(row["stock_code"] == "600302" for row in out["lhb_stock_detail"])
+    assert out["detail_errors"] == ["另一深圳父记录: 席位重复"]
+    assert "errors" not in out
 
 
 def test_szse_primary_uses_ths_without_calling_official(monkeypatch):

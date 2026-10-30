@@ -33,6 +33,9 @@
 - 适配器契约随之收窄：`ExchangeLhbAdapter.fetch_lhb` 返回
   basic/yyb_capital/yyb_most 三子表；`lhb_stock_statistic` 从
   `BOARD_SECTION_TABLES` 移除（不再走适配器 upsert）。
+- 2026-10-30 补记（#137，ADR 0017）：`lhb_stock_detail` 已接入单日、close
+  与历史写路径；本 ADR 的 statistic 自算公式、窗口及 buy/sell_seat_count
+  恒 NULL 不变，不隐式升级为席位计数派生。
 
 ## Consequences
 

@@ -37,13 +37,21 @@ CREATE TABLE IF NOT EXISTS lhb_stock_detail (
     trade_date      text NOT NULL,
     stock_code      text NOT NULL,
     seat_name       text,
+    seat_code       text,
     seat_type       text,
-    amount          real,
+    amount          real,  -- 兼容列：seat_type=buy 时等于 buy_amount，sell 时等于 sell_amount
+    buy_amount      real,
+    sell_amount     real,
+    net_buy_amount  real,
     amount_percent  real,
     buy_count_3m    integer,
     sell_count_3m   integer,
     created_at      timestamp DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE lhb_stock_detail ADD COLUMN IF NOT EXISTS seat_code text;
+ALTER TABLE lhb_stock_detail ADD COLUMN IF NOT EXISTS buy_amount real;
+ALTER TABLE lhb_stock_detail ADD COLUMN IF NOT EXISTS sell_amount real;
+ALTER TABLE lhb_stock_detail ADD COLUMN IF NOT EXISTS net_buy_amount real;
 CREATE INDEX IF NOT EXISTS idx_lhb_detail_basic ON lhb_stock_detail (lhb_basic_id);
 CREATE INDEX IF NOT EXISTS idx_lhb_detail_date ON lhb_stock_detail (trade_date);
 CREATE INDEX IF NOT EXISTS idx_lhb_detail_seat ON lhb_stock_detail (seat_name);
@@ -56,7 +64,7 @@ CREATE TABLE IF NOT EXISTS lhb_stock_statistic (
     -- 原新浪 ggtj「近 60 日」窗口语义）按股聚合（库内 lhb_basic 派生，
     -- appear=窗口行数、buy/sell/net=窗口合计万元）；DELETE+INSERT 幂等可
     -- 重跑，窗口滑出/上游修订自愈。buy/sell_seat_count 恒 NULL：官方汇总
-    -- 无席位计数来源、不伪造（lhb_stock_detail 接线后才可派生）。新浪 ggtj
+    -- 无席位计数来源、不伪造；详情接线不隐式改变统计口径。新浪 ggtj
     -- 回归 `--check` 对拍校验位（tools_lhb._compare_statistic_snapshot），
     -- 不承载落库；trade_date 为快照交易日，业务键 (trade_date, stock_code)
     id              bigserial PRIMARY KEY,
