@@ -157,16 +157,18 @@ def test_ths_lhb_pauses_between_dates_and_stops_after_ban():
     assert sleeps == [20.0]
 
 
-def test_complex_page_multi_reason_cumulative_bse_and_security_filter():
-    rows = ThsLhbAdapter(
-        page_loader=lambda _url: COMPLEX_FIXTURE.read_text(encoding="utf-8").encode(
-            "gb18030"
-        ),
-        clock=lambda _s: None,
-    ).fetch_lhb_basic("20261020")
+def test_complex_page_multi_reason_cumulative_bse_and_non_a_basic():
+    html = COMPLEX_FIXTURE.read_text(encoding="utf-8").replace(
+        'stockcode="113001"', 'stockcode="180505"'
+    ).replace("示例转债(113001)", "中金杭州安居宁巢REIT(180505)")
+    out = ThsLhbAdapter(
+        page_loader=lambda _url: html.encode("gb18030"), clock=lambda _s: None
+    ).fetch_lhb("20261020")
+    rows = out["lhb_basic"]
 
-    assert len(rows) == 3
-    assert {"113001", "900901"}.isdisjoint(row["stock_code"] for row in rows)
+    assert len(rows) == 5
+    assert {"180505", "900901"} <= {row["stock_code"] for row in rows}
+    assert all(row["stock_code"] != "180505" for row in out["lhb_stock_detail"])
     multi = [row for row in rows if row["stock_code"] == "002164"]
     assert len(multi) == 2
     ordinary = next(row for row in multi if "连续三个交易日" not in row["lhb_reason"])

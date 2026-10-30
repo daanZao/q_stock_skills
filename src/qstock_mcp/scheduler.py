@@ -153,7 +153,7 @@ def cmd_close(date_arg: str | None,
         if name == "lhb" and section.get("detail_status") in ("partial", "missing")
     ]
     out = {
-        "status": "ok" if not failed and not partial else "error",
+        "status": "ok" if not failed else "error",
         "job": "close",
         "trade_date": result["trade_date"],
         "sections": result["sections"],
@@ -165,7 +165,7 @@ def cmd_close(date_arg: str | None,
         if result.get("error_kind"):
             out["error_kind"] = result["error_kind"]
     _emit(out)
-    return 0 if not failed and not partial else 1
+    return 0 if not failed else 1
 
 
 def cmd_morning(date_arg: str | None) -> int:
@@ -271,10 +271,7 @@ def cmd_lhb(
         result = fetch_lhb_day(date_arg, lhb_adapters=lhb_adapters)
     _emit({"job": tool, "mode": "fetch", **result})
     lhb = result.get("lhb") or {}
-    return 0 if (
-        lhb.get("status") == "ok"
-        and lhb.get("detail_status") not in ("partial", "missing")
-    ) else 1
+    return 0 if lhb.get("status") == "ok" else 1
 
 
 def cmd_sw_boards(

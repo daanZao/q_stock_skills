@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, default_lhb_adapters, default_lhb_history_adapters
-from .adapters._bse_codes import market_of
 from .adapters.lhb_exchange_adapter import ExchangeLhbAdapter
 from .adapters.lhb_ths_adapter import ThsLhbAdapter
 from .adapters._lhb_sina import SinaLhbClient, seat_net
@@ -37,6 +36,7 @@ from .repository import (
 )
 from .tools_board import (
     _lhb_all_markets_failure_result,
+    _lhb_detail_key_sets,
     _merge_lhb_basic_fallback,
     fetch_board_snapshot,
 )
@@ -127,10 +127,7 @@ def _existing_lhb_inputs(
             details = select_board_rows(
                 conn, "lhb_stock_detail", "trade_date", "stock_code", d
             )
-            expected_keys = {
-                (row["stock_code"], row.get("lhb_reason") or "")
-                for row in rows if market_of(row["stock_code"]) != "bj"
-            }
+            expected_keys, _unknown_keys = _lhb_detail_key_sets(rows)
             actual_keys = select_lhb_detail_parent_keys(conn, d)
             ledger_detail = entry.get("detail") or ""
             detail_incomplete = any(
@@ -366,6 +363,8 @@ def fetch_lhb_backfill(
                 entry["source_detail"] = lhb["source_detail"]
             if lhb.get("detail_repaired"):
                 entry["detail_repaired"] = True
+            if lhb.get("non_detail_partial_error"):
+                entry["non_detail_partial_error"] = lhb["non_detail_partial_error"]
             results.append(entry)
             progress.update(
                 i, date=d, status=entry["status"], rows=entry["rows"],
@@ -373,7 +372,8 @@ def fetch_lhb_backfill(
             )
     hard_failed = [r for r in results if r["status"] != "ok"]
     partial_days = [
-        r for r in results if r["status"] == "ok" and r.get("partial_error")
+        r for r in results
+        if r["status"] == "ok" and r.get("non_detail_partial_error")
     ]
     failed = hard_failed + partial_days
     status = (

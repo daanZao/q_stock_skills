@@ -102,23 +102,25 @@ fetch/backfill 模式 JSON 示例：
 
 - fetch：`lhb.status` ok / error（三态结构化：`error_kind` +
   `attempted_sources`，lhb 永不进核心集、不触发整批中止）；营业部榜或沪深席位
-  详情部分失败时 status 仍 ok 但带 `partial_error`，其中详情 partial/missing
-  使 CLI 退出码为 1，营业部榜子项维持原退出语义。`rows` 保持
-  basic/statistic/营业部榜合计口径，详情由 `detail_rows` 单列；`detail_status`
-  为 ok/partial/missing，`detail_missing` 只统计沪深父记录，`detail_source`
-  记录详情实际来源。statistic 由库内自算（见数据口径），无子项失败语义。
+  详情部分失败时 status 仍 ok 但带 `partial_error`，详情 partial/missing 只作
+  降级告警，不单独使 CLI 失败。`rows` 保持 basic/statistic/营业部榜合计口径，
+  详情由 `detail_rows` 单列；`detail_status` 为 ok/partial/missing，
+  `detail_missing` 只统计需要详情的沪深 A 股父记录，`detail_source` 记录详情实际来源。
+  statistic 由库内自算（见数据口径），无子项失败语义。
 - backfill：`status` ok / partial_error / error；`results` 逐日包含上述详情字段。
-  `empty_days` 统计上游确认无数据日（非故障）。深圳主采时
-  `source_detail.szse_primary` 记录请求源、实际源和行数，其他市场后备由
-  `source_detail.fallback` 记录；完整日保留时 `preserved=true`，只补详情时
-  `detail_repaired=true`。采集台账分别记录 basic 与 detail 的行数、完整性及来源。
+  仅详情缺口时批次 status 为 ok；basic 等硬失败仍按既有规则汇总。`empty_days`
+  统计上游确认无数据日（非故障）。深圳主采时 `source_detail.szse_primary`
+  记录请求源、实际源和行数，其他市场后备由 `source_detail.fallback` 记录；
+  完整日保留时 `preserved=true`，只补详情时 `detail_repaired=true`。采集台账分别
+  记录 basic 与 detail 的行数、完整性及来源。
 - check：`status` ok / mismatch / error；`mismatch_count` 为差异股数
   （basic 对拍 + statistic 校验位差异都计入整体 status）；
   `results` 携带双方原值供人工核对。
 - 批次摘要与逐日结果均含 `detail_rows`、`detail_status`、`detail_missing`。
-- `close` 输出增加 `partial_sections`；LHB 详情 partial/missing 时列入并返回退出码 1，
-  其他 section 的既有部分失败语义不变。
-- 退出码：0 = ok（含 empty 无数据）；1 = 失败/详情部分失败/差异/输入非法；2 = 参数错误。
+- `close` 输出增加 `partial_sections`；LHB 详情 partial/missing 时列入作为告警，
+  但不单独改变 close 的 ok 状态或退出码，其他 section 的既有失败语义不变。
+- 退出码：0 = ok（含 empty 无数据、LHB 详情缺失或部分可用）；1 = 失败/差异/输入非法；
+  2 = 参数错误。
 
 ## 数据口径
 
@@ -146,13 +148,17 @@ fetch/backfill 模式 JSON 示例：
   statistic。basic/详情均完整缺省保留；basic 完整但详情缺失或部分失败时只补
   详情；其余日期按日完整替换 basic/详情并在同一事务重算 statistic；`--force`
   同时重抓两者。basic 单所缺失或双源失败仍保留旧日，详情部分失败则保存有效
-  basic/详情并报告 `partial_error`。两个营业部累计榜没有历史日期参数，历史任务不写。
+  basic/详情并报告 `partial_error`，但仅详情缺口不使批次失败。两个营业部累计榜
+  没有历史日期参数，历史任务不写。
 - **lhb_stock_detail（席位级表）**：按 basic 父业务键整体替换，重复执行不产生
   重复子行。`seat_type=buy/sell`，兼容列 `amount` 等于方向金额；新增可空
   `seat_code`、`buy_amount`、`sell_amount`、`net_buy_amount`。同花顺保留
   `orgcode`、双向金额与原始净额；官方源缺席位代码、反向金额或原始净额时置
   NULL，不算来源能力错误。百分比和三个月计数无可靠来源，恒 NULL。重复席位或
   金额矛盾使该父记录的新详情整组拒收，其他父记录继续。
+- **非 A 股与未知代码**：允许保留 basic；详情分类遇到无法识别代码时跳过相关
+  详情并记录告警，不抛出异常中止采集，也不计入 `detail_missing`。该兼容不吞掉
+  basic 自身的抓取、解析或落库错误；长期代码分类口径见 issue #139。
 - **北交所**：历史行旧码自动归一化 920 新码（官方 248 条对照表，未覆盖的
   极少数旧码原样保留）；不保存席位详情且 `detail_missing` 不计北交所父记录。
   北交所特有的严重异常波动分类资金（yzycbdList）本期不接线。

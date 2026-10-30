@@ -111,6 +111,15 @@ def _basic_row(trade_date, code, name, reason, buy_seats, sell_seats,
     return row
 
 
+def _market_or_none(stock_code: str) -> str | None:
+    try:
+        return market_of(stock_code)
+    except FetchError as exc:
+        if exc.kind == "unsupported":
+            return None
+        raise
+
+
 class ExchangeLhbAdapter:
     """沪深北交易所官方龙虎榜适配器（BoardAdapter.fetch_lhb 契约）。
 
@@ -193,7 +202,7 @@ class ExchangeLhbAdapter:
                     ths_rows = primary_data["lhb_basic"]
                     primary_details = [
                         row for row in primary_data.get("lhb_stock_detail") or []
-                        if market_of(row["stock_code"]) == "sz"
+                        if _market_or_none(row["stock_code"]) == "sz"
                     ]
                     if primary_data.get("detail_errors"):
                         metadata["detail_errors"] = list(primary_data["detail_errors"])
@@ -202,7 +211,8 @@ class ExchangeLhbAdapter:
                 if any(row.get("trade_date") != trade_date for row in ths_rows):
                     raise FetchError("深圳主源返回日期错位")
                 szse_rows = [
-                    row for row in ths_rows if market_of(row["stock_code"]) == "sz"
+                    row for row in ths_rows
+                    if _market_or_none(row["stock_code"]) in (None, "sz")
                 ]
                 metadata["szse_primary"].update(
                     source=requested, rows=len(szse_rows)

@@ -72,6 +72,7 @@ from typing import Sequence
 
 from .adapters import (
     BoardAdapter,
+    FetchError,
     default_adapters,
     default_boards_adapters,
     default_index_spot_adapters,
@@ -338,18 +339,51 @@ def _lhb_market(stock_code: str) -> str:
     return {"sh": "sse", "sz": "szse", "bj": "bse"}[market_of(stock_code)]
 
 
+def _lhb_detail_market(stock_code: str) -> str | None:
+    try:
+        return market_of(stock_code)
+    except FetchError as exc:
+        if exc.kind == "unsupported":
+            return None
+        raise
+
+
+def _lhb_detail_key_sets(
+    rows: list[dict],
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    expected: set[tuple[str, str]] = set()
+    unknown: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (row["stock_code"], row.get("lhb_reason") or "")
+        market = _lhb_detail_market(row["stock_code"])
+        if market is None:
+            unknown.add(key)
+        elif market != "bj":
+            expected.add(key)
+    return expected, unknown
+
+
 def _validated_lhb_details(data: dict) -> tuple[list[dict], list[str]]:
     groups: dict[tuple[str, str], list[dict]] = {}
+    unknown: set[tuple[str, str]] = set()
+    errors = list(data.get("detail_errors") or [])
     for row in data.get("lhb_stock_detail") or []:
-        if market_of(row["stock_code"]) == "bj":
-            continue
         key = (row["stock_code"], row.get("lhb_reason") or "")
+        market = _lhb_detail_market(row["stock_code"])
+        if market is None:
+            unknown.add(key)
+            continue
+        if market == "bj":
+            continue
         groups.setdefault(key, []).append(row)
+    errors.extend(
+        f"{code} {reason}: 无法识别证券代码，跳过席位详情"
+        for code, reason in sorted(unknown)
+    )
     invalid = {
         (row["stock_code"], row.get("lhb_reason") or "")
         for row in data.get("detail_invalid") or []
     }
-    errors = list(data.get("detail_errors") or [])
     for key, rows in groups.items():
         if key in invalid:
             continue
@@ -796,11 +830,9 @@ def fetch_board_snapshot(
             if r["attempted_sources"]:
                 res["attempted_sources"] = r["attempted_sources"]
             if name == "lhb":
-                expected_details = {
-                    (row["stock_code"], row.get("lhb_reason") or "")
-                    for row in detail_parent_rows
-                    if market_of(row["stock_code"]) != "bj"
-                }
+                expected_details, unknown_details = _lhb_detail_key_sets(
+                    detail_parent_rows
+                )
                 actual_details = {
                     (row["stock_code"], row.get("lhb_reason") or "")
                     for row in data.get("lhb_stock_detail") or []
@@ -818,12 +850,20 @@ def fetch_board_snapshot(
                     "detail_source": detail_source,
                 })
                 detail_errors = list(data.get("detail_errors") or [])
+                detail_errors.extend(
+                    f"{code} {reason}: 无法识别证券代码，跳过席位详情"
+                    for code, reason in sorted(unknown_details)
+                )
                 if detail_missing:
                     detail_errors.append(f"席位详情缺失 {detail_missing} 个父记录")
-                partial_errors = list(data.get("errors") or []) + detail_errors
+                detail_errors = list(dict.fromkeys(detail_errors))
+                non_detail_errors = list(data.get("errors") or [])
+                partial_errors = non_detail_errors + detail_errors
                 if partial_errors:
                     # 子项或席位详情部分失败：拿到什么落什么，但失败原因必须报告
                     res["partial_error"] = "; ".join(partial_errors)
+                if non_detail_errors:
+                    res["non_detail_partial_error"] = "; ".join(non_detail_errors)
                 if not data["lhb_basic"]:
                     res["empty_kind"] = "no_data_for_date"
                     res["note"] = _LHB_EMPTY_NOTE

@@ -424,6 +424,43 @@ def test_szse_primary_uses_ths_without_calling_official(monkeypatch):
     assert "errors" not in out
 
 
+def test_szse_primary_preserves_non_a_basic(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+
+    class FakeThs:
+        name = "ths_fake"
+
+        def fetch_lhb(self, trade_date):
+            return {
+                "lhb_basic": [
+                    _basic_row(trade_date, "000530", "同花顺深圳", "深圳主采", [], []),
+                    _basic_row(
+                        trade_date, "180505", "中金杭州安居宁巢REIT", "REIT上榜", [], []
+                    ),
+                    _basic_row(trade_date, "600302", "沪市仍用官方", "沪市主采", [], []),
+                ],
+                "lhb_stock_detail": [],
+            }
+
+    adapter = ExchangeLhbAdapter(
+        pause_s=0.0, clock=lambda _s: None, szse_primary=FakeThs(),
+    )
+
+    def unexpected_szse(_trade_date):
+        raise AssertionError("同花顺主采成功时不请求深交所官方")
+
+    monkeypatch.setattr(adapter, "_szse_basic", unexpected_szse)
+    out = adapter.fetch_lhb(TODAY)
+
+    basic = {row["stock_code"]: row for row in out["lhb_basic"]}
+    assert basic["180505"]["stock_name"] == "中金杭州安居宁巢REIT"
+    assert basic["000530"]["stock_name"] == "同花顺深圳"
+    assert basic["600302"]["buy_amount"] == pytest.approx(293.5474)
+    assert out["szse_primary"]["rows"] == 2
+    assert "errors" not in out
+
+
 def test_szse_primary_failure_falls_back_to_official(monkeypatch):
     _patch_markets(monkeypatch)
     _patch_akshare(monkeypatch)

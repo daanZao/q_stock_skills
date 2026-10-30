@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 
-from ._bse_codes import market_of, normalize_stock_code
+from ._bse_codes import normalize_stock_code
 from ._lhb_detail import seat_problem
 from ._num import _money_cn
 from .base import FetchError
@@ -31,9 +31,7 @@ _BLOCK_RE = re.compile(
     r"[^>]*>(.*?)(?=<div\b[^>]*\bclass=\"stockcont\"|</body>)",
     re.IGNORECASE | re.DOTALL,
 )
-_TARGET_CODE_RE = re.compile(
-    r"^(?:(?:00[0-3]|30[01]|60[0135]|68[89])\d{3}|[48]\d{5}|920\d{3})$"
-)
+_SZSE_DETAIL_CODE_RE = re.compile(r"^(?:00[0-3]|30[01])\d{3}$")
 
 
 def _plain(fragment: str) -> str:
@@ -124,8 +122,6 @@ def parse_lhb_html(html: str, trade_date: str) -> dict:
     seen: set[tuple[str, str]] = set()
     for match in _BLOCK_RE.finditer(html):
         raw_code, block = match.groups()
-        if not _TARGET_CODE_RE.match(raw_code):
-            continue
         title = re.search(r"<p[^>]*>(.*?)</p>", block, re.DOTALL)
         reason_match = re.search(
             rf"(.*?)\({raw_code}\)明细：(.*)", _plain(title.group(1)) if title else ""
@@ -163,7 +159,7 @@ def parse_lhb_html(html: str, trade_date: str) -> dict:
             ),
         }
         rows.append(basic)
-        if market_of(code) == "sz":
+        if _SZSE_DETAIL_CODE_RE.match(code):
             try:
                 details.extend(_detail_rows(block, basic))
             except FetchError as exc:
