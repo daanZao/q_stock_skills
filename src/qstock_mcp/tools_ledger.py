@@ -29,9 +29,9 @@ def query_collection_log(
     """采集台账查询：按日期/section/状态过滤，按完成时间倒序返回。
 
     trade_date: yyyymmdd 或 yyyy-mm-dd；status: ok/empty/error（ADR 0007
-    三态同词汇）；limit 缺省 100、上限 500（超出截断而非报错）；返回体量
-    50KB 硬上限，超限从最旧行起截断并带 truncated 标记。
-    空结果 count:0 非错误。
+    三态同词汇）/ planned_absent（第四态占位，issue #113）；limit 缺省 100、
+    上限 500（超出截断而非报错）；返回体量 50KB 硬上限，超限从最旧行起截断并带
+    truncated 标记。空结果 count:0 非错误。
     """
     tool = "query_collection_log"
     params = {

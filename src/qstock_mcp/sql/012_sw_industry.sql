@@ -6,7 +6,11 @@
 -- 新库建表与现库迁移——industry_code 改名 board_code、加 source_system 回填 'sw'、
 -- 主键扩为四元组，已有行不丢。幂等：迁移以旧列 industry_code 是否存在为条件，
 -- 重复执行不重复迁移。
--- 承载：写 import_board_classification/import_sw_industry_meta、close 批概念成分积累（'em' 体系）；读 query_sw_board_daily（point-in-time 归属）
+-- 承载：写 import_board_classification/import_sw_industry_meta、refresh_sw_dict（'sw' 体系）；
+-- 读 query_sw_board_daily（point-in-time 归属，只读 source_system='sw'）。
+-- 'em' 体系（东财概念成分，issue #84 预留）写路径已随概念维度退役摘除
+-- （issue #119：THS 概念成分端点准入闸未过，#106 弃用方案）——存量 'em' 行
+-- 保留只读，任何采集/落库路径不得再写入该体系。
 
 -- 行业名称表
 CREATE TABLE IF NOT EXISTS sw_industry_meta (

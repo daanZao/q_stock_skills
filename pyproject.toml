@@ -11,7 +11,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "mypy"]
 # 真实数据源库：适配层懒加载，未安装时对应源报明确错误
-sources = ["efinance", "akshare", "baostock"]
+# curl_cffi：北交所 bseinfo.net WAF 需 Chrome TLS 指纹（issue #114，#107 实测裸 urllib 被 302 拦）
+# efinance 已随东财链路整体退役（issue #121，spec #111 收口），不再列入安装面
+sources = ["akshare", "baostock", "curl_cffi"]
 # 成分字典文件导入（issue #73）：解析层懒加载，未安装时报明确错误
 classify = ["xlrd>=2"]
 

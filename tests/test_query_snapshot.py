@@ -16,7 +16,7 @@ def _seed(pg_test, trade_date: str):
     conn = psycopg2.connect(pg_test)
     ensure_schema(conn)
     conn.close()
-    fetch_market_snapshot(adapters=[FakeSnapshotAdapter("efinance", trade_date=trade_date)])
+    fetch_market_snapshot(adapters=[FakeSnapshotAdapter("tencent", trade_date=trade_date)])
 
 
 def test_query_by_date_returns_self_describing_rows(pg_test):
@@ -29,7 +29,7 @@ def test_query_by_date_returns_self_describing_rows(pg_test):
     assert result["count"] == len(SNAPSHOT_ROWS)
     row = result["rows"][0]
     assert row["trade_date"] == "20240105"
-    assert row["source"] == "efinance"
+    assert row["source"] == "tencent"
     assert {r["stock_code"] for r in result["rows"]} == {"600519", "000001"}
 
 

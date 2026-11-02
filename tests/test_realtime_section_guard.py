@@ -137,7 +137,7 @@ def test_indices_row_date_mismatch_rejected(pg_test):
 
 
 def test_indices_row_date_match_ok(pg_test):
-    """行级日期与请求日期一致（efinance 最新交易日=当日）正常落库。"""
+    """行级日期与请求日期一致（源行级日期=当日）正常落库。"""
     _init(pg_test)
     fresh = [{**row, "trade_date": None} for row in INDEX_ROWS]
     result = fetch_board_snapshot(

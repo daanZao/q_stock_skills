@@ -4,6 +4,11 @@ record_collection 由 tools_* 各写库路径调用：每次采集动作落一�
 （sql/013_collection_log.sql，append-only 全历史保留）。台账写入失败只记
 log、绝不拖垮主流程（台账是审计设施，不是业务前置）。
 
+status 词表 = 采集结果三态（ok/empty/error，ADR 0007）+ 编排第四态
+planned_absent（issue #113，spec #111/#102）：已定方向待接线的 section
+占位缺席——非抓取结果、非故障，消费方（复盘就绪归因）据此区分
+"计划缺席"与"未采集/采集失败/上游无数据"。
+
 select_collection_log 供 query_collection_log 工具（tools_ledger）与调度 CLI
 读取；复盘就绪检查"先读台账而非探测猜测"的依据即本表。
 """
@@ -13,8 +18,9 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-# status 三态词汇（ok/empty/error）与 error_kind 同 ADR 0007 三态契约
-LEDGER_STATUSES = ("ok", "empty", "error")
+# status 词表：ok/empty/error（ADR 0007 三态）+ planned_absent（第四态占位，
+# issue #113）。取词表外值属编程错误，fail-fast 抛 ValueError（不落账、不吞没）。
+LEDGER_STATUSES = ("ok", "empty", "error", "planned_absent")
 
 # 逐源明细摘要的长度上限：台账是可审计摘要而非完整错误转储
 _DETAIL_MAX = 500
@@ -34,6 +40,21 @@ def summarize_attempted(attempted: list[dict] | None) -> str | None:
         f"{a.get('source')}:{a.get('failure_kind')}:{a.get('error')}" for a in attempted
     )
     return text[:_DETAIL_MAX]
+
+
+def already_collected(conn, trade_date: str, section: str) -> bool:
+    """当日该 section 已有 ok/empty 台账行（采集已成功完成）。
+
+    低频纪律（issue #120，THS 涨停池"每日每池一次"）守卫依据：采集已成功
+    的 section 当日不再打上游；error 不在其列（失败允许当日修复后重跑）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM collection_log WHERE trade_date = %s"
+            " AND section = %s AND status IN ('ok', 'empty') LIMIT 1",
+            (trade_date, section),
+        )
+        return cur.fetchone() is not None
 
 
 def record_collection(

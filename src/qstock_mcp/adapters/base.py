@@ -1,6 +1,7 @@
 """数据源适配层接缝：协议 + 错误类型 + 代码工具。
 
-真实适配器（efinance/akshare/baostock）与测试注入的 fake 都实现同一协议：
+真实适配器（tencent/sina/akshare/baostock 及 lhb/ths/sw 专用适配器）与测试
+注入的 fake 都实现同一协议：
     name: str
     fetch_daily(stock_code, start, end, adj) -> list[bar]
 bar 为 dict，键见 BAR_FIELDS；trade_date 为 yyyymmdd 字符串，数值缺失为 None。
@@ -57,7 +58,7 @@ STOCK_LIST_FIELDS = ("stock_code", "stock_name")
 
 # 盘面快照（issue #5）：各 section 行 dict 的键集，与落库表列一一对应（日期列除外，
 # 见 repository.BOARD_SECTION_TABLES）。行可自带日期键（trade_date/fetch_date）覆盖
-# 工具层传入的日期（如 lhb_basic 的"上榜日"、efinance 指数的"最新交易日"）。
+# 工具层传入的日期（如 lhb_basic 的"上榜日"、指数快照源的"最新交易日"列）。
 INDEX_FIELDS = (
     "index_code",
     "index_name",
@@ -109,6 +110,8 @@ ZT_POOL_FIELDS = (
     "industry",
     "dt_price",
     "zb_info",
+    "sealed_amount",
+    "reason_type",
 )
 
 STRONG_FIELDS = (
@@ -136,6 +139,19 @@ LHB_BASIC_FIELDS = (
     "buy_amount",
     "sell_amount",
     "total_amount",
+)
+
+LHB_DETAIL_FIELDS = (
+    "seat_name",
+    "seat_code",
+    "seat_type",
+    "amount",
+    "amount_percent",
+    "buy_count_3m",
+    "sell_count_3m",
+    "buy_amount",
+    "sell_amount",
+    "net_buy_amount",
 )
 
 LHB_STATISTIC_FIELDS = (
@@ -181,7 +197,21 @@ class FetchError(RuntimeError):
 
     def __init__(self, msg: str, *, kind: str | None = None):
         self.kind = kind
+        self.source_meta: dict | None = None
         super().__init__(msg)
+
+
+def import_akshare():
+    """akshare 懒加载（可选依赖 [sources]）：未安装时抛 FetchError。
+
+    akshare 只在真实抓取路径用到，测试注入 fake 不触第三方库，故 import 推迟
+    到调用点。akshare_adapter 与 sina_adapter 共用此入口（issue #112）。
+    """
+    try:
+        import akshare as ak
+    except ImportError as e:
+        raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
+    return ak
 
 
 # 连接级故障（ADR 0007）：请求未获得任何 HTTP 响应——连接重置、TLS 后空响应、
@@ -201,6 +231,10 @@ _CONNECTION_ERROR_NAMES = frozenset(
         "RemoteDisconnected",
         "IncompleteRead",
         "BadStatusLine",
+        # urllib（issue #112 腾讯薄封装）：URLError 表示请求未拿到响应
+        # （DNS/连接重置/TLS 断连/超时），HTTPError 是其子类但类名不同，
+        # 已收到状态码的失败仍归 other
+        "URLError",
         # requests / urllib3
         "ConnectTimeout",
         "ReadTimeout",
@@ -314,32 +348,6 @@ class IndexDailyAdapter(Protocol):
     ) -> list[dict]: ...
 
 
-class BoardHistoryAdapter(Protocol):
-    """板块历史 K 线（issue #84 回补）协议：start/end 为 yyyymmdd 闭区间。
-
-    不复权（板块行情无复权语义）；空区间返回 [] 而非错误；by-design 不支持
-    该能力的源抛 FetchError(kind="unsupported")（不参与 fallback 故障判定）。
-    """
-
-    name: str
-
-    def fetch_board_history(
-        self, board_type: str, board_name: str, start: str, end: str
-    ) -> list[dict]: ...
-
-
-class BoardConsAdapter(Protocol):
-    """板块成分（issue #84 概念成分积累）协议：按板块名取成分股列表。
-
-    返回行至少含 stock_code；空列表表示该板块无成分，不是错误；不支持的源
-    抛 FetchError(kind="unsupported")。
-    """
-
-    name: str
-
-    def fetch_board_cons(self, board_name: str) -> list[dict]: ...
-
-
 class AStockDailyAdapter(Protocol):
     """全市场单日 A 股日线一把抓（issue #83 次晨批）协议：trade_date 为 yyyymmdd。
 
@@ -352,6 +360,37 @@ class AStockDailyAdapter(Protocol):
     def fetch_astock_daily(self, trade_date: str) -> list[dict]: ...
 
 
+class SwBoardsAdapter(Protocol):
+    """申万官网板块能力（issue #118，spec #111）协议。
+
+    SwSResearchAdapter 实现：boards 行业段主承载（fetch_boards 见
+    BoardAdapter 协议）+ 调度 CLI 申万专属能力。申万单源无 fallback 链，
+    失败一律抛 FetchError；行结构见 _sw_board 映射（落库单位万元/股，
+    ADR 0006/0008）。
+
+    fetch_sw_board_list：申万双级板块清单（board_code/board_name/level），
+    回补与对拍的目标集。
+    fetch_sw_board_history：trend 指数全历史（1999 起，T+1）按 board
+    （board_code/board_name/level 的 dict）+ yyyymmdd 闭区间取数，行自带
+    trade_date；空区间返回 []（非错误）。
+    fetch_sw_board_analysis：每日分析报表（T+1）双级一把抓，yymmdd 闭区间，
+    行键见 sw_board_valuation 表（换手率/PE/PB/流通市值/股息率）。
+    fetch_sw_class_file：成分分类 xls 直链下载（成分字典在线刷新源）。
+    """
+
+    name: str
+
+    def fetch_sw_board_list(self) -> list[dict]: ...
+
+    def fetch_sw_board_history(
+        self, board: dict, start: str, end: str
+    ) -> list[dict]: ...
+
+    def fetch_sw_board_analysis(self, start: str, end: str) -> list[dict]: ...
+
+    def fetch_sw_class_file(self, url: str) -> bytes: ...
+
+
 class DataAdapter(
     DailyAdapter,
     SnapshotAdapter,
@@ -359,16 +398,19 @@ class DataAdapter(
     FundamentalsAdapter,
     ListAdapter,
     IndexDailyAdapter,
-    BoardHistoryAdapter,
-    BoardConsAdapter,
     Protocol,
 ):
-    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单、指数日线与
-    板块历史/成分的适配器（fallback 链元素类型）。"""
+    """同时支持日线、全市场快照、盘面快照、基本面透传、股票清单与指数日线的
+    适配器（fallback 链元素类型；板块历史回补协议随东财 push2his 回补退役，
+    issue #121，已从本复合协议摘除）。"""
 
 
 def is_bse_code(stock_code: str) -> bool:
-    """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。"""
+    """北交所代码：4/8/9 开头（baostock 不支持，需明确拒绝）。
+
+    baostock 适配器的粗粒度拒绝守卫；精确 A 股市场路由见
+    `adapters/_bse_codes.market_of`（900xxx 沪 B 股不属北交所，ADR 0007 补记）。
+    """
     return stock_code[:1] in ("4", "8", "9")
 
 

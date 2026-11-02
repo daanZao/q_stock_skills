@@ -41,7 +41,7 @@ def _unsupported_exc(source: str) -> FetchError:
 def test_all_connection_failures_classified_upstream_unreachable(pg_test):
     _init(pg_test)
     adapters = [
-        FakeSnapshotAdapter("efinance", fail_times=99, exc=_conn_exc("efinance")),
+        FakeSnapshotAdapter("tencent", fail_times=99, exc=_conn_exc("tencent")),
         FakeSnapshotAdapter("akshare", fail_times=99, exc=_conn_exc("akshare")),
         FakeSnapshotAdapter("baostock", fail_times=99, exc=_unsupported_exc("baostock")),
     ]
@@ -50,12 +50,12 @@ def test_all_connection_failures_classified_upstream_unreachable(pg_test):
     assert result["error_kind"] == "upstream_unreachable"
     assert result["retry_advice"]  # 重试建议：稍后重试
     attempted = {a["source"]: a for a in result["attempted_sources"]}
-    assert attempted["efinance"]["failure_kind"] == "connection"
+    assert attempted["tencent"]["failure_kind"] == "connection"
     assert attempted["akshare"]["failure_kind"] == "connection"
     # by-design 不支持不算连接级故障，但仍携带原始报错
     assert attempted["baostock"]["failure_kind"] == "unsupported"
     assert "不支持全市场快照" in attempted["baostock"]["error"]
-    assert "Connection aborted" in attempted["efinance"]["error"]
+    assert "Connection aborted" in attempted["tencent"]["error"]
     assert "rows_upserted" not in result
 
 
@@ -63,20 +63,20 @@ def test_any_connection_failure_suffices_for_unreachable(pg_test):
     """多源混合失败：一条源连接级故障 + 一条源其他故障 → upstream_unreachable。"""
     _init(pg_test)
     adapters = [
-        FakeSnapshotAdapter("efinance", fail_times=99, exc=_conn_exc("efinance")),
-        FakeSnapshotAdapter("akshare", fail_times=99),  # 普通 FetchError("boom")
+        FakeSnapshotAdapter("tencent", fail_times=99, exc=_conn_exc("tencent")),
+        FakeSnapshotAdapter("tencent_rank", fail_times=99),  # 普通 FetchError("boom")
     ]
     result = fetch_market_snapshot(adapters=adapters)
     assert result["status"] == "error"
     assert result["error_kind"] == "upstream_unreachable"
     kinds = {a["source"]: a["failure_kind"] for a in result["attempted_sources"]}
-    assert kinds == {"efinance": "connection", "akshare": "other"}
+    assert kinds == {"tencent": "connection", "tencent_rank": "other"}
 
 
 def test_non_connection_failures_classified_fetch_failed(pg_test):
     """收到响应后的失败（非连接级）不属 upstream_unreachable，无重试建议。"""
     _init(pg_test)
-    adapters = [FakeSnapshotAdapter(n, fail_times=99) for n in ("efinance", "akshare")]
+    adapters = [FakeSnapshotAdapter(n, fail_times=99) for n in ("tencent", "tencent_rank")]
     result = fetch_market_snapshot(adapters=adapters)
     assert result["status"] == "error"
     assert result["error_kind"] == "fetch_failed"
@@ -109,7 +109,7 @@ def test_baostock_snapshot_rejection_classified_unsupported(pg_test):
 def test_empty_result_is_no_data_for_date_not_error(pg_test):
     """上游正常响应空结果 → 该交易日无数据（非交易日/盘后未发布），非失败。"""
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", rows=[], trade_date="20240105")
+    ef = FakeSnapshotAdapter("tencent", rows=[], trade_date="20240105")
     result = fetch_market_snapshot(trade_date="20240105", adapters=[ef])
     assert result["status"] == "ok"
     assert result["rows_upserted"] == 0
@@ -121,7 +121,7 @@ def test_empty_result_is_no_data_for_date_not_error(pg_test):
 def test_empty_result_does_not_fall_back(pg_test):
     """空结果是成功语义：不触发 fallback，后续源不被调用。"""
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", rows=[], trade_date="20240105")
+    ef = FakeSnapshotAdapter("tencent", rows=[], trade_date="20240105")
     ak = FakeSnapshotAdapter("akshare", trade_date="20240105")
     result = fetch_market_snapshot(adapters=[ef, ak])
     assert result["status"] == "ok"
@@ -131,7 +131,7 @@ def test_empty_result_does_not_fall_back(pg_test):
 
 def test_normal_result_has_no_empty_kind(pg_test):
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", trade_date="20240105")
+    ef = FakeSnapshotAdapter("tencent", trade_date="20240105")
     result = fetch_market_snapshot(adapters=[ef])
     assert result["status"] == "ok"
     assert result["rows_upserted"] == len(SNAPSHOT_ROWS)
@@ -141,11 +141,11 @@ def test_normal_result_has_no_empty_kind(pg_test):
 def test_failed_source_detail_visible_on_success(pg_test):
     """fallback 成功时，失败源的连接级分类仍机器可读。"""
     _init(pg_test)
-    ef = FakeSnapshotAdapter("efinance", fail_times=99, exc=_conn_exc("efinance"))
+    ef = FakeSnapshotAdapter("tencent", fail_times=99, exc=_conn_exc("tencent"))
     ak = FakeSnapshotAdapter("akshare", trade_date="20240105")
     result = fetch_market_snapshot(adapters=[ef, ak])
     assert result["status"] == "ok"
     assert result["source"] == "akshare"
     (attempted,) = result["attempted_sources"]
-    assert attempted["source"] == "efinance"
+    assert attempted["source"] == "tencent"
     assert attempted["failure_kind"] == "connection"

@@ -8,9 +8,13 @@ tools_* 核心层、不经 MCP 协议层）。本文件给出 macOS launchd 的�
 
 | 子命令 | 用途 | 建议执行时机 |
 | --- | --- | --- |
-| `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集，逐 section 落采集台账；boards 成功时附带概念成分积累（cons → 成分字典 'em' 体系，独立成败、不影响退出码） | 交易日 15:30 之后（收盘数据就绪后） |
-| `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线（含 tradestatus/turn，volume 股、amount 万元）+ 7 大指数尾行缺失即补，逐部分落采集台账 | 交易日开盘前（如 08:30）；baostock 当日 bar 发布较晚，不要用于当日 |
-| `backfill [--start D] [--end D]` | 板块历史回补：push2his 板块 K 线回补 market_boards（默认窗口 = 前一交易日前推约 3 个月），回补行带 source='push2his' 标注 | 手动/灾难恢复；非定时任务 |
+| `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集，逐 section 落采集台账；boards 行业段走申万官网单源链（issue #118，三字段 planned_absent_fields 声明）；概念成分积累已随概念维度退役摘除（issue #119，准入闸未过） | 交易日 15:30 之后（收盘数据就绪后） |
+| `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线（含 tradestatus/turn，volume 股、amount 万元）+ 7 大指数尾行缺失即补 + 申万板块分析报表估值维度（issue #118，sw_board_valuation part，T+1），逐部分落采集台账 | 交易日开盘前（如 08:30）；baostock 当日 bar 发布较晚，不要用于当日 |
+| `backfill [--start D] [--end D] [--source sw]` | 板块历史回补（issue #121 定稿申万单源）：申万官网 trend 全历史回补申万双级口径行（issue #118，默认 19990101 起、深至 1999，回补行 source='swsresearch'）；东财 push2his 回补已随 issue #121 摘除 | 手动/灾难恢复；非定时任务。手册见 [`sw-boards-cli.md`](sw-boards-cli.md) |
+| `sw-boards [--date D] [--check] [--level 1\|2\|all] [--limit N]` | 申万板块固定入口（issue #118）：双级实时快照落库（收盘后=当日收盘截面）；`--check` 官网 vs 库内 vs 自算三方位对拍（不落库） | 收盘后；对拍按需。手册见 [`sw-boards-cli.md`](sw-boards-cli.md) |
+| `sw-dict [--url U]` | 申万成分字典在线刷新（issue #118）：官网分类 xls 清空重载 'sw' 体系（含北交所归属），幂等 | 每周一次（如周末）。手册见 [`sw-boards-cli.md`](sw-boards-cli.md) |
+| `daily [--codes A,B \| --all] [--date D] [--adj qfq\|hfq\|none] [--check]` | 个股日线固定入口（issue #112）：腾讯 → 新浪 → baostock 抓取落库；`--check` 三源直取对拍（不落库）；`--all` 从 stock_list 取全市场（缺省 1 秒/只节流） | 收盘后 19:30 左右补当日行（T+0）；`--all` 全量刷新建议独立低频任务。手册见 [`daily-source-cli.md`](daily-source-cli.md) |
+| `snapshot [--date D] [--check] [--limit N]` | 全市场快照固定入口（issue #116）：腾讯批量报价 → 腾讯 rank → 新浪三层链抓取落库；`--check` 三源直取对拍（不落库） | 收盘后（如 15:30 后、close 批前后）；盘中勿挂高频轮询。手册见 [`snapshot-source-cli.md`](snapshot-source-cli.md) |
 
 退出码：0 = 全部 section/part 成功（empty 无数据非故障）；1 = 任一
 section/part 失败或输入非法（明细在 stdout JSON 的 `failed_sections`/

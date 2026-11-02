@@ -1,150 +1,151 @@
 # q_stock_skills
 
-面向通用 AI agent 的证券数据与分析能力：一个 MCP 数据服务（Python，stdio 入口）+ 四个可加载的 agent skill。它是旧 B/S 分析系统 Server 端的替代品——数据由 agent 直接获取，分析结论由 agent 用 skill 产出并持久化。只做 A 股。
+**让 AI agent 直接获取 A 股数据、执行分析并沉淀结论。**
 
-**5 分钟全图认知见 [`docs/knowledge-graph.md`](docs/knowledge-graph.md)**；领域词汇见 [`CONTEXT.md`](CONTEXT.md)；设计决策见 [`docs/adr/`](docs/adr/)。
+一个项目，两类交付：可接入 Claude Code / Kimi Code 等客户端的 **MCP 数据服务**，以及四个可独立加载的 **agent skill**。数据落 PostgreSQL，采集与补录由统一的 `qstock-scheduler` CLI 执行。
 
-## 组成
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](pyproject.toml)
+[![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-336791)](src/qstock_mcp/sql/)
+[![MCP](https://img.shields.io/badge/Protocol-MCP-6f42c1)](src/qstock_mcp/server.py)
 
-- **MCP 数据服务**（`src/qstock_mcp`，14 个工具，五个能力面）：
-  - `init_database`：幂等建表 + 轻量初始化（股票清单/全市场快照/主要指数日线），可选 `backfill_history=True` 全量回溯
-  - `fetch_daily` / `query_daily`：个股日线抓取与查询，**查询自愈**——库内缺数据自动补抓头尾缺口；`days=N` 按交易日回溯
-  - `query_index_daily`：主要指数历史日线纯读（7 个指数白名单），数据由 `init_database` 写入
-  - `fetch_market_snapshot` / `query_snapshot`：全市场快照（约 5000+ 只），业务键幂等 upsert；抓取失败按三态错误契约分类上报（见下）；`query_snapshot` 支持服务端聚合（`aggregate=breadth,amount`，含分市场口径）与 `order_by+limit` 排序取前 N，大结果不必整表拉回
-  - `fetch_board_snapshot` / `query_board_data`：盘面快照（指数/板块/涨跌停池/强势股/龙虎榜），section 级独立成败；核心 section（指数/板块/涨跌停池/强势股）上游不可达即整体报错并携带 per-section 明细，中途失败不回滚、可按 section 分段重试；指数段按 7 大指数白名单定点补漏（含科创 50）
-  - `get_fundamentals`：基本面透传（proxy），不规格化、不落库
-  - `mx_query` / `mx_search` / `query_news`：妙想自然语言查数与资讯搜索（独立日配额，搜索落库 `news_items`）+ 库内资讯纯读
-  - `save_conclusion` / `query_conclusions`：分析结论读写，通用结论表 + JSON payload，同键 upsert
-- **四个 agent skill**（`skills/`，自包含，任何通用 AI agent 可加载）：
-  - `indicator-tools`：指标计算管道脚本（MA/MACD/BOLL/RSI/导数、corr 多标的相关性矩阵、vol_price 量价背离、promote 连板晋级率、deviation 个股对基准偏离值累计等），stdin 吃 `query_daily`/`query_index_daily` 输出、stdout 吐指标 JSON，纯标准库不触库
-  - `sepa`：SEPA 方法论判断，经 MCP 取数 + indicator-tools 管道算指标
-  - `limit-up-analysis`：涨停/连板分析——涨停归因（板块/大小票/业绩题材粗分）+ 连板梯队与晋级率 + 龙头点评，结论落库 `limit_up.close`，可单独调用
-  - `daily-review`：每日复盘编排（总体立场 ≤5 行递进摘要 + 六节：指数表现/板块轮动（含 5/10 日趋势）/涨停连板与龙虎榜（含严重异动偏离值监控）/成交额前 75 结构/归因与量价复盘/风险提示），执行入口先确认复盘日、交易时段禁跑当日；数据源故障走中止分支并输出异常报告（不产出残缺复盘），取数优先走服务端聚合、备有 stdio 落盘通道脚本；结论经 `save_conclusion` 落库、markdown 报告落盘；附 launchd/cron 调度配置说明
-- **数据源**：efinance → akshare → baostock 多源 fallback（基本面链为 akshare → efinance → baostock）；失败明确报错，绝不伪造数据；连接级故障（上游不可达）按三态错误契约结构化上报并附重试建议（ADR 0007）
-- **数据库**：PostgreSQL 独立新库（14 张表，DDL 在 `src/qstock_mcp/sql/`），连接只读 `PG_DSN` 环境变量
+## 为什么用它
+
+- **数据与分析一站式接入**：个股、指数、板块、龙虎榜、涨停池、资讯、基本面与分析结论。
+- **为 agent 设计**：统一 MCP 工具、自描述 JSON、明确的错误分类，无需理解底层数据源细节。
+- **历史数据可准备**：按交易日窗口回补与整窗刷新，用覆盖核验确认数据是否就绪。
+- **日常采集可调度**：次晨批、收盘后批和单数据面命令共用同一 CLI。
+- **结果可复用**：分析结论持久化，四个 skill 覆盖指标计算、SEPA、每日复盘与涨停分析。
+
+## 核心组成
+
+### MCP 数据服务
+
+| 能力 | 内容 |
+| --- | --- |
+| 抓取与落库 | 多源 fallback、业务键幂等写入、采集台账 |
+| 统一查询 | 个股/指数日线、全市场快照、盘面与板块数据 |
+| 基本面与资讯 | 基本面透传、妙想自然语言查数、资讯搜索与查询 |
+| 结论存储 | 通用 JSON 结论表，供不同分析 skill 复用 |
+| 初始化与补录 | 幂等建表、轻量初始化、交易日窗口回补与覆盖核验 |
+
+### Agent skill
+
+| Skill | 用途 |
+| --- | --- |
+| [`indicator-tools`](skills/indicator-tools/) | MA、MACD、BOLL、RSI、相关性、晋级率等指标计算管道 |
+| [`sepa`](skills/sepa/) | SEPA 方法论选股与判断 |
+| [`daily-review`](skills/daily-review/) | 每日市场复盘、数据就绪检查、报告与结论落库 |
+| [`limit-up-analysis`](skills/limit-up-analysis/) | 涨停结构、连板梯队、题材归因与龙头分析 |
 
 ## 安装与接入
 
-要求 Python ≥ 3.11 与一个 PostgreSQL 实例。
+要求 **Python ≥3.11** 和一个 **PostgreSQL** 数据库。
+
+### 1. 安装
 
 ```bash
-pip install -e ".[sources,dev]"   # sources = efinance/akshare/baostock 真实数据源库
+python3 -m venv .venv
+.venv/bin/pip install -e ".[sources,dev]"
 ```
 
-注意 `qstock-mcp` 入口只装在执行 `pip install` 的那个环境里（本仓库即 `.venv/`），因此 `command` 应写成该环境内的**绝对路径**；或改用 `python -m` 形式指向同一解释器：
+同一次安装会注册 `qstock-mcp` 和 `qstock-scheduler`。
+
+### 2. 配置 MCP client
 
 ```json
 {
   "mcpServers": {
     "qstock": {
       "command": "/path/to/q_stock_skills/.venv/bin/qstock-mcp",
-      "env": { "PG_DSN": "postgresql://user:pass@host:5432/qstock" }
+      "env": {
+        "PG_DSN": "postgresql://user:pass@host:5432/qstock"
+      }
     }
   }
 }
 ```
 
-```json
-{
-  "mcpServers": {
-    "qstock": {
-      "command": "/path/to/q_stock_skills/.venv/bin/python",
-      "args": ["-m", "qstock_mcp.server"],
-      "env": { "PG_DSN": "postgresql://user:pass@host:5432/qstock" }
-    }
-  }
-}
-```
+把 `command` 换成实际绝对路径，并设置自己的数据库连接串。保存后重启 client。
 
-想脱离项目目录全局可用，就装进常驻环境（如 `pipx install .` 或用户级 pip），让 `qstock-mcp` 落在 PATH 上；否则一律写绝对路径。
+> 这是 stdio MCP server，由 client 自动拉起，**不需要手动启动常驻服务**。GUI client 不一定继承 shell 环境变量，因此 `PG_DSN` 应写进配置的 `env`。
 
-同一次安装还会注册调度 CLI `qstock-scheduler`（见下节「定时采集与历史补录」）。
+<details>
+<summary>可选环境变量</summary>
 
-环境变量一律放进 MCP client 配置的 `env` 块里——GUI 类 client 不一定继承你 shell 里 `export` 的变量。完整清单：
+| 变量 | 说明 |
+| --- | --- |
+| `MX_APIKEY` | 妙想开放平台 apikey，仅 `mx_query` / `mx_search` 需要 |
+| `MX_DAILY_LIMIT` | 妙想工具每日配额，默认 20 |
+| `MX_DAILY_LIMIT_MX_DATA` / `MX_DAILY_LIMIT_MX_SEARCH` | 单工具配额覆盖 |
+| `MX_QUOTA_FILE` | 配额记录路径，默认 `~/.qstock-mcp/quota.json` |
 
-| 变量 | 必填 | 说明 |
-| --- | --- | --- |
-| `PG_DSN` | 是 | PostgreSQL 连接串；除 `get_fundamentals`/`mx_query` 外的落库/查询工具都依赖它，缺失报明确错误 |
-| `MX_APIKEY` | 否 | 妙想开放平台 apikey，仅 `mx_query`/`mx_search` 需要 |
-| `MX_DAILY_LIMIT` | 否 | 妙想工具通用每日配额上限（缺省 20） |
-| `MX_DAILY_LIMIT_MX_DATA` / `MX_DAILY_LIMIT_MX_SEARCH` | 否 | 单工具配额覆盖，优先于 `MX_DAILY_LIMIT` |
-| `MX_QUOTA_FILE` | 否 | 配额 ledger 路径（缺省 `~/.qstock-mcp/quota.json`） |
+</details>
 
-`env` 块示例（按需取舍可选项）：
+### 3. 初始化并准备历史数据
+
+在 MCP client 中调用一次 `init_database`：
 
 ```json
-"env": {
-  "PG_DSN": "postgresql://user:pass@host:5432/qstock",
-  "MX_APIKEY": "your-mx-apikey",
-  "MX_DAILY_LIMIT": "20"
-}
+{"backfill_history": false}
 ```
 
-首次使用调一次 `init_database` 即可完成建表与轻量初始化，秒级就绪。
+这一步完成建表和轻量初始化，**不等于全市场历史数据已经就绪**。
 
-## 启动方式
+随后按照 **[首次使用快速引导](docs/first-run.md)** 准备最近 90 个交易日的数据。指南包含空库/已有库路径、20 只冒烟、全量刷新和最终覆盖验收。
 
-这是 stdio MCP server：**不需要手动启动**，由 MCP client（Claude Code / Kimi Code / 其他 agent）按上面的配置自动拉起——client 通过子进程的 stdin/stdout 与它通信，会话结束自动回收。配置后重启 client 即可使用 `qstock` 前缀的 14 个工具。
+## 常用命令
 
-需要脱离 client 手动验证时（冒烟调试），直接运行入口命令：
+`qstock-scheduler` 直调核心工具层，不经过 MCP 协议；MCP server 本身不会按点采集。
 
-```bash
-qstock-mcp                    # 等价于 python -m qstock_mcp.server
-```
+| 任务 | 命令 |
+| --- | --- |
+| 次晨全市场日线与指数补采 | `qstock-scheduler morning` |
+| 收盘后盘面采集 | `qstock-scheduler close` |
+| 个股日线补采 | `qstock-scheduler daily --codes 600519,000001 --date 20261023` |
+| 最近 90 日个股整窗刷新 | `qstock-scheduler daily --all --trading-days 90 --force --throttle 1` |
+| 指数日线回补 | `qstock-scheduler index --trading-days 90` |
+| 申万板块历史回补 | `qstock-scheduler backfill --source sw --trading-days 90 --force` |
+| 龙虎榜历史回补 | `qstock-scheduler lhb --trading-days 90` |
+| 历史覆盖核验 | `qstock-scheduler coverage --trading-days 90` |
 
-进程启动后挂起等待 stdin 上的 JSON-RPC 消息，没有输出属正常（日志只走 stderr）。发一行 initialize 握手可验证服务可用（stdio 通道为换行分隔 JSON）：
+**[查看全部 14 个子命令及参数说明](docs/first-run.md#第二章调度-cli-命令手册)** · **[launchd 定时采集配置](docs/scheduler-launchd.md)**
 
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' | qstock-mcp
-```
+建议交易日 **19:30 之后**执行每日复盘：此时涨停池、龙虎榜与当日日线通常已经就绪。全市场 `daily --all` 通常需要约 1.5–2 小时，请保留节流。
 
-Ctrl+C 退出。握手本身不触库；若要手动实测工具调用，先在当前 shell 里 `export PG_DSN`（以及可选的 `MX_APIKEY`）。注意：手动启动走的是前台 stdio 通道，不是常驻后台服务；要让 agent 长期使用，仍应配进 MCP client 由它管理生命周期。
+> 历史分析就绪不等于历史每日复盘完整可重做。全市场快照、实时板块快照、营业部累计榜等数据无法全部事后恢复；涨停池的历史深度也有限。日常采集与告警不能由事后补录替代。
 
-## 定时采集与历史补录（CLI）
+## 数据源与可靠性
 
-MCP server 只提供工具，**自己不会按点采集**。日常数据靠独立的调度 CLI `qstock-scheduler`（与 `qstock-mcp` 同一次 `pip install` 注册），它直调 tools_* 核心层、不经 MCP 协议层：
+| 数据面 | 主要承载 |
+| --- | --- |
+| 个股日线 | 腾讯 → 新浪 → baostock |
+| 全市场快照 | 腾讯批量报价 → 腾讯 rank → 新浪 |
+| 指数 | 腾讯 → baostock / 新浪（按日线或快照能力区分） |
+| 申万板块 | 申万官网；故障时复盘可降级到库内自算 |
+| 龙虎榜 | 单日为交易所官方源；深圳历史同花顺主采，校验通过即完整，失败才由官方补缺并保留完整官方日；其他市场可显式后备；新浪用于互补对拍 |
+| 涨停池 | 同花顺涨停揭秘，带低频纪律与封禁探测 |
 
-| 子命令 | 用途 | 建议执行时机 |
-| --- | --- | --- |
-| `close [--date YYYYMMDD]` | 收盘后批：盘面五 section（boards/zt_pool/strong_stocks/lhb/indices）快照采集 | 交易日 15:30 之后 |
-| `morning [--date YYYYMMDD]` | 次晨批：baostock 一把抓前一交易日全市场日线 + 7 大指数尾行缺失即补 | 交易日开盘前（baostock 当日 bar 发布较晚，目标日恒为前一交易日） |
-| `backfill [--start D] [--end D]` | 板块历史回补：push2his 板块 K 线回补 `market_boards`（重操作，回补行带 `source='push2his'` 标注） | 手动/灾难恢复，非定时任务 |
-
-耗时量级：`morning` 约 1 分钟（baostock 一把抓约 20 秒 + 指数尾行通常零请求）；`close` 数分钟到十几分钟（cons 成分积累逐概念板块抓取）；`backfill` 取决于板块数 × 窗口，全量（约千板块）默认 3 个月窗口通常几十分钟。
-
-重复执行幂等（各业务键 upsert），每次执行落采集台账（可用 MCP 工具 `query_collection_log` 查询）；退出码 0=全部成功，1=任一部分失败（明细在 stdout JSON），2=参数错误。长时间运行的批（backfill 全量约千个板块、cons 概念成分逐板块）按双阈值向 **stderr** 打进度（每 50 个板块或距上条 ≥60s，先到先打），stdout 始终只留给最终结构化 JSON。backfill 韧性（spec #86）：连续 10 个板块全源失败即熔断中止（输出 `aborted` + exit 1，落整体 error 台账）；重跑自动跳过台账中同窗口已 ok 的板块（断点续跑，只补缺口）。全链路另有统一韧性：上游请求 60s 全局超时（挂死有界）、同源重试 0.5/1/2s 退避、by-design 不支持的源不重试。
-
-**漏采补录示例**：某天定时任务没跑、复盘发现缺数时，按数据类型选路径——
-
-```bash
-# 补 10-15、10-16 的全市场个股日线与指数日线（index_daily/stock_daily）
-qstock-scheduler morning --date 20261015
-qstock-scheduler morning --date 20261016
-
-# 补 10-14~10-16 的板块行情（market_boards；约 1000 个板块 × 3 日，重操作）
-qstock-scheduler backfill --start 20261014 --end 20261016
-```
-
-注意可补性边界：`zt_pool`/`strong_stocks`/`lhb` 也可直接走 MCP `fetch_board_snapshot` 补历史日期；但 `indices`/`boards` 属实时语义 section，**MCP 路径对历史日期硬拒绝**（issue #78，防"把最新数据写成历史日期"），板块只能经上面的 `backfill` CLI 补；`market_snapshot`（涨跌家数/两市成交额）没有历史 API，漏采即永久缺失。因此定时任务的当日告警比事后补录更重要。
-
-launchd/cron 安装样例见 [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)（用户自行安装；非交易日触发产生 empty 台账行，属正常语义）。
-
-## 输出契约
-
-所有工具与 skill 脚本输出自描述 JSON：成功 `status:"ok"` + 参数回显 + 实际数据源；数据不足 `status:"insufficient_data"`（非错误）；失败 `status:"error"` + 已尝试数据源与原因。抓取类工具的错误另带机器可读三态分类（`error_kind`：`upstream_unreachable` 上游连接级故障、可稍后重试 / `no_data_for_date` 当日无数据 / `empty_ok` 正常空结果，语义见 ADR 0007）。日志只走 stderr，不进数据通道。
+- **不伪造数据**：失败明确报错，空数据与连接故障分开表达。
+- **可重复执行**：业务键幂等写入，采集动作进入 append-only 台账。
+- **结果机器可读**：stdout 输出结构化 JSON，日志与进度走 stderr。
+- **质量可核验**：支持逐源对拍、指数覆盖检查与历史窗口统一覆盖核验。
 
 ## 测试
 
+日常变更按 [分层测试门禁](docs/agents/testing.md) 选择 `docs` 或 `impacted`，不机械执行全量。阶段性/nightly 回归命令为：
+
 ```bash
-pytest tests/ skills/
+.venv/bin/pytest tests/
+.venv/bin/pytest skills/indicator-tools/tests/
 ```
 
-两条测试接缝：MCP 工具函数层（注入 fake 适配器 + 真实 PG 测试库，PG 不可达自动 skip）与 skill 脚本 stdin/stdout 契约。网络抓取不进测试。
+自动化测试使用 fake 适配器与 PostgreSQL 测试库；PG 不可达时自动跳过，真实网络抓取不进入自动化测试。真实 live 仅执行门禁指南定义的隔离抽样，不要求真实全市场流程。
 
 ## 文档导航
 
-- [`docs/knowledge-graph.md`](docs/knowledge-graph.md)：项目知识图谱——总览图、实体清单、关键流程、「想改 X 先看哪里」
-- [`CONTEXT.md`](CONTEXT.md)：领域词汇表
-- [`docs/adr/`](docs/adr/)：设计决策（MCP 边界 / PG 选型 / 通用结论表 / init 设计 / 妙想接入 / 金额单位万元 / 抓取三态错误契约）
-- [`docs/scheduler-launchd.md`](docs/scheduler-launchd.md)：`qstock-scheduler` 定时采集的 launchd 安装样例
-- [`docs/agents/`](docs/agents/)：agent 协作约定（issue 流程、triage 标签）
+- **[首次使用与 CLI 手册](docs/first-run.md)**：90 日数据准备、全部调度命令
+- **[项目知识图谱](docs/knowledge-graph.md)**：架构、实体、关键流程与修改入口
+- **专项 CLI 手册**：[daily](docs/daily-source-cli.md) · [index](docs/index-source-cli.md) · [sw-boards](docs/sw-boards-cli.md) · [lhb](docs/lhb-source-cli.md) · [limitpool](docs/limitpool-cli.md) · [snapshot](docs/snapshot-source-cli.md) · [stock-list](docs/stock-list-cli.md) · [parity](docs/parity-cli.md)
+- **[领域词汇](CONTEXT.md)**：统一术语与数据口径
+- **[架构决策记录](docs/adr/)**：关键设计选择及其原因
+- **[Agent 协作约定](docs/agents/)**：Issue 流程与 triage 标签

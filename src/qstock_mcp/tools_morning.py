@@ -7,8 +7,14 @@
    单源调用不走 fallback 链（一把抓是 baostock 独有接口）；失败按三态
    契约分类 error_kind 落台账。
 2. index_daily：7 大指数白名单尾行缺失即补（spec 补充输入 07a/07b）——
-   尾行早于目标日的指数按尾行次日起经 fetch_index_daily fallback 链补抓；
-   尾行已在目标日的指数零请求。
+2. index_daily：7 大指数白名单尾行缺失即补（spec 补充输入 07a/07b）——
+   尾行早于目标日的指数按尾行次日起经指数日线 fallback 链补抓
+   （issue #117：腾讯 → baostock，腾讯 T+0 当日行先落、baostock 次晨
+   权威复核经本批对账覆盖）；尾行已在目标日的指数零请求。
+3. sw_board_valuation：申万板块每日分析报表（issue #118，spec #111）——
+   换手率/PE/PB/流通市值/股息率，T+1 发布（前一交易日报表次晨可查），
+   申万官网单源（SwBoardsAdapter 协议，注入缝 sw_adapters），按业务键
+   (trade_date, board_code) 幂等落 sw_board_valuation 表。
 
 盘中禁写防线（issue #78）延伸：显式指定目标日为当日且正在交易时段时报错
 零落库（次晨批语义是抓"已收盘"的前一交易日）。调度入口见 scheduler.py
@@ -19,7 +25,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import AStockDailyAdapter, IndexDailyAdapter, default_adapters
+from .adapters import (
+    AStockDailyAdapter,
+    IndexDailyAdapter,
+    SwBoardsAdapter,
+    default_index_daily_adapters,
+)
 from .adapters.base import FetchError, fetch_failure_kind
 from .dates import add_days, is_trading_time, normalize_date, prev_trading_day, today_str
 from .db import connect
@@ -27,7 +38,12 @@ from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_index_dai
 from .ledger import record_collection
 from .output import aggregate_batch_status
 from .output import error as _error
-from .repository import select_index_daily, upsert_daily_rows, upsert_index_daily
+from .repository import (
+    select_index_daily,
+    upsert_daily_rows,
+    upsert_index_daily,
+    upsert_sw_board_valuation,
+)
 from .tools_init import MAJOR_INDICES
 
 log = logging.getLogger(__name__)
@@ -104,10 +120,50 @@ def _index_daily_part(conn, adapters: Sequence[IndexDailyAdapter], target: str) 
     return {"status": status, "filled": filled, "rows": total_rows}
 
 
+def _sw_board_valuation_part(
+    conn, sw_adapters: Sequence[SwBoardsAdapter], target: str
+) -> dict:
+    """申万板块每日分析报表（issue #118）：T+1 估值维度落 sw_board_valuation。
+
+    申万官网单源（分页接口内自带逐页容错由适配器承担）；空结果（非交易日/
+    报表未发布）为正常语义。业务键 (trade_date, board_code) 幂等。
+    """
+    started = datetime.now(timezone.utc)
+    adapter = sw_adapters[0]
+    try:
+        rows = adapter.fetch_sw_board_analysis(target, target)
+    except FetchError as e:
+        kind = fetch_failure_kind(e)
+        if kind == "connection":
+            kind = "upstream_unreachable"
+        elif kind != "unsupported":
+            kind = "fetch_failed"
+        record_collection(
+            conn, trade_date=target, section="sw_board_valuation", status="error",
+            error_kind=kind, detail=f"morning_batch: {e}", started_at=started,
+        )
+        return {"status": "error", "error": str(e), "error_kind": kind}
+    n = upsert_sw_board_valuation(conn, rows)
+    record_collection(
+        conn, trade_date=target, section="sw_board_valuation",
+        status="ok" if n > 0 else "empty", source=adapter.name, rows=n,
+        error_kind=None if n > 0 else "no_data_for_date",
+        detail="morning_batch",
+        started_at=started,
+    )
+    return {
+        "status": "ok" if n > 0 else "empty",
+        "rows": n,
+        "source": adapter.name,
+        **({"empty_kind": "no_data_for_date"} if n == 0 else {}),
+    }
+
+
 def fetch_morning_batch(
     trade_date: str | None = None,
     adapter: AStockDailyAdapter | None = None,
     adapters: Sequence[IndexDailyAdapter] | None = None,
+    sw_adapters: Sequence[SwBoardsAdapter] | None = None,
     now=None,
 ) -> dict:
     """次晨批：默认目标日 = 前一交易日（now 为测试注入时钟）。"""
@@ -132,7 +188,11 @@ def fetch_morning_batch(
 
         adapter = BaostockAdapter()
     if adapters is None:
-        adapters = default_adapters()
+        adapters = default_index_daily_adapters()
+    if sw_adapters is None:
+        from .adapters.sw_adapter import SwSResearchAdapter
+
+        sw_adapters = [SwSResearchAdapter()]
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -140,6 +200,7 @@ def fetch_morning_batch(
         parts = {
             "stock_daily": _stock_daily_part(conn, adapter, target),
             "index_daily": _index_daily_part(conn, adapters, target),
+            "sw_board_valuation": _sw_board_valuation_part(conn, sw_adapters, target),
         }
     finally:
         conn.close()

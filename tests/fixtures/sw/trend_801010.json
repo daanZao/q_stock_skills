@@ -1,0 +1,54 @@
+{
+ "code": "200",
+ "message": "ok",
+ "data": [
+  {
+   "swindexcode": "801010",
+   "bargaindate": "1999-12-30",
+   "openindex": 1000.0,
+   "maxindex": 1000.0,
+   "minindex": 1000.0,
+   "closeindex": 1000.0,
+   "hike": 0.0,
+   "markup": 0.0,
+   "bargainamount": 0.09864744,
+   "bargainsum": 1.2396662266
+  },
+  {
+   "swindexcode": "801010",
+   "bargaindate": "2013-05-29",
+   "openindex": 1775.1,
+   "maxindex": 1783.7,
+   "minindex": 1771.77,
+   "closeindex": 1779.0,
+   "hike": 8.11,
+   "markup": 0.46,
+   "bargainamount": 6.69357785,
+   "bargainsum": 56.586364929
+  },
+  {
+   "swindexcode": "801010",
+   "bargaindate": "2026-10-22",
+   "openindex": 2532.4,
+   "maxindex": 2535.07,
+   "minindex": 2484.78,
+   "closeindex": 2491.92,
+   "hike": -39.96,
+   "markup": -1.58,
+   "bargainamount": 28.90205703,
+   "bargainsum": 217.9571026
+  },
+  {
+   "swindexcode": "801010",
+   "bargaindate": "2026-10-23",
+   "openindex": 2475.69,
+   "maxindex": 2493.67,
+   "minindex": 2442.52,
+   "closeindex": 2491.17,
+   "hike": -0.75,
+   "markup": -0.03,
+   "bargainamount": 29.62997614,
+   "bargainsum": 223.52707228
+  }
+ ]
+}

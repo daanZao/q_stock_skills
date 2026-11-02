@@ -20,6 +20,8 @@ import_sw_industry_meta（issue #74）：申万行业名称表（sw_industry_met
 """
 
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Sequence
 
@@ -28,7 +30,15 @@ from ._sw_classify import (
     load_sw_industry_meta_seed,
     parse_sw_classification,
 )
-from .adapters import DataAdapter, default_adapters
+from .adapters import (
+    DailyAdapter,
+    DataAdapter,
+    FetchError,
+    SnapshotAdapter,
+    default_adapters,
+    default_daily_adapters,
+    default_snapshot_adapters,
+)
 from .dates import is_trading_time, normalize_date, today_str
 from .db import connect, ensure_schema, list_tables
 from .fetch_chain import (
@@ -92,7 +102,7 @@ def _init_stock_list(conn, adapters: Sequence[DataAdapter]) -> dict:
     }
 
 
-def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
+def _init_market_snapshot(conn, adapters: Sequence[SnapshotAdapter]) -> dict:
     today = today_str()
     started = datetime.now(timezone.utc)
     try:
@@ -120,11 +130,14 @@ def _init_market_snapshot(conn, adapters: Sequence[DataAdapter]) -> dict:
     }
 
 
-def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
+def _init_index_daily(
+    conn, adapters: Sequence[DataAdapter], now=None
+) -> dict:
     """主要指数全历史日线：按指数独立 fallback，仅全部失败才 part error。
 
-    盘中禁写（issue #78）：交易时段内当日行不落库（未收盘数据非最终值），
-    历史行照常；deferred 计数进 part 明细。
+    链为指数日线链 腾讯 → baostock（issue #117，default_index_daily_adapters
+    在 init_database 解析）；盘中禁写（issue #78）：交易时段内当日行不落库
+    （未收盘数据非最终值），历史行照常；deferred 计数进 part 明细。
     """
     today = today_str(now)
     defer_today = today if is_trading_time(now) else None
@@ -177,7 +190,7 @@ def _init_index_daily(conn, adapters: Sequence[DataAdapter], now=None) -> dict:
     }
 
 
-def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
+def _init_backfill(conn, adapters: Sequence[DailyAdapter]) -> dict:
     """全市场个股历史日线回溯：复用日线头尾自愈，单股失败不中断。"""
     today = today_str()
     started = datetime.now(timezone.utc)
@@ -240,16 +253,40 @@ def _init_backfill(conn, adapters: Sequence[DataAdapter]) -> dict:
 def init_database(
     backfill_history: bool = False,
     adapters: Sequence[DataAdapter] | None = None,
+    daily_adapters: Sequence[DailyAdapter] | None = None,
+    snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
+    index_adapters: Sequence[DataAdapter] | None = None,
     now=None,
 ) -> dict:
     """建表 + 轻量初始化数据；backfill_history=True 追加全市场历史日线回溯。
 
-    now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内 index_daily
-    当日行不落库）。"""
+    个股日线回溯走独立 fallback 链（issue #112：腾讯→新浪→baostock），由
+    daily_adapters 注入；全市场快照走独立链（issue #116：腾讯批量报价→腾讯
+    rank→新浪直连），由 snapshot_adapters 注入；指数日线走独立链
+    （issue #117：腾讯→baostock），由 index_adapters 注入；未显式注入时
+    生产默认分别用 default_daily_adapters / default_snapshot_adapters /
+    default_index_daily_adapters，测试注入 adapters 时沿用同一组 fake（保持
+    既有接缝）。now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内
+    index_daily 当日行不落库）。"""
     tool = "init_database"
     params = {"backfill_history": backfill_history}
     if adapters is None:
         adapters = default_adapters()
+        if daily_adapters is None:
+            daily_adapters = default_daily_adapters()
+        if snapshot_adapters is None:
+            snapshot_adapters = default_snapshot_adapters()
+        if index_adapters is None:
+            from .adapters import default_index_daily_adapters
+
+            index_adapters = default_index_daily_adapters()
+    else:
+        if daily_adapters is None:
+            daily_adapters = adapters
+        if snapshot_adapters is None:
+            snapshot_adapters = adapters
+        if index_adapters is None:
+            index_adapters = adapters
     conn, err = connect()
     if err:
         return {"status": "error", "tool": tool, "params": params, "error": err}
@@ -267,11 +304,11 @@ def init_database(
             }
         parts = {
             "stock_list": _init_stock_list(conn, adapters),
-            "market_snapshot": _init_market_snapshot(conn, adapters),
-            "index_daily": _init_index_daily(conn, adapters, now),
+            "market_snapshot": _init_market_snapshot(conn, snapshot_adapters),
+            "index_daily": _init_index_daily(conn, index_adapters, now),
         }
         if backfill_history:
-            parts["backfill"] = _init_backfill(conn, adapters)
+            parts["backfill"] = _init_backfill(conn, daily_adapters)
     finally:
         conn.close()
 
@@ -423,6 +460,59 @@ def import_board_classification(source_system: str, file_path: str) -> dict:
         "params": params,
         "stocks": len({r["stock_code"] for r in rows}),
         **counts,
+    }
+
+
+# ------------------------------------------------- refresh_sw_dict（issue #118）
+
+
+def refresh_sw_dict(
+    url: str | None = None,
+    adapters: Sequence | None = None,
+) -> dict:
+    """成分字典在线刷新（issue #118，spec #111）：申万官网分类 xls 直链下载
+    → 解析 → 以文件为准清空重载成分字典 'sw' 体系（含北交所归属）。
+
+    把 issue #73 的"手工下载文件 → import_board_classification"升级为在线
+    刷新（调研结论 3：akshare stock_industry_clf_hist_sw 同一直链的薄封装，
+    本仓库自写下载经 SwBoardsAdapter 协议，复用同一导入入口与事务重载语义，
+    重复执行幂等）。台账由 import_board_classification 内联记录
+    （source='sw'，行数=重载后插入数）。
+    """
+    tool = "refresh_sw_dict"
+    params = {"url": url}
+    if adapters is None:
+        from .adapters.sw_adapter import CLASS_FILE_URL, SwSResearchAdapter
+
+        adapters = [SwSResearchAdapter()]
+        url = url or CLASS_FILE_URL
+    adapter = adapters[0]
+    try:
+        content = adapter.fetch_sw_class_file(url)
+    except FetchError as e:
+        return _error(tool, params, str(e))
+    if not content:
+        return _error(tool, params, "申万分类文件下载为空")
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".xls", prefix="sw_class_", delete=False
+    )
+    try:
+        tmp.write(content)
+        tmp.close()
+        result = import_board_classification("sw", tmp.name)
+    finally:
+        os.unlink(tmp.name)
+    if result.get("status") != "ok":
+        return {**result, "tool": tool, "params": params}
+    return {
+        "status": "ok",
+        "tool": tool,
+        "params": params,
+        "url": url,
+        "source": adapter.name,
+        "stocks": result["stocks"],
+        "deleted": result["deleted"],
+        "inserted": result["inserted"],
     }
 
 

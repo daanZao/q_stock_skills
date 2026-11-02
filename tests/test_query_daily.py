@@ -21,7 +21,7 @@ def _init(pg_test):
 
 def test_query_heals_empty_db_and_returns_full_range(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     result = query_daily("600519", start="20240101", end="20240110", adapters=[ef])
     assert result["status"] == "ok"
     assert result["tool"] == "query_daily"
@@ -30,9 +30,9 @@ def test_query_heals_empty_db_and_returns_full_range(pg_test):
     assert result["count"] == 8
     assert result["data_range"] == {"start": "20240101", "end": "20240110"}
     assert result["healed"] == [
-        {"start": "20240101", "end": "20240110", "source": "efinance", "rows": 8}
+        {"start": "20240101", "end": "20240110", "source": "tencent", "rows": 8}
     ]
-    assert result["rows"][0]["source"] == "efinance"
+    assert result["rows"][0]["source"] == "tencent"
     assert [r["trade_date"] for r in result["rows"]] == [
         r["trade_date"] for r in weekday_rows("20240101", "20240110")
     ]
@@ -40,7 +40,7 @@ def test_query_heals_empty_db_and_returns_full_range(pg_test):
 
 def test_query_repeated_calls_are_idempotent(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     first = query_daily("600519", start="20240101", end="20240110", adapters=[ef])
     second = query_daily("600519", start="20240101", end="20240110", adapters=[ef])
     assert first["count"] == second["count"] == 8
@@ -55,10 +55,10 @@ def test_query_does_not_refetch_mid_gap(pg_test):
     _init(pg_test)
     conn = psycopg2.connect(pg_test)
     # 中段缺口（01-09~01-10 缺失）视为停牌/非交易日，不补抓
-    upsert_daily(conn, "600519", "qfq", weekday_rows("20240105", "20240108"), "efinance")
-    upsert_daily(conn, "600519", "qfq", weekday_rows("20240111", "20240112"), "efinance")
+    upsert_daily(conn, "600519", "qfq", weekday_rows("20240105", "20240108"), "tencent")
+    upsert_daily(conn, "600519", "qfq", weekday_rows("20240111", "20240112"), "tencent")
     conn.close()
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     result = query_daily("600519", start="20240105", end="20240112", adapters=[ef])
     assert result["status"] == "ok"
     assert ef.calls == []
@@ -67,12 +67,12 @@ def test_query_does_not_refetch_mid_gap(pg_test):
 
 def test_query_all_sources_failed_returns_error_without_data(pg_test):
     _init(pg_test)
-    adapters = [FakeAdapter(n, fail_times=99) for n in ("efinance", "akshare", "baostock")]
+    adapters = [FakeAdapter(n, fail_times=99) for n in ("tencent", "sina", "baostock")]
     result = query_daily("600519", start="20240101", end="20240110", adapters=adapters)
     assert result["status"] == "error"
     assert [a["source"] for a in result["attempted_sources"]] == [
-        "efinance",
-        "akshare",
+        "tencent",
+        "sina",
         "baostock",
     ]
     assert "rows" not in result  # 不返回任何疑似数据
@@ -80,7 +80,7 @@ def test_query_all_sources_failed_returns_error_without_data(pg_test):
 
 def test_query_days_returns_last_n_rows(pg_test):
     _init(pg_test)
-    ef = FakeAdapter("efinance")
+    ef = FakeAdapter("tencent")
     result = query_daily("600519", days=5, adapters=[ef])
     assert result["status"] == "ok"
     assert result["count"] == 5

@@ -28,6 +28,44 @@
 
 关联防线（同属 #78，细节不在本 ADR 展开）：`indices` 段落库前校验行级日期==请求日期（不符即 `detail:"date_mismatch"` 零落库）；`fetch_market_snapshot` 传入日期与 API 生效日期不符（含 API 未报告）即 `status:"error"` + `detail:"date_mismatch"` 零落库；交易时段内（交易日 09:30–15:00 东八区）`stock_daily`/`index_daily` 写路径跳过当日行落库（盘中禁写，响应带 `note`，盘中 fetch/query 正常返回数据）。当日正常路径行为不变。
 
+## 补记（2026-10-21，issue #112，spec #111）：北交所不再整体 unsupported；日线源代码归一化
+
+个股日线 fallback 链改为 腾讯 → 新浪 → baostock 后，北交所 920xxx 由腾讯/新浪
+承载（三复权口径实测可取），因此"北交所 = by-design unsupported"只对 **baostock**
+成立，不再是全链的结论：`BaostockAdapter` 继续以 `is_bse_code`（4/8/9 前缀）
+拒绝北交所并抛 `FetchError(kind="unsupported")`；腾讯/新浪适配器则通过
+`adapters/_bse_codes.py` 把 920xxx 路由到 bj，旧码 43x/83x/87x 按北交所官方
+248 条对照表归一化到 920 新码后再请求。
+
+`base.is_bse_code` 与 `_bse_codes.market_of` 的差异是刻意的：前者是 baostock
+的粗粒度拒绝守卫（9 开头一律不接，含 900xxx 沪 B 股），后者是 A 股市场路由
+（仅 920xxx 与 4/8 旧码归 bj；900xxx/200xxx 等非 A 股明确 unsupported）。新增
+数据源接北交所时以 `_bse_codes` 为准，不得复用 `is_bse_code` 当市场判定。
+
+对拍（`daily_parity.compare_daily_sources`）的逐源失败沿用本契约分类：输出
+`sources.<name>.failure_kind`（unsupported/connection/other）与 `status`
+（unsupported/error/no_data），不另造分类。
+
+## 补记（2026-10-21，issue #113，spec #111/#102）：编排第四态 planned_absent（计划缺席）
+
+剔除东财迁移分批推进（#111），"已定方向待接线"的面若在采集语义中只有
+ok/empty/error 三态，会被判成"每天永久 error"——复盘每天走中止分支，等于
+停产。决策（#102）：核心 section 集维持原样只换底层源（新源故障仍按 error
+中止），三态之外加**编排第四态 `planned_absent`**：
+
+- **语义**：已定方向待接线的面（`tools_board.PLANNED_ABSENT_SECTIONS` 在册的
+  section）以第四态占位——不抓取、零落库、不计 `failed_sections`、不触发核心
+  section fail-fast、全部占位时工具整体仍 `ok`。它是**编排/台账状态**，不是
+  抓取结果：无 `error_kind`、无 `attempted_sources`（未发生抓取），不参与
+  ADR 三态的 upstream_unreachable 判定。
+- **占位台账**：收盘后批每运行为在册 section 落一条 `status='planned_absent'`
+  台账（sql/013 四值 CHECK，现库三值约束经 sql/016 幂等迁移），历史模式复盘
+  就绪归因由此区分"计划缺席"与"未采集"。
+- **永久弃用面不占位**：如概念维度资金流字段，直接从采集清单/报告栏目删除，
+  不抓不报不占位。
+- **消费方（daily-review）**：`planned_absent` 不触发中止线、不进异常报告
+  失败清单；按"计划缺席"降级出报并在 `data_gaps`/就绪台账标注原因。
+
 ## Consequences
 
 - `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类（补漏路径的 `empty` 是本 ADR 补记明定的唯一例外，边界见上节）。

@@ -41,9 +41,9 @@ def fetch_daily(
     end: str | None = None,
     adj: str = "qfq",
 ) -> dict:
-    """抓取个股日线并落库：只补请求区间头尾缺口，efinance → akshare → baostock fallback，按 (stock_code, trade_date, adj) 幂等 upsert。
+    """抓取个股日线并落库：只补请求区间头尾缺口，腾讯 → 新浪 → baostock fallback（issue #112），按 (stock_code, trade_date, adj) 幂等 upsert。
 
-    stock_code: 6 位 A 股代码（如 600519）。days 与 start/end 二选一；
+    stock_code: 6 位 A 股代码（如 600519；北交所旧码 43x/83x/87x 自动归一化到 920）；days 与 start/end 二选一；
     日期格式 yyyymmdd 或 yyyy-mm-dd；adj: qfq/hfq/none。
     """
     return tools_daily.fetch_daily(stock_code, days=days, start=start, end=end, adj=adj)
@@ -118,7 +118,7 @@ def query_index_daily(
 
 @mcp.tool()
 def fetch_market_snapshot(trade_date: str | None = None) -> dict:
-    """抓取全市场快照（约 5000+ 只 A 股）并落库：单次调用，efinance → akshare → baostock fallback，按 (trade_date, stock_code) 幂等 upsert。
+    """抓取全市场快照（约 5000+ 只 A 股）并落库：单次调用，腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连 fallback（issue #116），按 (trade_date, stock_code) 幂等 upsert。
 
     API 返回的最新交易日优先于传入的 trade_date（yyyymmdd 或 yyyy-mm-dd）。
     错误三态（ADR 0007）：全源失败时 error_kind=upstream_unreachable（连接级故障，
@@ -203,7 +203,7 @@ def get_fundamentals(stock_code: str) -> dict:
     """基本面数据透传（proxy 能力面）：按个股代码返回上游原始数据（财务指标、估值等），不规格化、不落库。
 
     输出自描述 JSON：data 为 {section: 原始记录}（字段名保留上游），source 为实际
-    数据源（akshare → efinance → baostock fallback）；全失败返回 status:"error"
+    数据源（akshare → baostock fallback，issue #115）；全失败返回 status:"error"
     与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
     """
     return tools_fundamentals.get_fundamentals(stock_code)

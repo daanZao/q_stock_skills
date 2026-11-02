@@ -104,6 +104,38 @@ def is_trading_time(now: datetime | None = None) -> bool:
     return is_trading_day(now.strftime("%Y%m%d")) and _SESSION_OPEN <= now.time() <= _SESSION_CLOSE
 
 
+def trading_day_window(
+    trading_days: int, end: str | None = None, *, now: datetime | None = None
+) -> tuple[str, str]:
+    """返回含截止日在内的 N 个交易日闭区间；缺省截止最近已收盘交易日。"""
+    if trading_days <= 0:
+        raise ValueError("trading-days 必须为正整数")
+    if end is not None:
+        last = normalize_date(end)
+    else:
+        current = (now or datetime.now(_TZ8)).astimezone(_TZ8)
+        last = current.strftime("%Y%m%d")
+        if is_trading_day(last) and current.time() < _SESSION_CLOSE:
+            last = prev_trading_day(last)
+    while not is_trading_day(last):
+        last = add_days(last, -1)
+    first = last
+    for _ in range(trading_days - 1):
+        first = prev_trading_day(first)
+    return first, last
+
+
+def trading_days_between(start: str, end: str) -> list[str]:
+    """列出闭区间内的全部交易日，输入须已为 yyyymmdd。"""
+    days = []
+    current = start
+    while current <= end:
+        if is_trading_day(current):
+            days.append(current)
+        current = add_days(current, 1)
+    return days
+
+
 def resolve_range(
     days: int | None,
     start: str | None,

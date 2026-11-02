@@ -1,0 +1,32 @@
+{
+  "status_code": 0,
+  "status_msg": "success",
+  "data": {
+    "info": {
+      "page": 1,
+      "pages": 1,
+      "per_page": 500,
+      "total": 1,
+      "items": [
+        {
+          "code": "002111",
+          "name": "示例跌停股",
+          "latest": 8.88,
+          "change_rate": -9.98,
+          "high_days": "首板",
+          "open_num": 0,
+          "first_limit_down_time": 1792120200,
+          "last_limit_down_time": 1792120200,
+          "order_amount": 95000000.0,
+          "order_volume": 10698198,
+          "reason_type": "退市风险",
+          "limit_down_type": "一字板",
+          "is_again_limit": 0,
+          "limit_up_suc_rate": 0.0,
+          "currency_value": 900000000.0,
+          "turnover_rate": 1.1
+        }
+      ]
+    }
+  }
+}

@@ -14,17 +14,18 @@ no_data_for_date（status ok + empty_kind + note），语义正常非失败。
 静默写成历史日期（#45 型污染）；"API 日期优先于传入日期"的旧契约仅限不传参。
 防线拒收同样落采集台账（issue #77：被拒的污染尝试最值得审计）。
 query_snapshot 服务端聚合与排序取前 N（issue #48）：aggregate=breadth,amount
-返回涨跌家数（含沪/深/北分市场；最新价或昨收为 NULL 的停牌行计入 no_price
-桶，up+down+flat+no_price = 过滤后总行数）与成交额合计（万元）；order_by +
-limit 排序取前 N，行字段不裁剪；order_by 必须配 limit（排序后全表是大结果
-通道，按参数错误拒绝）；均下推 SQL，不做通用 offset 分页。
+返回涨跌家数（含沪/深/北分市场；有昨收按最新价 vs 昨收判定，昨收缺失的
+rank 榜单行改由 change_percent/zdf 判定，issue #116；无法判定的停牌行计入
+no_price 桶，up+down+flat+no_price = 过滤后总行数）与成交额合计（万元）；
+order_by + limit 排序取前 N，行字段不裁剪；order_by 必须配 limit（排序后
+全表是大结果通道，按参数错误拒绝）；均下推 SQL，不做通用 offset 分页。
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .adapters import SnapshotAdapter, default_adapters
+from .adapters import SnapshotAdapter, default_snapshot_adapters
 from .dates import normalize_date, today_str
 from .db import connect
 from .fetch_chain import (
@@ -50,7 +51,13 @@ def fetch_market_snapshot(
     trade_date: str | None = None,
     adapters: Sequence[SnapshotAdapter] | None = None,
 ) -> dict:
-    """抓取全市场快照并落库：单次调用，按业务键 upsert（幂等）。"""
+    """抓取全市场快照并落库：单次调用，按业务键 upsert（幂等）。
+
+    fallback 链（issue #116，spec #111）：腾讯批量报价（主源，18 字段全覆盖、
+    时间戳含日期）→ 腾讯 rank 榜单（免清单，缺 OHLC/pre_close，涨跌家数口径
+    改由 zdf 判定）→ 新浪直连（绕过 akshare 封装）。未注入适配器时生产默认
+    走 default_snapshot_adapters；东财链路已退出快照承载。
+    """
     tool = "fetch_market_snapshot"
     params = {"trade_date": trade_date}
     passed = None
@@ -60,7 +67,7 @@ def fetch_market_snapshot(
         except ValueError as e:
             return _error(tool, params, str(e))
     if adapters is None:
-        adapters = default_adapters()
+        adapters = default_snapshot_adapters()
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -170,9 +177,10 @@ def query_snapshot(
     """库内快照查询：按日期/代码过滤；日期缺省取库内最新交易日。
 
     aggregate（逗号分隔，可选 breadth,amount）为服务端聚合模式：返回涨跌
-    家数（最新价 vs 昨收，含沪/深/北分市场口径；最新价或昨收为 NULL 的停牌
-    行计入 no_price 桶，up+down+flat+no_price = 过滤后总行数）与两市成交额
-    合计（万元，ADR 0006），不返回行；order_by/limit/order 在聚合模式下
+    家数（有昨收按最新价 vs 昨收，昨收缺失改由 change_percent 判定，issue
+    #116；含沪/深/北分市场口径；无法判定的停牌行计入 no_price 桶，
+    up+down+flat+no_price = 过滤后总行数）与两市成交额合计（万元，ADR 0006），
+    不返回行；order_by/limit/order 在聚合模式下
     不生效。order_by（快照列）+ limit 为排序取前 N（order asc/desc，缺省
     desc），行字段与整表查询一致；order_by 必须配 limit（不带 limit 的排序
     会退化为排序后全表，按参数校验错误拒绝）。limit 单独使用时按 stock_code
