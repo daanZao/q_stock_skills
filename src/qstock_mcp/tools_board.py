@@ -99,6 +99,7 @@ from .repository import (
     replace_lhb_basic_day,
     replace_lhb_details_day,
     select_board_rows,
+    select_complete_lhb_detail_parent_keys,
     select_latest_board_date,
     select_lhb_statistic,
     upsert_board_rows,
@@ -363,12 +364,16 @@ def _lhb_detail_key_sets(
     return expected, unknown
 
 
-def _validated_lhb_details(data: dict) -> tuple[list[dict], list[str]]:
+def _validated_lhb_details(data: dict, trade_date: str) -> tuple[list[dict], list[str]]:
     groups: dict[tuple[str, str], list[dict]] = {}
     unknown: set[tuple[str, str]] = set()
     errors = list(data.get("detail_errors") or [])
     for row in data.get("lhb_stock_detail") or []:
         key = (row["stock_code"], row.get("lhb_reason") or "")
+        row_date = row.get("trade_date")
+        if row_date is not None and row_date != trade_date:
+            errors.append(f"{key[0]} {key[1]}: 席位详情日期不符 {row_date} != {trade_date}")
+            continue
         market = _lhb_detail_market(row["stock_code"])
         if market is None:
             unknown.add(key)
@@ -460,9 +465,10 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
         patched_markets = []
         patched_rows = 0
         for market in failed_markets:
+            expected_market = {"szse": "sz", "sse": "sh", "bse": "bj"}[market]
             additions = [
                 row for row in fallback_rows
-                if _lhb_market(row["stock_code"]) == market
+                if _lhb_detail_market(row["stock_code"]) == expected_market
                 and row.get("trade_date") == trade_date
             ]
             if not additions:
@@ -492,7 +498,8 @@ def _merge_lhb_basic_fallback(data: dict, primary_source: str, fallback, trade_d
     ]
     if "szse" in resolved:
         merged["lhb_stock_detail"] = list(data.get("lhb_stock_detail") or []) + [
-            row for row in fallback_details if _lhb_market(row["stock_code"]) == "szse"
+            row for row in fallback_details
+            if _lhb_detail_market(row["stock_code"]) == "sz"
         ]
         if fallback_detail_errors:
             merged["detail_errors"] = list(data.get("detail_errors") or []) + fallback_detail_errors
@@ -700,7 +707,7 @@ def fetch_board_snapshot(
                 data = dict(data)
                 (
                     data["lhb_stock_detail"], data["detail_errors"],
-                ) = _validated_lhb_details(data)
+                ) = _validated_lhb_details(data, effective)
             source = r["source"]
             szse_primary = data.get("szse_primary") if name == "lhb" else None
             if szse_primary and szse_primary["source"] != r["source"]:
@@ -833,11 +840,7 @@ def fetch_board_snapshot(
                 expected_details, unknown_details = _lhb_detail_key_sets(
                     detail_parent_rows
                 )
-                actual_details = {
-                    (row["stock_code"], row.get("lhb_reason") or "")
-                    for row in data.get("lhb_stock_detail") or []
-                    if (row["stock_code"], row.get("lhb_reason") or "") in expected_details
-                }
+                actual_details = select_complete_lhb_detail_parent_keys(conn, effective)
                 detail_missing = len(expected_details - actual_details)
                 detail_status = (
                     "ok" if detail_missing == 0

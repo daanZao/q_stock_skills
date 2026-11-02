@@ -558,7 +558,7 @@ def upsert_lhb_day(
 def replace_lhb_details_day(
     conn, trade_date: str, detail_rows: list[dict]
 ) -> int:
-    """复用当日 basic 父记录，仅整体替换其席位详情。"""
+    """复用当日 basic，仅替换本次返回详情的父记录，保留其他父组。"""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -569,10 +569,17 @@ def replace_lhb_details_day(
                 (stock_code, reason): basic_id
                 for basic_id, stock_code, reason in cur.fetchall()
             }
-            if parents:
+            replaced_keys = {
+                (row["stock_code"], row.get("lhb_reason") or "")
+                for row in detail_rows
+                if row.get("trade_date", trade_date) == trade_date
+                and (row["stock_code"], row.get("lhb_reason") or "") in parents
+            }
+            replaced_ids = [parents[key] for key in replaced_keys]
+            if replaced_ids:
                 cur.execute(
                     "DELETE FROM lhb_stock_detail WHERE lhb_basic_id = ANY(%s)",
-                    (list(parents.values()),),
+                    (replaced_ids,),
                 )
             detail_written = _insert_lhb_details(
                 cur, trade_date, detail_rows, parents
@@ -718,13 +725,16 @@ def select_lhb_statistic(conn, trade_date: str) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def select_lhb_detail_parent_keys(conn, trade_date: str) -> set[tuple[str, str]]:
+def select_complete_lhb_detail_parent_keys(conn, trade_date: str) -> set[tuple[str, str]]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT d.stock_code, b.lhb_reason"
+            "SELECT d.stock_code, b.lhb_reason"
             " FROM lhb_stock_detail AS d"
             " JOIN lhb_basic AS b ON b.id = d.lhb_basic_id"
-            " WHERE d.trade_date = %s",
+            " WHERE d.trade_date = %s"
+            " GROUP BY d.stock_code, b.lhb_reason"
+            " HAVING COUNT(*) FILTER (WHERE d.seat_type = 'buy') > 0"
+            " AND COUNT(*) FILTER (WHERE d.seat_type = 'sell') > 0",
             (trade_date,),
         )
         return set(cur.fetchall())
