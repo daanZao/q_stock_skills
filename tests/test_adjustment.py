@@ -352,3 +352,74 @@ def test_authoritative_revision_and_retraction_rebuild_derived_rows(pg_test):
     assert [row["factor_cum"] for row in retracted["hfq_rows"]] == pytest.approx([1.0, 1.0, 1.0])
     assert [row["close"] for row in retracted["qfq_rows"]] == pytest.approx([10.0, 11.0, 12.0])
     conn.close()
+
+
+def test_factor_state_check_accepts_pending_previous_values(pg_test):
+    conn = _conn(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,"
+            " latest_trade_date, rebuild_pending) VALUES ('600519', 6.785630, 1.0,"
+            " '20230630', true)"
+        )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "baseline,latest,pending",
+    [
+        (None, None, False),
+        (1.0, None, True),
+        (None, 1.0, True),
+        (0.0, 1.0, False),
+        (1.0, float("inf"), False),
+    ],
+)
+def test_factor_state_check_rejects_invalid_shapes(
+    pg_test, baseline, latest, pending
+):
+    conn = _conn(pg_test)
+    with conn.cursor() as cur:
+        with pytest.raises(
+            (psycopg2.errors.CheckViolation, psycopg2.errors.NumericValueOutOfRange)
+        ):
+            cur.execute(
+                "INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,"
+                " latest_trade_date, rebuild_pending) VALUES ('600519', %s, %s,"
+                " '20230630', %s)",
+                (baseline, latest, pending),
+            )
+    conn.rollback()
+    conn.close()
+
+
+def test_600519_dirty_fifth_column_does_not_reset_derived_factor(pg_test):
+    from qstock_mcp.adapters.baostock_adapter import map_adjust_factor_rows
+
+    fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+    mapped = map_adjust_factor_rows(fields, [
+        ["sh.600519", "2023-06-30", "0.898366", "6.889798", "0.988591"],
+        ["sh.600519", "2023-07-03", "0.898366", "6.889798", "6.889798"],
+    ])
+    conn = _conn(pg_test)
+    snapshot = rebuild_stock(
+        conn,
+        "600519",
+        [
+            _raw("20230629", 1713.71),
+            _raw("20230630", 1687.80, preclose=1687.80),
+            _raw("20230703", 1691.00, preclose=1691.00),
+        ],
+        [{"ex_date": "20221227", "factor_cum": 6.785630}] + mapped,
+        baseline_factor=6.785630,
+    )
+    assert [event["ex_date"] for event in snapshot["factor_events"]] == [
+        "20221227", "20230630",
+    ]
+    assert snapshot["factor_events"][1]["factor_cum"] == 6.889798
+    assert snapshot["factor_events"][1]["event_factor"] == pytest.approx(
+        0.9848808339518807
+    )
+    assert snapshot["state"]["factor_latest"] == pytest.approx(1.015351264363073)
+    conn.close()
