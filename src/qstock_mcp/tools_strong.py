@@ -18,7 +18,12 @@ compute_strong_rows 返回 None，工具层按 no_data_for_date 正常语义跳�
 
 import logging
 
-from .repository import select_dominant_adj
+from .price_reader import (
+    select_dominant_adj,
+    select_today_rows,
+    select_window_anchor,
+    select_window_max_close,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,41 +34,15 @@ MULTI_ZT_MIN_COUNT = 2
 
 
 def _window_anchor(conn, trade_date: str, days: int) -> str | None:
-    """最近 days 个交易日（含当日）的窗口首日 yyyymmdd；无数据返回 None。"""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT trade_date FROM stock_daily"
-            " WHERE trade_date <= %s ORDER BY trade_date DESC LIMIT %s",
-            (trade_date, days),
-        )
-        rows = cur.fetchall()
-    return rows[-1][0] if len(rows) >= 1 else None
+    return select_window_anchor(conn, trade_date, days)
 
 
 def _today_rows(conn, trade_date: str, adj: str) -> dict[str, dict]:
-    """当日截面 {stock_code: 行}（收盘价/涨跌/量/额/换手率）。"""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT stock_code, close, change_percent, volume, amount,"
-            "       turnover_rate"
-            " FROM stock_daily WHERE trade_date = %s AND adj = %s",
-            (trade_date, adj),
-        )
-        cols = ("stock_code", "close", "change_percent", "volume", "amount",
-                "turnover_rate")
-        return {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
+    return select_today_rows(conn, trade_date, adj)
 
 
 def _window_max_close(conn, adj: str, start: str, end: str) -> dict[str, float]:
-    """窗口内每股最高收盘价 {stock_code: max_close}。"""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT stock_code, MAX(close) FROM stock_daily"
-            " WHERE adj = %s AND trade_date BETWEEN %s AND %s"
-            " AND close IS NOT NULL GROUP BY stock_code",
-            (adj, start, end),
-        )
-        return {r[0]: r[1] for r in cur.fetchall()}
+    return select_window_max_close(conn, adj, start, end)
 
 
 def _zt_stats(conn, start: str, end: str) -> dict[str, dict]:

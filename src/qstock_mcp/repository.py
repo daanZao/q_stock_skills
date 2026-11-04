@@ -42,12 +42,6 @@ ON CONFLICT (stock_code, trade_date, adj) DO UPDATE SET
     updates=", ".join(f"{c} = EXCLUDED.{c}" for c in BAR_FIELDS[1:]),
 )
 
-_SELECT_SQL = """
-SELECT {cols}, source, tradestatus FROM stock_daily
-WHERE stock_code = %s AND adj = %s AND trade_date BETWEEN %s AND %s
-ORDER BY trade_date
-""".format(cols=", ".join(BAR_FIELDS))
-
 
 def upsert_daily(conn, stock_code: str, adj: str, rows: list[dict], source: str) -> int:
     """按业务键 upsert，返回写入行数。
@@ -101,21 +95,15 @@ def upsert_daily_rows(conn, rows: list[dict], source: str) -> int:
 def select_daily(
     conn, stock_code: str, adj: str, start: str, end: str
 ) -> list[dict]:
-    with conn.cursor() as cur:
-        cur.execute(_SELECT_SQL, (stock_code, adj, start, end))
-        return [
-            dict(zip(BAR_FIELDS + ("source", "tradestatus"), row)) for row in cur.fetchall()
-        ]
+    from .price_reader import select_daily as read_daily
+
+    return read_daily(conn, stock_code, adj, start, end)
 
 
 def select_dates(conn, stock_code: str, adj: str, start: str, end: str) -> set[str]:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT trade_date FROM stock_daily "
-            "WHERE stock_code = %s AND adj = %s AND trade_date BETWEEN %s AND %s",
-            (stock_code, adj, start, end),
-        )
-        return {row[0] for row in cur.fetchall()}
+    from .price_reader import select_dates as read_dates
+
+    return read_dates(conn, stock_code, adj, start, end)
 
 
 _UPSERT_SNAPSHOT_SQL = """
@@ -1167,29 +1155,17 @@ def upsert_sw_industry_meta(conn, rows: list[dict]) -> int:
 
 
 def select_latest_daily_date(conn) -> str | None:
-    """stock_daily 库内最新交易日（不限 adj，issue #92：none-only 的交易日不跳过）。"""
-    with conn.cursor() as cur:
-        cur.execute("SELECT max(trade_date) FROM stock_daily")
-        return cur.fetchone()[0]
+    """个股价格最新交易日，经统一价格读取接缝。"""
+    from .price_reader import select_latest_date
+
+    return select_latest_date(conn)
 
 
 def select_dominant_adj(conn, trade_date: str) -> str | None:
-    """当日横截面口径 adj：各 adj 行数多者胜、平局取 qfq（issue #92）。
+    """当日横截面口径 adj，经统一价格读取接缝。"""
+    from .price_reader import select_dominant_adj as read_dominant_adj
 
-    单一 adj 防一股双行重复计入；截面指标 change_pct/amount 与复权方式无关。
-    当日无任何日线行返回 None。
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT adj FROM stock_daily WHERE trade_date = %s"
-            " GROUP BY adj"
-            " ORDER BY COUNT(*) DESC,"
-            " CASE WHEN adj = 'qfq' THEN 0 ELSE 1 END, adj"
-            " LIMIT 1",
-            (trade_date,),
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
+    return read_dominant_adj(conn, trade_date)
 
 
 def select_sw_dict_as_of(conn) -> str | None:
@@ -1203,83 +1179,10 @@ def select_sw_dict_as_of(conn) -> str | None:
         return d.strftime("%Y%m%d") if d is not None else None
 
 
-_SW_BOARD_AGG_SQL = """
-WITH pit AS (
-    SELECT DISTINCT ON (stock_code) stock_code, board_code
-    FROM sw_industry_class
-    WHERE source_system = 'sw' AND effective_date <= to_date(%s, 'YYYYMMDD')
-    ORDER BY stock_code, effective_date DESC
-),
-agg AS (
-    SELECT CASE WHEN %s = 1 THEN substr(p.board_code, 1, 2) || '0000'
-                ELSE substr(p.board_code, 1, 4) || '00' END AS industry_code,
-           SUM(d.change_percent * d.amount)
-               FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL)
-           / NULLIF(SUM(d.amount)
-               FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL), 0)
-               AS change_pct,
-           COUNT(*) FILTER (WHERE d.change_percent > 0 AND d.amount IS NOT NULL)
-               AS up_count,
-           COUNT(*) FILTER (WHERE d.change_percent < 0 AND d.amount IS NOT NULL)
-               AS down_count,
-           COUNT(*) FILTER (WHERE d.change_percent = 0 AND d.amount IS NOT NULL)
-               AS flat_count,
-           SUM(d.amount) AS amount,
-           COUNT(*) AS stock_count,
-           COUNT(*) FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL)
-               AS counted_count
-    FROM pit p
-    LEFT JOIN stock_daily d
-      ON d.stock_code = p.stock_code AND d.trade_date = %s AND d.adj = %s
-    {where}
-    GROUP BY 1
-    HAVING COUNT(d.stock_code) > 0
-)
-SELECT a.industry_code, m.name AS industry_name, a.change_pct,
-       a.up_count, a.down_count, a.flat_count, a.amount,
-       a.stock_count, a.counted_count
-FROM agg a
-LEFT JOIN sw_industry_meta m ON m.industry_code = a.industry_code
-ORDER BY a.industry_code
-"""
-
-
 def select_sw_board_daily(
     conn, trade_date: str, level: int, prefix: str | None = None, adj: str = "qfq"
 ) -> list[dict]:
-    """单日截面：point-in-time 成分 × stock_daily(adj 由调用方选定) 按行业聚合
-    （下推 SQL）。
+    """point-in-time 成分 × 个股价格截面聚合，经统一价格读取接缝。"""
+    from .price_reader import select_sw_board_daily as read_sw_board_daily
 
-    adj 为当日横截面口径（select_dominant_adj 选定，issue #92），每行回带。
-    聚合码形态与 sw_industry_meta 一致（一级前2位补 0000、二级前4位补 00），
-    名称 join 缺失时 industry_name 为 None。change_pct 为成交额加权
-    （change_percent 或 amount 为 null 的停牌占位行从权重剔除并归一，spec #70）；
-    涨/跌/平家数与加权同一口径（change_percent 与 amount 双非 null 才计家数）；
-    stock_count 为 point-in-time 归属该行业的成分股总数（LEFT JOIN：当日无
-    日线行的成分也计入），counted_count 为参与加权数，差即停牌/无行情数；
-    全行业当日无任何日线行时该行业不出现（HAVING），空日期 count:0。
-    amount 单位万元（库内已是万元口径，ADR 0006）。每行携带 basis 口径标注。
-    """
-    where, args = "", [trade_date, level, trade_date, adj]
-    if prefix is not None:
-        where = "WHERE p.board_code LIKE %s"
-        args.append(prefix + "%")
-    with conn.cursor() as cur:
-        cur.execute(_SW_BOARD_AGG_SQL.format(where=where), args)
-        return [
-            {
-                "industry_code": code,
-                "industry_name": name,
-                "change_pct": round(float(pct), 4) if pct is not None else None,
-                "up_count": up,
-                "down_count": down,
-                "flat_count": flat,
-                "amount": round(float(amt), 2) if amt is not None else None,
-                "stock_count": stocks,
-                "counted_count": counted,
-                "adj": adj,
-                "basis": "sw_amount_weighted",
-            }
-            for code, name, pct, up, down, flat, amt, stocks, counted
-            in cur.fetchall()
-        ]
+    return read_sw_board_daily(conn, trade_date, level, prefix, adj)

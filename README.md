@@ -78,6 +78,7 @@ python3 -m venv .venv
 | `MX_DAILY_LIMIT` | 妙想工具每日配额，默认 20 |
 | `MX_DAILY_LIMIT_MX_DATA` / `MX_DAILY_LIMIT_MX_SEARCH` | 单工具配额覆盖 |
 | `MX_QUOTA_FILE` | 配额记录路径，默认 `~/.qstock-mcp/quota.json` |
+| `QSTOCK_PRICE_SOURCE` | 个股价格读取实现，默认 `legacy`；`new` 在后续切流票实现前会显式报错 |
 
 </details>
 
@@ -126,6 +127,7 @@ python3 -m venv .venv
 | 涨停池 | 同花顺涨停揭秘，带低频纪律与封禁探测 |
 
 - **不伪造数据**：失败明确报错，空数据与连接故障分开表达。
+- **统一数据单位**：库内金额列均为万元，成交量均为股；baostock 成交额在适配层由元除以 10000。
 - **可重复执行**：业务键幂等写入，采集动作进入 append-only 台账。
 - **结果机器可读**：stdout 输出结构化 JSON，日志与进度走 stderr。
 - **质量可核验**：支持逐源对拍、指数覆盖检查与历史窗口统一覆盖核验。

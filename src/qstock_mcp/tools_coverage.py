@@ -4,6 +4,7 @@ from ._sw_classify import load_sw_industry_meta_seed
 from .dates import normalize_date, trading_days_between
 from .db import connect
 from .output import error as _error
+from .price_reader import select_dates as select_price_dates
 from .repository import select_stock_codes
 from .tools_init import MAJOR_INDICES
 
@@ -55,7 +56,7 @@ def verify_history_coverage(start: str, end: str, adj: str = "qfq") -> dict:
     try:
         stocks = []
         for code in select_stock_codes(conn):
-            present = _dates(conn, "stock_daily", "stock_code", code, start_d, end_d, adj)
+            present = select_price_dates(conn, code, adj, start_d, end_d)
             stocks.append(_entry(code, None, present, calendar))
         if not stocks:
             stocks = [{

@@ -1,7 +1,7 @@
 # 项目知识图谱
 
 面向人类与 AI agent 的 5 分钟全图认知。术语遵循 `CONTEXT.md`（抓取/落库/透传/自愈/回溯/五个能力面）。
-每条论断尽量标注来源（`path:line`）。设计决策的"为什么"在 `docs/adr/0001-0017`，本图只讲"是什么、在哪、和谁相连"。
+每条论断尽量标注来源（`path:line`）。设计决策的"为什么"在 `docs/adr/0001-0018`，本图只讲"是什么、在哪、和谁相连"。
 
 ## 总览图
 
@@ -35,6 +35,8 @@ flowchart LR
         PARACC["parity_acceptance<br/>五核心面验收对拍编排 +<br/>历史连续性（不落库，#122）"]
         SLPAR["stock_list_parity<br/>清单多源互证（不落库，#122）"]
         REPO["repository<br/>业务键 upsert / 查询"]
+        PR["price_reader<br/>个股价格唯一读取接缝（#159）"]
+        ADJ["adjustment<br/>raw+B 单票复权竖切（#160）"]
         DB["db.py<br/>PG_DSN 连接 + 幂等建表"]
         MXC["mx_client<br/>妙想网关客户端（懒加载）"]
         MXQ["mx_quota<br/>配额 ledger（skill×日）"]
@@ -51,8 +53,9 @@ flowchart LR
         SW["SwSResearchAdapter<br/>（申万官网薄封装，boards 行业段<br/>主承载 issue #118）"]
     end
 
-    subgraph pg["PostgreSQL 独立新库（sql/001-018，19 张表）"]
+    subgraph pg["PostgreSQL 独立新库（sql/001-019，23 张表）"]
         T1["stock_daily / index_daily / stock_list"]
+        T1B["复权影子：stock_daily_raw / stock_adjust_factor /<br/>stock_daily_hfq / stock_factor_state（#160）"]
         T2["market_snapshot"]
         T3["盘面表：market_indices / market_boards /<br/>zt_pool / strong_stocks / lhb_*×5"]
         T3B["sw_board_valuation（申万分析报表<br/>估值维度 issue #118）"]
@@ -72,6 +75,9 @@ flowchart LR
     PARACC -->|"五面编排复用各面<br/>parity 工具 + 连续性纯读"| SWPAR
     SLPAR -->|"清单逐源互证<br/>stock-list --check，不落库"| src
     faces --> REPO --> DB --> pg
+    faces --> PR --> DB
+    ADJ --> DB
+    BS -->|"backAdjustFactor=B；adjustFacto(r) 仅审计"| ADJ
     SW -->|"分析报表估值维度<br/>morning part 落库"| T3B
     FUND -.->|"透传：不规格化、不落库"| CHAIN
     MX -.->|"mx_query 透传 / mx_search 抓取<br/>不进 fallback 链（ADR 0005）"| MXC
@@ -119,6 +125,9 @@ zt_pool/strong_stocks 承载切换（issue #120，ADR 0012，仅生产路径—�
 - **`gaps.py`**：头尾缺口规则——库内已有日期集合的最早/最晚之外才补抓，最多两段（`gaps.py:10-21`）。
 - **`repository.py`**：全部 upsert 按业务键幂等。`stock_daily` 键 `(stock_code, trade_date, adj)`、`market_snapshot` 键 `(trade_date, stock_code)`（`repository.py:31-41`、`repository.py:92-103`）；盘面表注册表 `BOARD_SECTION_TABLES`（section→表/日期列/业务键/列集）与 `BOARD_QUERY_TABLES`（可查询表白名单，表名列名只来自内部常量，不接外部输入）（`repository.py:366-386`、`repository.py:434-446`）；`upsert_board_rows` 写入前按业务键去重（last-wins，上游脏数据防御——东财板块同代码重名、yyb 同席位多排名行实测存在），丢弃数记 log.warning。结论 upsert 用 CTE 预查业务键判定 inserted/updated（`repository.py:486-519`）。盘面表基本无 `source` 列（本项目 DDL 决策）；例外：`market_boards.source`（issue #84/#118，sql/015——NULL=实时采集行、'swsresearch'=申万回补行；'push2his' 为东财回补退役前存量标注，保留只读）。板块回补写入：`upsert_board_history`（行自带逐日 trade_date，业务键 upsert 并写 source，issue #121 起仅申万 sw 源使用；`select_distinct_boards` 随东财回补一并摘除）；申万估值维度 `upsert_sw_board_valuation`（issue #118，业务键 (trade_date, board_code)，sw_board_valuation 表已注册进 BOARD_QUERY_TABLES 供 query_board_data 读取）。资讯表 `news_items` 业务键 `(news_code, subject_type, subject_code)`（同一资讯可挂多主体），上游缺条目 id 时标题+发布时间复合兜底；`publish_time` 按东八区落 timestamptz；`select_news_items` 发布时间倒序 + 范围过滤 + limit，不返回内部列与 `raw`（`repository.py:581-599`、`repository.py:601-663`、`repository.py:670-709`）。
 
+- **`price_reader.py`（issue #159，ADR 0018）**：所有 legacy 个股价格读取的唯一接缝。区间行、覆盖日期、最新交易日、dominant adj、强势股窗口和申万板块截面均在此实现；`repository.py` 仅保留兼容委托。`QSTOCK_PRICE_SOURCE` 缺省 `legacy`，测试经 `register_price_reader` 替换实现；未注册值和尚未实现的 `new` 显式失败，不静默回落。
+- **`adjustment.py`（issue #160，ADR 0018）**：单票 `rebuild_stock` 将 raw 与累计 B 事实同事务 upsert/整日替换并重建 hfq/state，qfq 在返回快照时按 F_latest 标量派生。B 只取 baostock `backAdjustFactor`；首个窗口事件以 D-1 raw+权威 pctChg 反推 B0，raw 缺口或基线缺失置 pending。无效 close 留 raw 审计、不派生并写 `stock_daily_raw/invalid_close` 台账。当前为 walking skeleton，不改变生产读写路径，完整 coverage 仍归后续票据。
+
 ### 数据源适配层
 
 - **`adapters/base.py`**：协议接缝。七个 Protocol（Daily/Snapshot/Board/Fundamentals/List/IndexDaily/BoardHistory）合成 `DataAdapter`；另有独立协议 `AStockDailyAdapter`（次晨批一把抓）与 `SwBoardsAdapter`（申万链，issue #118）；失败一律抛 `FetchError`，返回空列表不是错误（`base.py:174-188`、`base.py:240-329`）。`FetchError(kind="unsupported")` 显式标注 by-design 不支持（不算抓取故障）；`fetch_failure_kind` 沿异常链按类名判定连接级故障（connection/other，ADR 0007 判定内核，`base.py:190-238`）。`BAR_FIELDS` 等列集是行 dict 与落库列的共同词汇（`base.py:20-172`）。北交所代码（4/8/9 开头）`is_bse_code` 明确拒绝（`base.py:330-333`）；`json_safe` 做透传序列化（NaN/numpy/日期→JSON 安全值，不改键名）（`base.py:335-361`）。
@@ -127,9 +136,10 @@ zt_pool/strong_stocks 承载切换（issue #120，ADR 0012，仅生产路径—�
 - **`_num.py` / `_lhb_yyb.py`**：数值/金额换算辅助与龙虎榜营业部两子表（同花顺口径）映射，纯函数、不 import 第三方库，测试无需触网。金额统一规约为万元：元值经 `_wan`、中文金额串（"X亿"/"X万"/无单位按万元）经 `_money_cn`（ADR 0006）；量纲手→股经 `_gu`（ADR 0008）。原 `_eastmoney.py`/`_board_em.py` 的东财列映射随 issue #121 整体退役，通用工具与非东财映射迁此两模块。
 - **妙想不经适配层**：`mx_client.py` 是独立 HTTP 客户端（懒加载、`MX_APIKEY` 缺失报明确 `MXError`、query/search 两方法各对一个 endpoint，`mx_client.py:20-56`）；`mx_quota.py` 是本地 JSON 配额 ledger（skill×日期计数、默认 20 次/日、环境变量 `MX_DAILY_LIMIT*`/`MX_QUOTA_FILE` 覆盖、时钟与路径可注入，`mx_quota.py:15-54`）。两者只服务 `tools_mx`，不进 fallback 链（ADR 0005）。
 
-### PostgreSQL 表（`sql/001-018`，独立新库，ADR 0002）
+### PostgreSQL 表（`sql/001-019`，独立新库，ADR 0002）
 
 - 日线类：`stock_daily`（带 `adj` 与 `source` 列；`tradestatus` 权威停牌列——baostock 路径写入，东财系为 null，issue #80）、`index_daily`（指数与个股分表——`000001` 代码冲突，指数无复权）、`stock_list`（主键 `stock_code`，全量回溯标的来源）（`sql/001`、`sql/010`、`sql/009`、`sql/014`、ADR 0004）。
+- 复权影子（issue #160，sql/019）：`stock_daily_raw` 业务键 `(stock_code,trade_date)`、`stock_adjust_factor` 键 `(stock_code,ex_date)` 存累计 B、`stock_daily_hfq` 键 `(stock_code,trade_date)` 存 F、`stock_factor_state` 以 stock_code 为键存 B0/F_latest/pending。qfq 不落表；pending 时基线与 F_latest 可同为 NULL 或保留上一组有效值，但不得判 complete。
 - 快照类：`market_snapshot`（`sql/002`）。
 - 盘面类：`market_indices`/`market_boards`（含 `source` 列：NULL=实时采集、'swsresearch'=申万官网回补（issue #118）、'push2his'=东财回补退役前存量标注只读（issue #84/#121））/`zt_pool`（sql/017 幂等加 `sealed_amount` 封单额万元 + `reason_type` 涨停原因题材两列，issue #120，THS 源承载）/`strong_stocks` + lhb 五表（`lhb_basic`/`lhb_stock_detail`/`lhb_stock_statistic`/`lhb_yyb_capital`/`lhb_yyb_most`；`lhb_basic` 业务键 `(trade_date, stock_code, lhb_reason)`——同股当日多榜单按原因各一行；`lhb_stock_detail` 无业务唯一键，随 basic 父记录整体替换；含可空 `seat_code`/`buy_amount`/`sell_amount`/`net_buy_amount`，`seat_type=buy/sell` 且 `amount` 保留方向金额兼容语义，仅沪深写入、北交所不计缺失（issue #137，sql/007 幂等加列）；`lhb_stock_statistic` 库内 lhb_basic 近 60 日历日窗口自算（issue #114 定稿，席位计数恒 NULL 不伪造），业务键 `(trade_date, stock_code)`；yyb 两表上游无卖出/净额等列、恒 null 不伪造，`lhb_yyb_most.buy_amount` 口径为"合计动用资金"非纯买入）（`sql/003-007`、`repository.py:370-386`）。
 - 金额口径：全库金额列统一万元（成交额/市值/龙虎榜金额等），换算在适配器映射层（`_wan`/`_money_cn`）；基本面透传除外（ADR 0006）。量纲口径：全库 volume 列统一股（东财系手 ×100 经 `_gu`，baostock 透传；ADR 0008）；存量迁移为一次性运维动作（`migrate_volume.py`：`--audit` 机检互证 / `--apply` 分批迁移，天然幂等）。
@@ -164,6 +174,7 @@ zt_pool/strong_stocks 承载切换（issue #120，ADR 0012，仅生产路径—�
 
 - **改表结构/schema**：`sql/00X_*.sql`（DDL 拥有权在本项目）→ `repository.py`（列集/业务键/注册表）→ `adapters/base.py` 的 `*_FIELDS` → 相关 ADR（0002 选型、0003 结论表、0004 init 表）。改完跑 `tests/test_repository.py` + 对应 fetch/query 测试。
 - **改 `query_daily` 输出结构**：这是跨仓库稳定契约（ADR 0001）——`tools_daily.py` + `skills/indicator-tools/SKILL.md` 输入契约 + `skills/indicator-tools/tests/` 必须同步，变更需谨慎。
+- **改个股价格读取/复权派生**：所有 legacy 读路径只看 `price_reader.py`；raw+B→hfq/qfq 看 `adjustment.py` 与 `sql/019`，B 字段映射看 `adapters/baostock_adapter.py`。测试 `tests/test_price_reader.py` / `test_adjustment.py` / `test_adapters.py`；决策与切换边界见 ADR 0018。
 - **加数据源**：实现 `adapters/base.py` 的协议 → 新建 `adapters/<name>_adapter.py` → 调整 `adapters/__init__.py` 对应链的顺序（个股日线/快照/指数/基本面/lhb/boards 各专用链 + 清单 default_adapters）→ `tests/fakes.py`/`test_adapters.py` 覆盖。例外：zt_pool 为 THS 单源（issue #120），接线点在 `tools_board._zt_pool_section`，不走 `default_adapters` 链。
 - **加盘面 section/表**：`sql/` 新 DDL → `repository.BOARD_SECTION_TABLES`/`BOARD_QUERY_TABLES` → `BoardAdapter` 协议与映射模块（`_lhb_yyb.py` 等现存先例）→ `tools_board.ALL_SECTIONS`。
 - **加指标**：只动 `skills/indicator-tools/scripts/indicators.py` 与其测试，不改 MCP server（ADR 0001）；新增指标不得改变既有契约（`skills/indicator-tools/SKILL.md:95`）。

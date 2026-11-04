@@ -19,7 +19,7 @@ from ..dates import dash_date
 from ._num import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
-_FIELDS = "date,open,high,low,close,volume,amount,pctChg,tradestatus,turn"
+_FIELDS = "date,open,high,low,close,preclose,volume,amount,pctChg,tradestatus,turn"
 _ADJUSTFLAG = {"qfq": "2", "hfq": "1", "none": "3"}
 
 
@@ -94,6 +94,7 @@ def map_baostock_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
                 "high": _num(r.get("high")),
                 "low": _num(r.get("low")),
                 "close": _num(r.get("close")),
+                "preclose": _num(r.get("preclose")),
                 "volume": _int(r.get("volume")),
                 "amount": _wan(r.get("amount")),
                 "amplitude": None,
@@ -132,6 +133,7 @@ def map_astock_daily_rows(fields: list[str], rows: list[list[str]]) -> list[dict
                 "high": _num(r.get("high")),
                 "low": _num(r.get("low")),
                 "close": _num(r.get("close")),
+                "preclose": _num(r.get("preclose")),
                 "volume": _int(r.get("volume")),
                 "amount": _wan(r.get("amount")),
                 "amplitude": None,
@@ -143,6 +145,22 @@ def map_astock_daily_rows(fields: list[str], rows: list[list[str]]) -> list[dict
             }
         )
     return bars
+
+
+def map_adjust_factor_rows(fields: list[str], rows: list[list[str]]) -> list[dict]:
+    """逐日因子响应 → 累计 B；第五列 adjustFacto 不参与业务派生（issue #160）。"""
+    events = []
+    for row in rows:
+        r = dict(zip(fields, row))
+        code = r.get("code") or ""
+        if not code.startswith(_STOCK_PREFIXES):
+            continue
+        events.append({
+            "stock_code": code.split(".", 1)[1],
+            "ex_date": str(r["dividOperateDate"]).replace("-", ""),
+            "factor_cum": _num(r.get("backAdjustFactor")),
+        })
+    return events
 
 
 class BaostockAdapter:
@@ -195,6 +213,25 @@ class BaostockAdapter:
             while rs.next():
                 rows.append(rs.get_row_data())
             return map_astock_daily_rows(list(rs.fields), rows)
+        finally:
+            _logout(bs)
+
+    def fetch_daily_adjust_factor(self, trade_date: str) -> list[dict]:
+        """逐日全市场事件；B 只取 backAdjustFactor（issue #160）。
+
+        2026-11-04 定点实测采用单会话串行、请求间隔 ≥1.5s、90s 外部超时；
+        长期 TPS/并发上限仍待验证，调用方不得据此放量。
+        """
+        bs = _login()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rs = bs.query_daily_adjust_factor(date=dash_date(trade_date))
+            if rs.error_code != "0":
+                raise FetchError(f"baostock 因子查询失败: {rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            return map_adjust_factor_rows(list(rs.fields), rows)
         finally:
             _logout(bs)
 

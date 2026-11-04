@@ -143,6 +143,26 @@ _Avoid_: 回填、补数据（不加限定时）
 腾讯 K 线请求 qfq/hfq 但上游只给 `day` 键时按"无复权事件"返回 day 数据的语义（ADR 0010）；响应无法区分"无复权事件"与"上游不提供调整序列"，故回落必须可见：适配器 `adjust_fallback` 标记 + WARNING 日志 + fetch/query 响应 note + 采集台账 detail「复权回落=day」+ 对拍源条目 note 五处同步标注，不静默落库。
 _Avoid_: 复权降级、静默回落
 
+**累计因子 B**:
+baostock `backAdjustFactor` 的累计复权因子口径，存于 `stock_adjust_factor.factor_cum`；`adjustFacto(r)` 仅供原始审计，不进入业务派生。相邻事件派生单次因子 `f=B_prev/B_cur`（ADR 0018）。
+_Avoid_: 把 adjustFacto(r) 当作累计 B 或单次事件因子
+
+**窗口基线 B0**:
+当前复权窗口首次事件前的累计因子基线，由 `B0=B1×f1` 反推；D-1 必须是交易日历上的确切前一交易日 raw close，缺证据时 pending，不猜 B0=1。只有事件集完整且窗口确无事件的股票才归一 B0=1。
+_Avoid_: 默认基线、provisional 基线
+
+**归一累计因子 F**:
+`F(t)=B(t)/B0`，存于 `stock_daily_hfq.factor_cum`；`hfq=raw×F`。F 只要求正且有限，允许上升或下降。
+_Avoid_: 把事件表 B 与 hfq 表 F 混为同一 factor_cum
+
+**前复权锚点**:
+每股最新有效 raw 日期及 `F_latest=B_latest/B0` 的组合；qfq 在读时按 `hfq/F_latest` 标量派生，不物化。新增事件会重锚全历史 qfq。
+_Avoid_: qfq 快照、固定前复权价
+
+**复权覆盖（coverage）**:
+新价格模型数据可用性分级：complete 要求生命周期内 raw 连续、逐日事件证据完整、基线可信且无未决异常；pending、已知缺口或无效 raw 为 partial；尚无足够状态为 unknown。单票 walking skeleton 只提供 complete 门控，不代替完整覆盖核验。
+_Avoid_: 有行即完整、采集成功即 complete
+
 ### Skill 家族（继承自旧项目词汇）
 
 **Agent skill**:

@@ -199,3 +199,69 @@ def test_baostock_mapping_turnover_rate_from_turn():
     (bar,) = map_baostock_rows(fields, rows)
     assert bar["turnover_rate"] == 0.2731  # 百分数口径直接入库
     assert bar["tradestatus"] == 1
+
+
+def test_baostock_adjust_factor_uses_back_not_event_factor():
+    """issue #160：第五列与 back 不一致时，累计 B 只取 backAdjustFactor。"""
+    from qstock_mcp.adapters.baostock_adapter import map_adjust_factor_rows
+
+    fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+    rows = [
+        ["sh.600519", "2023-06-30", "0.898366", "6.889798", "0.988591"],
+        ["sh.603786", "2024-06-04", "0.975430", "1.039163", "1.008751"],
+        ["sh.603336", "2025-11-25", "0.998739", "4.298803", "1.000000"],
+    ]
+    events = map_adjust_factor_rows(fields, rows)
+    assert [event["factor_cum"] for event in events] == [6.889798, 1.039163, 4.298803]
+    assert [event["stock_code"] for event in events] == ["600519", "603786", "603336"]
+    assert [event["ex_date"] for event in events] == ["20230630", "20240604", "20251125"]
+    assert all("adjustFactor" not in event for event in events)
+
+
+def test_baostock_raw_mapping_preserves_preclose_and_wan_amount():
+    fields = "date,code,open,high,low,close,preclose,volume,amount,pctChg,tradestatus,turn".split(",")
+    rows = [["2026-10-16", "sh.688300", "104.62", "105", "100", "102.70",
+             "104.62", "1000", "10270000", "-1.8352", "1", "0.1"]]
+    (raw,) = map_astock_daily_rows(fields, rows)
+    (bar,) = map_baostock_rows(fields, rows)
+    assert raw["preclose"] == 104.62
+    assert bar["preclose"] == 104.62
+    assert raw["amount"] == 1027.0
+    assert bar["amount"] == 1027.0
+
+
+def test_baostock_fetch_daily_adjust_factor(monkeypatch):
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    class Result:
+        error_code = "0"
+        error_msg = ""
+        fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+
+        def __init__(self):
+            self.returned = False
+
+        def next(self):
+            if self.returned:
+                return False
+            self.returned = True
+            return True
+
+        def get_row_data(self):
+            return ["sh.688300", "2026-10-16", "1.0", "3.855379", "3.855379"]
+
+    class Client:
+        requested_date = None
+
+        def query_daily_adjust_factor(self, date):
+            self.requested_date = date
+            return Result()
+
+    client = Client()
+    monkeypatch.setattr(module, "_login", lambda: client)
+    monkeypatch.setattr(module, "_logout", lambda _client: None)
+    events = module.BaostockAdapter().fetch_daily_adjust_factor("20261016")
+    assert client.requested_date == "2026-10-16"
+    assert events == [{
+        "stock_code": "688300", "ex_date": "20261016", "factor_cum": 3.855379,
+    }]

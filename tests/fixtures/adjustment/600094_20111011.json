@@ -1,0 +1,50 @@
+{
+  "stock_code": "600094",
+  "captured_at": "2026-11-04T07:28:57.390858+00:00",
+  "source": "baostock",
+  "conditions": "one login; serial; 1.5s between calls; 90s alarm each; no retries; no DB writes",
+  "factor_query": {
+    "start_date": "1990-01-01",
+    "end_date": "2013-12-31",
+    "error_code": "0",
+    "previous": {
+      "ex_date": "20070319",
+      "backAdjustFactor": "2.646807",
+      "adjustFactor": "2.646807"
+    },
+    "current": {
+      "ex_date": "20111011",
+      "backAdjustFactor": "1.983970",
+      "adjustFactor": "1.983970"
+    }
+  },
+  "raw_query": {
+    "start_date": "1990-01-01",
+    "end_date": "2013-12-31",
+    "adjustflag": "3",
+    "error_code": "0",
+    "previous": {
+      "trade_date": "20111010",
+      "close": "4.3700",
+      "preclose": "4.3700",
+      "pctChg": "0.000000",
+      "tradestatus": "0"
+    },
+    "current": {
+      "trade_date": "20111011",
+      "open": "9.0500",
+      "high": "9.0500",
+      "low": "7.5900",
+      "close": "7.6700",
+      "preclose": "5.8300",
+      "volume": "45185186",
+      "amount_yuan": "364464543.0000",
+      "pctChg": "31.560900",
+      "tradestatus": "1"
+    }
+  },
+  "worked_examples": {
+    "factor_path": "2.646807/1.983970 = 1.334096281697807...",
+    "price_path": "5.83/4.37 = 1.334096109839816..."
+  }
+}
