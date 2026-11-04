@@ -12,6 +12,7 @@ import psycopg2
 import pytest
 
 from qstock_mcp import scheduler
+from qstock_mcp.adapters._lhb_detail import seat_problem
 from qstock_mcp.adapters.base import FetchError
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.tools_lhb import (
@@ -56,6 +57,21 @@ EXCHANGE_LHB = {
             "seat_code": None, "seat_type": "sell", "amount": 352.2574,
             "amount_percent": None, "buy_count_3m": None, "sell_count_3m": None,
             "buy_amount": None, "sell_amount": 352.2574, "net_buy_amount": None,
+        },
+        {
+            "trade_date": TODAY, "stock_code": "000530",
+            "lhb_reason": "日价格振幅达到18.39%", "seat_name": "深圳卖出席位",
+            "seat_code": "sz-seat-2", "seat_type": "sell", "amount": 5168.9716,
+            "amount_percent": None, "buy_count_3m": None, "sell_count_3m": None,
+            "buy_amount": 0.0, "sell_amount": 5168.9716,
+            "net_buy_amount": -5168.9716,
+        },
+        {
+            "trade_date": TODAY, "stock_code": "600302",
+            "lhb_reason": "一、涨幅偏离值达7%的前五只证券", "seat_name": "上海买方席位",
+            "seat_code": None, "seat_type": "buy", "amount": 293.5474,
+            "amount_percent": None, "buy_count_3m": None, "sell_count_3m": None,
+            "buy_amount": 293.5474, "sell_amount": None, "net_buy_amount": None,
         },
     ],
     # lhb_stock_statistic 不在适配器承载（issue #114 定稿）：库内 lhb_basic
@@ -185,12 +201,23 @@ def test_fetch_lhb_day_replaces_parent_details_idempotently(pg_ready):
         "sell_amount": 3342.48,
         "net_buy_amount": 455.03,
     }
+    detail_sell = dict(
+        detail, seat_name="深圳卖方", seat_code="sz-sell", seat_type="sell",
+        amount=3342.48, buy_amount=None, sell_amount=3342.48, net_buy_amount=None,
+    )
     other = dict(
         detail, stock_code="600302", lhb_reason="一、涨幅偏离值达7%的前五只证券",
         seat_name="上海席位", seat_code=None, seat_type="sell", amount=352.2574,
         buy_amount=None, sell_amount=352.2574, net_buy_amount=None,
     )
-    payload = {**EXCHANGE_LHB, "lhb_stock_detail": [detail, other]}
+    other_buy = dict(
+        other, seat_name="上海买方", seat_type="buy", amount=293.5474,
+        buy_amount=293.5474, sell_amount=None,
+    )
+    payload = {
+        **EXCHANGE_LHB,
+        "lhb_stock_detail": [detail, detail_sell, other_buy, other],
+    }
 
     first = fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter(payload=payload)])
     second_detail = dict(
@@ -198,14 +225,14 @@ def test_fetch_lhb_day_replaces_parent_details_idempotently(pg_ready):
     )
     second_payload = {
         **EXCHANGE_LHB,
-        "lhb_stock_detail": [detail, second_detail, other],
+        "lhb_stock_detail": [detail, second_detail, detail_sell, other_buy, other],
     }
     second = fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter(payload=second_payload)])
 
-    assert first["lhb"]["detail_rows"] == 2
+    assert first["lhb"]["detail_rows"] == 4
     assert first["lhb"]["detail_status"] == "ok"
     assert first["lhb"]["detail_missing"] == 0
-    assert second["lhb"]["detail_rows"] == 3
+    assert second["lhb"]["detail_rows"] == 5
     conn = psycopg2.connect(pg_ready)
     try:
         with conn.cursor() as cur:
@@ -221,7 +248,7 @@ def test_fetch_lhb_day_replaces_parent_details_idempotently(pg_ready):
                 " JOIN lhb_basic AS b ON b.id = d.lhb_basic_id"
                 " WHERE b.stock_code = '000530'"
             )
-            assert cur.fetchone()[0] == 2
+            assert cur.fetchone()[0] == 3
     finally:
         conn.close()
     assert rows == [
@@ -231,6 +258,10 @@ def test_fetch_lhb_day_replaces_parent_details_idempotently(pg_ready):
         ("000530", "另一深圳席位", "another-seat-code",
          "buy", pytest.approx(3797.51), pytest.approx(3797.51),
          pytest.approx(3342.48), pytest.approx(455.03), None, None, None),
+        ("000530", "深圳卖方", "sz-sell", "sell", pytest.approx(3342.48), None,
+         pytest.approx(3342.48), None, None, None, None),
+        ("600302", "上海买方", None, "buy", pytest.approx(293.5474),
+         pytest.approx(293.5474), None, None, None, None, None),
         ("600302", "上海席位", None, "sell", pytest.approx(352.2574), None,
          pytest.approx(352.2574), None, None, None, None),
     ]
@@ -319,6 +350,7 @@ def test_fetch_lhb_day_unknown_security_skips_only_its_details(pg_ready):
         "lhb_basic": [EXCHANGE_LHB["lhb_basic"][0], reit_basic],
         "lhb_stock_detail": [
             EXCHANGE_LHB["lhb_stock_detail"][0],
+            EXCHANGE_LHB["lhb_stock_detail"][2],
             reit_detail,
             dict(reit_detail, seat_name="另一REIT席位", seat_code="reit-seat-2"),
         ],
@@ -327,13 +359,13 @@ def test_fetch_lhb_day_unknown_security_skips_only_its_details(pg_ready):
     r = fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter(payload=payload)])
 
     assert r["lhb"]["status"] == "ok"
-    assert r["lhb"]["detail_rows"] == 1
+    assert r["lhb"]["detail_rows"] == 2
     assert r["lhb"]["detail_status"] == "ok"
     assert r["lhb"]["detail_missing"] == 0
     assert r["lhb"]["partial_error"].count("180505") == 1
     assert "无法识别" in r["lhb"]["partial_error"]
     assert _count(pg_ready, "lhb_basic") == 2
-    assert _count(pg_ready, "lhb_stock_detail") == 1
+    assert _count(pg_ready, "lhb_stock_detail") == 2
 
 
 def test_fetch_lhb_day_unknown_basic_without_details_reports_skip(pg_ready):
@@ -375,6 +407,60 @@ def test_fetch_lhb_day_partial_error_lands_rows(pg_ready):
     assert _count(pg_ready, "lhb_stock_statistic") == 2
 
 
+def test_fetch_lhb_day_one_sided_parent_is_partial(pg_ready):
+    payload = {
+        **EXCHANGE_LHB,
+        "lhb_basic": [EXCHANGE_LHB["lhb_basic"][0]],
+        "lhb_stock_detail": [EXCHANGE_LHB["lhb_stock_detail"][0]],
+    }
+
+    r = fetch_lhb_day(TODAY, lhb_adapters=[FakeLhbAdapter(payload=payload)])
+
+    assert r["lhb"]["detail_rows"] == 1
+    assert r["lhb"]["detail_status"] == "partial"
+    assert r["lhb"]["detail_missing"] == 1
+
+
+def test_fetch_lhb_day_mismatched_detail_date_is_not_complete(pg_ready):
+    class WrongDateAdapter:
+        name = "wrong_date_fake"
+
+        def fetch_lhb(self, trade_date):
+            return {
+                **EXCHANGE_LHB,
+                "lhb_basic": [dict(EXCHANGE_LHB["lhb_basic"][0], trade_date=trade_date)],
+                "lhb_stock_detail": [
+                    dict(EXCHANGE_LHB["lhb_stock_detail"][0], trade_date="20261019")
+                ],
+            }
+
+    r = fetch_lhb_day("20261020", lhb_adapters=[WrongDateAdapter()])
+
+    assert r["lhb"]["detail_rows"] == 0
+    assert r["lhb"]["detail_status"] == "missing"
+    assert r["lhb"]["detail_missing"] == 1
+    assert "日期不符" in r["lhb"]["partial_error"]
+
+
+def test_seat_problem_specific_name_ignores_amounts():
+    rows = [
+        {"seat_type": "buy", "seat_name": "  示例证券  上海分公司 ", "buy_amount": 100},
+        {"seat_type": "buy", "seat_name": "示例证券 上海分公司", "buy_amount": 200},
+    ]
+
+    assert "席位重复" in seat_problem(rows)
+
+
+def test_seat_problem_generic_name_requires_exact_duplicate():
+    rows = [
+        {"seat_type": "buy", "seat_name": "机构专用", "buy_amount": 100},
+        {"seat_type": "buy", "seat_name": "机构专用", "buy_amount": 200},
+    ]
+
+    assert seat_problem(rows) is None
+    assert "席位重复" in seat_problem([rows[0], rows[0]])
+
+
 # ---------------------------------------------------------------- backfill
 
 
@@ -385,7 +471,11 @@ def test_fetch_lhb_backfill_saves_valid_details_without_failing_batch(pg_ready):
     )
     payload = {
         **EXCHANGE_LHB,
-        "lhb_stock_detail": [EXCHANGE_LHB["lhb_stock_detail"][0], invalid],
+        "lhb_stock_detail": [
+            EXCHANGE_LHB["lhb_stock_detail"][0],
+            EXCHANGE_LHB["lhb_stock_detail"][2],
+            invalid,
+        ],
     }
 
     result = fetch_lhb_backfill(
@@ -395,18 +485,18 @@ def test_fetch_lhb_backfill_saves_valid_details_without_failing_batch(pg_ready):
     assert result["status"] == "ok"
     assert result["failed"] == 0
     assert result["succeeded"] == 1
-    assert result["detail_rows"] == 1
+    assert result["detail_rows"] == 2
     assert result["detail_status"] == "partial"
     assert result["detail_missing"] == 1
     entry = result["results"][0]
     assert entry["status"] == "ok"
-    assert entry["detail_rows"] == 1
+    assert entry["detail_rows"] == 2
     assert entry["detail_status"] == "partial"
     assert entry["detail_missing"] == 1
     assert "席位净额不一致" in entry["partial_error"]
     assert _count(pg_ready, "lhb_basic") == 2
     assert _count(pg_ready, "lhb_stock_statistic") == 2
-    assert _count(pg_ready, "lhb_stock_detail") == 1
+    assert _count(pg_ready, "lhb_stock_detail") == 2
 
 
 def test_fetch_lhb_backfill_non_detail_partial_still_fails_batch(pg_ready):
@@ -426,7 +516,7 @@ def test_fetch_lhb_backfill_non_detail_partial_still_fails_batch(pg_ready):
     assert result["status"] == "partial_error"
     assert result["failed"] == 1
     assert result["succeeded"] == 0
-    assert result["results"][0]["detail_rows"] == 2
+    assert result["results"][0]["detail_rows"] == 4
     assert "上交所断连" in result["results"][0]["partial_error"]
 
 
@@ -922,7 +1012,7 @@ def test_fetch_lhb_backfill_ths_mixed_dates_rejected(pg_ready):
     assert _count(pg_ready, "lhb_stock_statistic") == 0
 
 
-def test_fetch_lhb_backfill_ths_merge_exception_is_structured(pg_ready):
+def test_fetch_lhb_backfill_ths_merge_skips_unknown_codes(pg_ready):
     official = {
         **EXCHANGE_LHB,
         "lhb_basic": [EXCHANGE_LHB["lhb_basic"][1]],
@@ -934,21 +1024,23 @@ def test_fetch_lhb_backfill_ths_merge_exception_is_structured(pg_ready):
             payload = official if trade_date == "20261020" else EXCHANGE_LHB
             return FakeLhbAdapter(payload=payload).fetch_lhb(trade_date)
 
-    class UnexpectedCodeThs:
+    class MixedCodeThs:
         name = "ths_fake"
 
         def fetch_lhb_basic(self, trade_date):
-            return [dict(EXCHANGE_LHB["lhb_basic"][0],
-                         stock_code="900901", trade_date=trade_date)]
+            return [
+                dict(EXCHANGE_LHB["lhb_basic"][0], trade_date=trade_date),
+                dict(EXCHANGE_LHB["lhb_basic"][0],
+                     stock_code="900901", trade_date=trade_date),
+            ]
 
     result = fetch_lhb_backfill(
         "20261020", "20261020",
-        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=UnexpectedCodeThs(),
+        lhb_adapters=[PartialOnTargetDay()], lhb_fallback=MixedCodeThs(),
     )
 
-    assert result["status"] == "error"
-    assert "后备合并异常" in result["results"][0]["error"]
-    assert _count(pg_ready, "lhb_basic") == 0
+    assert result["status"] == "ok"
+    assert _count(pg_ready, "lhb_basic") == 2
 
 
 def test_fetch_lhb_backfill_ths_exception_preserves_old_day(pg_ready):
@@ -998,6 +1090,7 @@ def test_fetch_lhb_backfill_default_repairs_only_missing_details(pg_ready):
             dict(row, buy_amount=111.0) for row in EXCHANGE_LHB["lhb_basic"]
         ],
         "lhb_stock_detail": [],
+        "errors": ["lhb_yyb_most: 营业部榜失败"],
     }
     fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter(payload=old)])
 
@@ -1020,7 +1113,7 @@ def test_fetch_lhb_backfill_default_repairs_only_missing_details(pg_ready):
     entry = result["results"][0]
     assert result["status"] == "ok"
     assert entry["detail_repaired"] is True
-    assert entry["detail_rows"] == 2
+    assert entry["detail_rows"] == 4
     assert entry["source"] == "exchange_fake"
     assert entry["detail_source"] == "detail_repair_fake"
     conn = psycopg2.connect(pg_ready)
@@ -1029,7 +1122,7 @@ def test_fetch_lhb_backfill_default_repairs_only_missing_details(pg_ready):
             cur.execute("SELECT buy_amount FROM lhb_basic ORDER BY stock_code")
             assert cur.fetchall() == [(pytest.approx(111.0),), (pytest.approx(111.0),)]
             cur.execute("SELECT COUNT(*) FROM lhb_stock_detail")
-            assert cur.fetchone()[0] == 2
+            assert cur.fetchone()[0] == 4
             cur.execute(
                 "SELECT source, detail FROM collection_log"
                 " WHERE trade_date = '20261020' AND section = 'lhb'"
@@ -1037,7 +1130,7 @@ def test_fetch_lhb_backfill_default_repairs_only_missing_details(pg_ready):
             )
             ledger_source, ledger_detail = cur.fetchone()
             assert ledger_source == "exchange_fake"
-            assert "detail_rows=2" in ledger_detail
+            assert "detail_rows=4" in ledger_detail
             assert "detail_status=ok" in ledger_detail
             assert "detail_missing=0" in ledger_detail
             assert "detail_source=detail_repair_fake" in ledger_detail
@@ -1051,7 +1144,48 @@ def test_fetch_lhb_backfill_default_repairs_only_missing_details(pg_ready):
     assert second["results"][0]["preserved"] is True
     assert second["results"][0]["detail_source"] == "detail_repair_fake"
     assert repair.calls.count("20261020") == 1
-    assert _count(pg_ready, "lhb_stock_detail") == 2
+    assert _count(pg_ready, "lhb_stock_detail") == 4
+
+
+def test_fetch_lhb_backfill_partial_repair_preserves_other_parent(pg_ready):
+    old_buy = dict(
+        EXCHANGE_LHB["lhb_stock_detail"][1], seat_name="旧买方",
+        seat_type="buy", buy_amount=1.0, sell_amount=None,
+    )
+    old_sell = EXCHANGE_LHB["lhb_stock_detail"][1]
+    old = {
+        **EXCHANGE_LHB,
+        "lhb_stock_detail": [old_buy, old_sell],
+    }
+    fetch_lhb_day("20261020", lhb_adapters=[FakeLhbAdapter(payload=old)])
+    new_buy = EXCHANGE_LHB["lhb_stock_detail"][0]
+    new_sell = dict(
+        new_buy, seat_name="新卖方", seat_code="new-sell", seat_type="sell",
+        buy_amount=None, sell_amount=2.0, net_buy_amount=None,
+    )
+    repair = {
+        **EXCHANGE_LHB,
+        "lhb_stock_detail": [new_buy, new_sell],
+    }
+
+    result = fetch_lhb_backfill(
+        "20261020", "20261020", lhb_adapters=[FakeLhbAdapter(payload=repair)]
+    )
+
+    assert result["results"][0]["detail_status"] == "ok"
+    assert result["results"][0]["detail_missing"] == 0
+    conn = psycopg2.connect(pg_ready)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stock_code, seat_name FROM lhb_stock_detail ORDER BY stock_code, id"
+            )
+            assert cur.fetchall() == [
+                ("000530", "深圳席位"), ("000530", "新卖方"),
+                ("600302", "旧买方"), ("600302", "上海席位"),
+            ]
+    finally:
+        conn.close()
 
 
 def test_fetch_lhb_backfill_preserves_complete_official_day(pg_ready):
@@ -1281,7 +1415,7 @@ def test_fetch_lhb_backfill_stages_lookback_without_writing_outside_window(pg_re
             )
             assert cur.fetchall() == [("000530", 37), ("600302", 37)]
             cur.execute("SELECT MIN(trade_date), MAX(trade_date), COUNT(*) FROM lhb_stock_detail")
-            assert cur.fetchone() == ("20261020", "20261020", 2)
+            assert cur.fetchone() == ("20261020", "20261020", 4)
     finally:
         conn.close()
 
@@ -1430,7 +1564,7 @@ class TestLhbCli:
         assert rc == 0
         assert out["lhb"]["status"] == "ok"
         assert out["lhb"]["detail_status"] == "partial"
-        assert out["lhb"]["detail_missing"] == 1
+        assert out["lhb"]["detail_missing"] == 2
         assert "网络抖动" in out["lhb"]["partial_error"]
 
     def test_fetch_mode_yyb_partial_keeps_existing_exit_0(self, pg_ready, capsys):

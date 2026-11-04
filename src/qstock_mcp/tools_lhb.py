@@ -31,8 +31,8 @@ from .ledger import record_collection, select_collection_log, summarize_attempte
 from .output import aggregate_batch_status
 from .output import error as _error
 from .repository import (
-    LHB_STATISTIC_WINDOW_DAYS, select_board_rows, select_lhb_detail_parent_keys,
-    select_lhb_statistic,
+    LHB_STATISTIC_WINDOW_DAYS, select_board_rows,
+    select_complete_lhb_detail_parent_keys, select_lhb_statistic,
 )
 from .tools_board import (
     _lhb_all_markets_failure_result,
@@ -80,9 +80,15 @@ def _ledger_detail_value(entry: dict, key: str) -> str | None:
 
 def _is_complete_lhb_day(entry: dict) -> bool:
     source = entry.get("source") or ""
-    return (
-        any(known in source for known in ("exchange", "ths"))
-        and "partial_error=" not in (entry.get("detail") or "")
+    if not any(known in source for known in ("exchange", "ths")):
+        return False
+    detail = entry.get("detail") or ""
+    if "partial_error=" not in detail:
+        return True
+    errors = detail.split("partial_error=", 1)[1].split("; detail_rows=", 1)[0]
+    return all(
+        error.strip().startswith(("lhb_yyb_capital:", "lhb_yyb_most:"))
+        for error in errors.split(";")
     )
 
 
@@ -128,7 +134,7 @@ def _existing_lhb_inputs(
                 conn, "lhb_stock_detail", "trade_date", "stock_code", d
             )
             expected_keys, _unknown_keys = _lhb_detail_key_sets(rows)
-            actual_keys = select_lhb_detail_parent_keys(conn, d)
+            actual_keys = select_complete_lhb_detail_parent_keys(conn, d)
             ledger_detail = entry.get("detail") or ""
             detail_incomplete = any(
                 part.strip().startswith(("detail_status=partial", "detail_status=missing"))

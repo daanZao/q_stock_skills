@@ -37,6 +37,18 @@ PG_DSN=postgresql://localhost/qstock_test qstock-scheduler daily --codes 600519 
 
 ## 协作
 
+### Spec 纠偏（结论被一手证据推翻）
+
+按以下顺序处理；完成标准是所有受影响内容都有新归属或可见阻断，而不是只改主 spec：
+
+1. **止损与定界**：暂停受影响实施；写清被推翻的命题、直接证据和样本边界，区分“已证实 / 已推翻 / 待验证”。旧实测数据不因解释错误而自动失效。
+2. **建影响图**：从主 spec 追溯 map、研究、决策、下游 task，以及代码、DDL、迁移、验收和回滚。独立 bug 与不依赖旧结论的现役任务保留，不随父 map 一并废弃。
+3. **隔离旧结论**：整体失效的报告在标题和正文标 `【已作废】`，issue 标 `【废弃的】` 并链接新入口；保留原文、评论和原始响应/缓存供审计，只禁止继续引用其结论。
+4. **重做一手研究**：沿用旧研究的问题和证据定位，重新依据官方文档、当前源码和原始响应推导；新报告注明证据条件与待验证项，不继承旧报告结论。
+5. **重锚 spec**：已有主 spec 直接修订；独立能力域新建 `Spec（待核实）`。每份研究关联一个主 spec；事实由 agent 查证，未拍板的选择写成实施阻断项，不静默选边。
+6. **同步下游**：更新受影响 task 的公式、字段、迁移与验收；未决 spec 保持 `needs-triage`，并给下游加 `Blocked by`。涉及术语、决策原因或项目入口时同步 `CONTEXT.md`、ADR、`docs/knowledge-graph.md`。
+7. **核验闭环**：全库搜索旧公式、字段映射、迁移口径和 issue 链接；逐字核对线上 issue 正文并检查本地 diff/status。代码受影响时跑覆盖该行为的测试；交付说明列出已纠正内容与剩余阻断。
+
 ### Issue tracker
 
 智能体必须先关联一个 GitHub Issue 任务，再修改代码；没有任务时先创建 Issue，再进入实现。Issues are tracked in GitHub Issues for this repo (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
