@@ -34,15 +34,16 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
   "data_range": {"start": "...", "end": "..."},
   "count": 250,
   "healed": [],
+  "adjust": {"anchor": "...", "events": [], "coverage": "complete"},
   "rows": [
     {"trade_date": "...", "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
      "volume": 1.0, "amount": 1.0, "amplitude": null, "change_percent": null,
-     "change_amount": null, "turnover_rate": null, "source": "..."}
+     "change_amount": null, "turnover_rate": null, "source": "...", "price_basis": "qfq"}
   ]
 }
 ```
 
-`rows` 按 `trade_date` 升序；`open/high/low/close/volume/amount` 须为数值（缺失视为输入错误，exit 1）。`stock_code` 从 `params` 回显到输出。
+`rows` 按 `trade_date` 升序；`open/high/low/close/volume/amount` 须为数值（缺失视为输入错误，exit 1）。`stock_code` 从 `params` 回显到输出。行级 `price_basis` 取 `qfq/hfq/raw/legacy_qfq`；`adjust.coverage=partial/unknown` 时响应必带 `note`，指标脚本仍只消费既有数值列，消费侧口径门控由 #157 承接。
 
 **停牌行消费规则**（spec #71 / W2）：停牌占位行按"无该交易日数据"剔除，不填充不伪造。判定顺序——有标注以标注为准（`suspended=true` 或 `tradestatus=0`）；无标注时兜底启发式：`open=high=low=close` 且 `volume`/`change_percent` 为 `null`。剔除后必需列校验继续严格（非停牌行缺列仍 exit 1），剔除后长度喂 `available_length` 与最小长度检查。剔除明细以 `excluded_suspended`（`{"count", "dates"}`；`corr` 按标的代码、`deviation` 按 `stock`/`benchmark` 腿分键）记入响应，无剔除时该字段不出现。
 

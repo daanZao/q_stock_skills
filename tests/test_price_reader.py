@@ -20,8 +20,8 @@ def test_price_reader_can_switch_to_registered_implementation(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("name", ["new", "misspelled"])
-def test_price_reader_rejects_unavailable_implementation(monkeypatch, name):
+def test_price_reader_rejects_unavailable_implementation(monkeypatch):
+    name = "misspelled"
     monkeypatch.setenv("QSTOCK_PRICE_SOURCE", name)
     with pytest.raises(RuntimeError, match="QSTOCK_PRICE_SOURCE"):
         price_reader.get_price_reader()

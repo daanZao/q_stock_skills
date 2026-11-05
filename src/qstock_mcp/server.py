@@ -57,7 +57,10 @@ def query_daily(
     end: str | None = None,
     adj: str = "qfq",
 ) -> dict:
-    """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间，参数同 fetch_daily。"""
+    """查询个股日线，参数同 fetch_daily；行含 price_basis，顶层含 adjust 覆盖状态。
+
+    缺省 legacy 路径保留头尾自愈；QSTOCK_PRICE_SOURCE=new 时纯读 raw/hfq 并派生 qfq。
+    """
     return tools_daily.query_daily(stock_code, days=days, start=start, end=end, adj=adj)
 
 

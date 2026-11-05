@@ -23,6 +23,7 @@ from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_with_fall
 from .gaps import head_tail_gaps
 from .ledger import record_collection, summarize_attempted
 from .output import error as _error
+from .price_reader import PriceQueryError, get_price_reader
 from .repository import select_daily, select_dates, upsert_daily
 
 log = logging.getLogger(__name__)
@@ -259,6 +260,41 @@ def fetch_daily(
     return out
 
 
+def _query_derived(reader, stock_code, days, start, end, adj) -> dict:
+    params = {"stock_code": stock_code, "adj": adj, "days": days, "start": start, "end": end}
+    try:
+        start_d, end_d = resolve_range(days, start, end)
+    except ValueError as e:
+        return _error("query_daily", params, str(e))
+    conn, err = connect()
+    if err:
+        return _error("query_daily", params, err)
+    try:
+        try:
+            result = reader.query_daily(conn, stock_code, adj, start_d, end_d)
+        except PriceQueryError as e:
+            return _error("query_daily", params, str(e), error_kind=e.error_kind)
+    finally:
+        conn.close()
+    rows = result["rows"]
+    rows = rows[-days:] if days is not None else rows
+    rows = [_mark_suspension(dict(row)) for row in rows]
+    out = {
+        "status": "ok",
+        "tool": "query_daily",
+        "params": params,
+        "range": {"start": start_d, "end": end_d},
+        "data_range": _data_range(rows),
+        "count": len(rows),
+        "healed": [],
+        "adjust": result["adjust"],
+        "rows": rows,
+    }
+    if result["adjust"]["coverage"] != "complete":
+        out["note"] = result.get("note", "复权数据覆盖不完整")
+    return out
+
+
 def query_daily(
     stock_code: str,
     days: int | None = None,
@@ -271,7 +307,11 @@ def query_daily(
     """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间。
 
     盘中时段当日行不落库但随响应返回（note 标注盘中数据，issue #78）。
+    新复权模型为纯读派生；收盘后自愈写 raw 由 #167 接入。
     """
+    reader = get_price_reader()
+    if hasattr(reader, "query_daily"):
+        return _query_derived(reader, stock_code, days, start, end, adj)
     ctx, err = _run(stock_code, days, start, end, adj, adapters, "query_daily", now)
     if err:
         return err
@@ -284,6 +324,8 @@ def query_daily(
         )
     rows = rows[-days:] if days is not None else rows
     rows = [_mark_suspension(dict(r)) for r in rows]
+    for row in rows:
+        row["price_basis"] = "legacy_qfq" if adj == "qfq" else ("raw" if adj == "none" else adj)
     out = {
         "status": "ok",
         "tool": "query_daily",
@@ -292,8 +334,14 @@ def query_daily(
         "data_range": _data_range(rows),
         "count": len(rows),
         "healed": ctx.segments,
+        "adjust": {
+            "anchor": rows[-1]["trade_date"] if rows else None,
+            "events": [],
+            "coverage": "partial",
+        },
         "rows": rows,
+        "note": "legacy 价格口径未接入新复权覆盖核验",
     }
     if ctx.deferred_rows:
-        out["note"] = _INTRADAY_NOTE + "；响应中当日行为盘中未收盘数据"
+        out["note"] += "；" + _INTRADAY_NOTE + "；响应中当日行为盘中未收盘数据"
     return out

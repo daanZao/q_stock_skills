@@ -143,7 +143,163 @@ ORDER BY a.industry_code
 """
 
 
-_READERS = {"legacy": LegacyPriceReader()}
+class PriceQueryError(RuntimeError):
+    def __init__(self, message: str, error_kind: str):
+        super().__init__(message)
+        self.error_kind = error_kind
+
+
+class NewPriceReader:
+    def query_daily(self, conn, stock_code: str, adj: str, start: str, end: str) -> dict:
+        from .dates import trading_days_between
+
+        window_start = os.environ.get("QSTOCK_ADJ_WINDOW_START", "20230101").replace("-", "")
+        if adj == "qfq" and end < window_start:
+            rows = LegacyPriceReader().select_daily(conn, stock_code, "qfq", start, end)
+            for row in rows:
+                row["price_basis"] = "legacy_qfq"
+            return {
+                "rows": rows,
+                "adjust": {
+                    "anchor": rows[-1]["trade_date"] if rows else None,
+                    "events": [],
+                    "coverage": "partial",
+                },
+                "note": "2023 年以前为 legacy qfq 只读口径，不与新派生序列拼接",
+            }
+        if adj == "qfq" and start < window_start:
+            raise PriceQueryError(
+                "qfq 请求跨越新旧复权边界，请按 2023-01-01 分界分别查询",
+                "invalid_range",
+            )
+        if adj in ("hfq", "none") and start < window_start:
+            raise PriceQueryError(
+                "新窗口外的 hfq/raw 数据不可用，不从 legacy qfq 反推",
+                "data_unavailable",
+            )
+
+        price_table = "r" if adj == "none" else "h"
+        hfq_join = "" if adj == "none" else (
+            "JOIN stock_daily_hfq h"
+            " ON h.stock_code=r.stock_code AND h.trade_date=r.trade_date"
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT r.trade_date, {price_table}.open, {price_table}.high,
+                    {price_table}.low, {price_table}.close, r.volume, r.amount,
+                    r.amplitude, r.change_percent, r.change_amount, r.turnover_rate,
+                    r.source, r.tradestatus
+                FROM stock_daily_raw r
+                {hfq_join}
+                WHERE r.stock_code=%s AND r.trade_date BETWEEN %s AND %s
+                ORDER BY r.trade_date
+                """,
+                (stock_code, start, end),
+            )
+            rows = [
+                dict(zip(BAR_FIELDS + ("source", "tradestatus"), row))
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                "SELECT baseline_factor, factor_latest, latest_trade_date, rebuild_pending"
+                " FROM stock_factor_state WHERE stock_code=%s",
+                (stock_code,),
+            )
+            state = cur.fetchone()
+            cur.execute(
+                """
+                SELECT ex_date, factor_cum, kind, detail
+                FROM stock_adjust_factor
+                WHERE stock_code=%s AND ex_date BETWEEN %s AND %s
+                ORDER BY ex_date
+                """,
+                (stock_code, start, end),
+            )
+            event_rows = cur.fetchall()
+            cur.execute(
+                "SELECT factor_cum FROM stock_adjust_factor"
+                " WHERE stock_code=%s AND ex_date<%s ORDER BY ex_date DESC LIMIT 1",
+                (stock_code, start),
+            )
+            previous_event = cur.fetchone()
+            cur.execute(
+                """
+                SELECT DISTINCT ON (trade_date) trade_date, status
+                FROM collection_log
+                WHERE section='stock_adjust_factor' AND trade_date BETWEEN %s AND %s
+                ORDER BY trade_date, finished_at DESC, id DESC
+                """,
+                (start, end),
+            )
+            factor_log = cur.fetchall()
+
+        if adj == "qfq" and (state is None or state[1] is None):
+            raise PriceQueryError("复权基线或最新锚点不可用，无法派生 qfq", "data_unavailable")
+        factor_latest = state[1] if state is not None else None
+        for row in rows:
+            if adj == "qfq":
+                assert factor_latest is not None
+                for field in ("open", "high", "low", "close"):
+                    if row[field] is not None:
+                        row[field] = float(row[field]) / float(factor_latest)
+            row["price_basis"] = "raw" if adj == "none" else adj
+        expected = set(trading_days_between(start, end))
+        actual = {row["trade_date"] for row in rows}
+        invalid_raw = adj == "none" and any(
+            row["close"] is None or row["close"] <= 0 for row in rows
+        )
+        stale_state = bool(actual) and state is not None and state[2] < max(actual)
+        unresolved_events = any(status == "error" for _, status in factor_log)
+        if state is None:
+            coverage = "unknown"
+        elif state[3] or expected != actual or invalid_raw or stale_state or unresolved_events:
+            coverage = "partial"
+        else:
+            coverage = "complete"
+        previous_b = (
+            previous_event[0] if previous_event is not None
+            else state[0] if state is not None else None
+        )
+        events = []
+        for ex_date, factor_cum, kind, detail in event_rows:
+            events.append({
+                "ex_date": ex_date,
+                "factor_cum": float(factor_cum),
+                "event_factor": (
+                    float(previous_b / factor_cum) if previous_b is not None else None
+                ),
+                "kind": kind,
+                "detail": detail,
+            })
+            previous_b = factor_cum
+        return {
+            "rows": rows,
+            "adjust": {
+                "anchor": state[2] if state is not None else None,
+                "events": events,
+                "coverage": coverage,
+            },
+            "note": (
+                "复权重建、raw 连续性或事件采集存在未决问题"
+                if coverage == "partial" else "复权覆盖状态尚未建立"
+            ),
+        }
+
+    def select_daily(self, conn, stock_code: str, adj: str, start: str, end: str) -> list[dict]:
+        return self.query_daily(conn, stock_code, adj, start, end)["rows"]
+
+    def select_dates(self, conn, stock_code: str, adj: str, start: str, end: str) -> set[str]:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date FROM stock_daily_raw"
+                " WHERE stock_code=%s AND trade_date BETWEEN %s AND %s",
+                (stock_code, start, end),
+            )
+            return {row[0] for row in cur.fetchall()}
+
+
+_READERS = {"legacy": LegacyPriceReader(), "new": NewPriceReader()}
 
 
 def register_price_reader(name: str, reader) -> None:

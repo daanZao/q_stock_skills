@@ -12,7 +12,7 @@
 - GitHub Issues [#158](https://github.com/daanZao/q_stock_skills/issues/158)、[#159](https://github.com/daanZao/q_stock_skills/issues/159)、[#162](https://github.com/daanZao/q_stock_skills/issues/162)、[#166](https://github.com/daanZao/q_stock_skills/issues/166)、[#167](https://github.com/daanZao/q_stock_skills/issues/167)、[#157](https://github.com/daanZao/q_stock_skills/issues/157)、[#149](https://github.com/daanZao/q_stock_skills/issues/149) 的当前正文。
 - 八份 `docs/research/2026-10-31-*.md` 已整体作废；本文没有引用其结论、实测数值或推断作为证据。
 
-最重要的现状判断是：**目标契约已经由 Issue 定义，但当前代码尚未实现它。** 当前 `query_daily` 仍默认直读旧 `stock_daily` 的 qfq 行，响应没有 `price_basis` 或 `adjust`；强势股、覆盖核验和申万板块自算仍各自直接访问 `stock_daily`。因此不能只做 skill 文档替换，也不能在 skill 内自行复权；必须先完成 #159 的逐值不变收敛，再由 #158/#160/#161 等数据面工作提供新事实与派生，最后接 #162/#166/#167 和消费侧改造。
+实施进度（2026-11-05）：#159 已把读取收敛到 `price_reader.py`，#160/#161 已提供新事实、派生与 morning 写路径，#162 已实现 `query_daily` 的 `price_basis`、`adjust`、覆盖门控与 legacy 边界。生产缺省仍为 legacy；#166 切流、#167 daily/T+0 自愈和本文消费侧改造尚未完成。skill 内仍不得自行复权。
 
 目标数据语义固定为：
 

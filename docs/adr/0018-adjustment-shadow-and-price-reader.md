@@ -11,8 +11,8 @@ legacy `stock_daily` 同时承担多口径价格存储与所有消费方读取�
 - 累计 B 只取 `backAdjustFactor`；`adjustFacto(r)` 仅可留原始快照审计，不进入 B、f、F 或派生。
 - 影子模型采用 `f=B_prev/B_cur`、`F=B/B0`、`hfq=raw×F`、`F_latest=B_latest/B0`、`qfq=hfq/F_latest`。首次窗口事件以权威 raw+pctChg 计算 `B0=B1×f1`，缺证据则 pending，不猜基线。
 - `stock_daily_raw`、`stock_adjust_factor`、`stock_daily_hfq`、`stock_factor_state` 为四张影子表；raw/事件支持同键修订，权威整日响应替换该日事件集以支持改期和撤销。qfq 只标量派生，不物化。
-- `price_reader.py` 是所有 legacy 个股价格读取的唯一接缝，覆盖区间行、日期、横截面 adj、强势股窗口与板块聚合。`QSTOCK_PRICE_SOURCE` 缺省为 `legacy`；测试可注册替代实现，未注册值及尚未实现的 `new` 显式失败。
-- #159/#160 是 expand 与 walking skeleton：现有工具仍读写 legacy，不切换生产读路径，不提前实现 morning/daily/backfill 或完整 coverage。
+- `price_reader.py` 是所有个股价格读取的唯一接缝，覆盖区间行、日期、横截面 adj、强势股窗口与板块聚合。`QSTOCK_PRICE_SOURCE` 缺省为 `legacy`；#162 注册 `new` 区间派生读取，测试可注册替代实现，未注册值显式失败。
+- #159/#160 是 expand 与 walking skeleton；#161 接入 morning，#162 接入 `query_daily` 纯读派生与覆盖门控。生产缺省仍读 legacy，正式切流、daily/T+0 自愈与完整迁移验收由后续票据承接。
 
 ## Consequences
 

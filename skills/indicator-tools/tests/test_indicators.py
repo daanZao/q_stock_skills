@@ -34,6 +34,7 @@ def _query_payload(closes, code="600519"):
             "change_amount": None,
             "turnover_rate": None,
             "source": "fake",
+            "price_basis": "qfq",
         }
         for i, c in enumerate(closes)
     ]
@@ -46,6 +47,7 @@ def _query_payload(closes, code="600519"):
         "data_range": {"start": rows[0]["trade_date"], "end": rows[-1]["trade_date"]},
         "count": len(rows),
         "healed": [],
+        "adjust": {"anchor": rows[-1]["trade_date"], "events": [], "coverage": "complete"},
         "rows": rows,
     }
 
@@ -215,6 +217,18 @@ class TestCLI:
         assert set(point) == {"trade_date", "ma5", "ma20"}
         assert out["series"][-1]["ma5"] == pytest.approx(
             sum(closes[-5:]) / 5, abs=1e-4)
+
+    @pytest.mark.parametrize("coverage", ["partial", "unknown"])
+    def test_new_adjust_metadata_keeps_existing_indicator_input_compatible(
+        self, monkeypatch, capsys, coverage
+    ):
+        payload = _query_payload([1.0, 2.0, 3.0])
+        payload["adjust"]["coverage"] = coverage
+        payload["note"] = "覆盖状态说明"
+        rc, out = _run_cli(monkeypatch, capsys, payload, "--indicator", "diff1")
+        assert rc == 0
+        assert out["status"] == "ok"
+        assert out["series"][-1]["diff1_close"] == 1.0
 
     def test_tail_zero_outputs_all(self, monkeypatch, capsys):
         rc, out = _run_cli(monkeypatch, capsys, _query_payload([10.0, 11.0, 12.0]),
