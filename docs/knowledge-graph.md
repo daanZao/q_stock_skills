@@ -151,7 +151,7 @@ zt_pool/strong_stocks 承载切换（issue #120，ADR 0012，仅生产路径—�
 - `news_items`：资讯表（mx-search 落库，ADR 0005）。业务唯一键 `(news_code, subject_type, subject_code)`；列含资讯类型/标题/正文截断/`publish_time`（timestamptz）/来源/链接（可空，研报无原文链接）/研报机构评级（可空）/`raw` jsonb 原文（`sql/011_news_items.sql:1-24`）。
 - 成分字典与名称表（issue #72，spec #70）：`sw_industry_class` 多体系同构形态，主键 `(source_system, stock_code, board_code, effective_date)`（'sw' 现行；'em' 东财概念成分写路径已随概念维度退役摘除，存量行只读，issue #119）；`sw_industry_meta` 行业名称表（`industry_code` 主键 / name / level 1-3），种子数据由 `import_sw_industry_meta` 工具（issue #74）幂等 upsert 灌入。`sql/012` 同时承担现库旧形态（手工建表，主键 `(stock_code, effective_date)`，列 `industry_code`）的幂等迁移：改名 `board_code`、回填 `source_system='sw'`、主键扩为四元组。
 - `sw_board_valuation`：申万板块每日分析报表（估值维度，issue #118，sql/018）——换手率/PE/PB/流通市值（万元，ADR 0006）/股息率 + 收盘指数，业务键 `(trade_date, board_code)`、level 1/2；写方为次晨批 morning 的 sw_board_valuation part（申万官网单源 T+1），读方 query_board_data；与 market_boards 申万行按 (trade_date, board_code) 互查（快照 T+0 vs 报表 T+1 修订口径分表）。
-- `collection_log`：采集台账（issue #77，append-only 全历史保留），字段与就绪检查语义见 `sql/013_collection_log.sql` 文件头注释与上文 tools_ledger 条目；status 四值词表（ok/empty/error/planned_absent，sql/016 把现库三值 CHECK 幂等迁移为四值，issue #113）。
+- `collection_log`：采集台账（issue #77，append-only 全历史保留），字段与就绪检查语义见 `sql/013_collection_log.sql` 文件头注释与上文 tools_ledger 条目；status 四值词表（ok/empty/error/planned_absent，sql/016 把现库三值 CHECK 幂等迁移为四值，issue #113）。复权回填（issue #163）另用四个审计 section：`stock_adjust_factor`（逐日权威因子）、`stock_daily_raw`（逐票 raw）、`stock_factor_repair`（复权审计原因）、`stock_factor_retracted`（事件撤销事实标记，status=ok）；repair 的 error_kind 不复用抓取三态（ADR 0007 补记）。
 
 ### agent skill（`skills/`，第二测试接缝：脚本 stdin/stdout）
 
