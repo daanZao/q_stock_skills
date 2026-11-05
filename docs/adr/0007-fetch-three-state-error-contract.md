@@ -66,6 +66,23 @@ ok/empty/error 三态，会被判成"每天永久 error"——复盘每天走中
 - **消费方（daily-review）**：`planned_absent` 不触发中止线、不进异常报告
   失败清单；按"计划缺席"降级出报并在 `data_gaps`/就绪台账标注原因。
 
+## 补记（2026-11-05，issue #163）：collection_log 扩出复权审计 section/error_kind
+
+复权回填 A 需要可查询的逐日/逐票审计与待修复原因，复用 `collection_log`
+（append-only）而不另建审计表：
+
+- `stock_adjust_factor`：逐日权威因子采集（`ok/empty/error`，detail 前缀
+  `adj-backfill event <start>~<end>`；morning 行不使用该前缀）。
+- `stock_daily_raw`：逐票 raw 回填结果（detail 前缀 `adj-backfill raw ...`）。
+- `stock_factor_repair`：待修复原因（`baseline_unverified`/`factor_mismatch`/
+  `price_path_unverified`/`raw_gap`/`invalid_close`/`raw_unavailable`/
+  `raw_refresh_failed`）；这是审计原因，不是抓取三态分类。
+- `stock_factor_retracted`：事件撤销事实标记（`status=ok`，与整日替换同事务）。
+
+边界：抓取失败行仍严格使用本 ADR 的三态 `error_kind`；上述修复原因是复权
+审计词汇，不得拿来替代 `upstream_unreachable`/`no_data_for_date`/`fetch_failed`
+的抓取语义。
+
 ## Consequences
 
 - `fetch_market_snapshot` 首个落地（issue #46）；`fetch_board_snapshot` 及其他 `fetch_*` 工具的落地在后续 issue，落地时必须复用本契约的三态命名与判定标准，不得另造分类（补漏路径的 `empty` 是本 ADR 补记明定的唯一例外，边界见上节）。

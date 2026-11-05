@@ -674,6 +674,11 @@ def test_retraction_marker_survives_interruption_before_raw_rebuild(pg_test, tmp
         )
     markers = _ledger(pg_test, section="stock_factor_retracted")
     assert any("600002" in row[5] for row in markers)
+    pending = _fetch(
+        pg_test,
+        "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='600002'",
+    )[0][0]
+    assert pending is True  # 整日替换同事务标记受影响 state
 
     out = _run(
         pg_test, FakeBackfillAdapter(events=retracted_events),
@@ -695,3 +700,112 @@ def test_retraction_marker_survives_interruption_before_raw_rebuild(pg_test, tmp
         " WHERE stock_code='600002' ORDER BY trade_date",
     )
     assert [float(row[0]) for row in factors] == pytest.approx([1.0] * 5)
+
+
+def test_day_checkpoint_ignores_morning_pctchg_derived_row(pg_test, tmp_path):
+    """morning 的 pctChg 降级 ok 行不能冒充回填已调过权威逐日因子接口。"""
+    _seed_event(pg_test, "600002", "20261014", 3.0)
+    conn = psycopg2.connect(pg_test)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO collection_log (trade_date, section, status, source,"
+                " rows, detail) VALUES ('20261014','stock_adjust_factor','ok',"
+                " 'baostock', 1, 'morning_batch:baostock-pctchg-derived;stocks=1')"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    adapter = FakeBackfillAdapter()
+    out = _run(pg_test, adapter, report_dir=str(tmp_path))
+
+    assert out["status"] == "ok"
+    assert adapter.factor_calls == WINDOW_DAYS
+    day_14 = [row for row in _ledger(pg_test, section="stock_adjust_factor")
+              if row[0] == "20261014"]
+    assert "adj-backfill event" in day_14[-1][5]
+
+
+def test_same_b_daily_row_is_not_stored_as_placeholder_event(pg_test, tmp_path):
+    events = _events()
+    events["20261015"] = [{"stock_code": "600001", "factor_cum": 2.0}]
+    raw = _raw_series()
+    raw["600001"][3] = _bar("20261015", 9.0, 9.0, 0.0)  # 无价格阶跃
+    adapter = FakeBackfillAdapter(events=events, raw=raw)
+    out = _run(pg_test, adapter, report_dir=str(tmp_path))
+
+    assert out["status"] == "ok"
+    assert out["summary"]["events"] == 3  # 10-15 同 B 行不是事件
+    stored = _fetch(
+        pg_test,
+        "SELECT ex_date, factor_cum FROM stock_adjust_factor"
+        " WHERE stock_code='600001' ORDER BY ex_date",
+    )
+    assert [(row[0], float(row[1])) for row in stored] == [("20261013", 2.0)]
+    day_15 = [row for row in _ledger(pg_test, section="stock_adjust_factor")
+              if row[0] == "20261015"]
+    assert day_15[-1][1] == "ok"
+    assert day_15[-1][3] == 0
+    assert "equal_b_skipped=1" in day_15[-1][5]
+    state = _fetch(
+        pg_test,
+        "SELECT factor_latest FROM stock_factor_state WHERE stock_code='600001'",
+    )[0][0]
+    assert float(state) == pytest.approx(2.0)
+
+
+def test_historical_end_with_later_facts_is_rejected(pg_test, tmp_path):
+    conn = psycopg2.connect(pg_test)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO stock_daily_raw (stock_code, trade_date, close, source)"
+                " VALUES ('600001','20261019',10.0,'seed')"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    adapter = FakeBackfillAdapter()
+    out = _run(pg_test, adapter, end="20261016", report_dir=str(tmp_path))
+
+    assert out["status"] == "error"
+    assert out["error_kind"] == "window_behind_data"
+    assert adapter.factor_calls == []
+    assert adapter.raw_calls == []
+    assert _fetch(
+        pg_test,
+        "SELECT count(*) FROM stock_daily_raw WHERE trade_date='20261019'",
+    )[0][0] == 1
+    assert _fetch(pg_test, "SELECT count(*) FROM stock_adjust_factor")[0][0] == 0
+
+
+def test_missing_first_event_raw_is_recorded_as_raw_gap(pg_test, tmp_path):
+    raw = {"600001": [
+        _bar("20261012", 10.0, 10.0, 0.0),
+        _bar("20261014", 9.0, 8.0, 12.5),
+        _bar("20261015", 9.0, 4.5, 100.0),
+        _bar("20261016", 9.0, 9.0, 0.0),
+    ]}
+    adapter = FakeBackfillAdapter(
+        events={
+            "20261012": [], "20261013": [{"stock_code": "600001", "factor_cum": 2.0}],
+            "20261014": [], "20261015": [{"stock_code": "600001", "factor_cum": 4.0}],
+            "20261016": [],
+        },
+        raw=raw,
+    )
+    out = _run(pg_test, adapter, report_dir=str(tmp_path))
+
+    assert out["status"] == "partial_error"
+    repairs = _ledger(pg_test, section="stock_factor_repair")
+    raw_gap = next(row for row in repairs if row[4] == "raw_gap")
+    assert "first_event=20261013" in raw_gap[5]
+    state = _fetch(
+        pg_test,
+        "SELECT baseline_factor, rebuild_pending FROM stock_factor_state"
+        " WHERE stock_code='600001'",
+    )[0]
+    assert state[0] is None
+    assert state[1] is True

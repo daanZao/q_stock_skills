@@ -234,8 +234,10 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
   ```
 
 - **关键参数**：`--start` 缺省 `QSTOCK_ADJ_WINDOW_START`/`20230101`；
-  `--trading-days` 与 `--start` 互斥；`--limit` 仅冒烟并标记 `limited`；
-  `--force` 忽略台账断点整窗重抓；`--report-dir` 指定 CSV/summary 产物目录。
+  `--trading-days` 与 `--start` 互斥；`--end` 必须覆盖库内最新复权事实
+  （否则 `window_behind_data` 拒绝，历史窗口请用隔离库）；`--limit` 仅冒烟
+  并标记 `limited`；`--force` 忽略台账断点整窗重抓；`--report-dir` 指定
+  CSV/summary 产物目录。
 - **结果判断**：只有 `status="ok"` 且无 `stock_factor_repair` 未决项才输出
   「数据可以使用」；`partial_error` 时先看 `summary.failed_days`、
   `summary.repair_counts` 与 `repairs.csv`。断点续跑看

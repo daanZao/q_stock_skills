@@ -28,6 +28,10 @@ Issue [#163](https://github.com/daanZao/q_stock_skills/issues/163)，spec [#158]
 5. 交易日历来自 `dates._MARKET_CLOSURES`（2023–2026 已列）；2027 起需按
    交易所公告补齐，否则休市日会被多请求并记 `empty`（只会多不会漏事件，
    但“完整交易日集合”会偏大）。
+6. `--end` 必须覆盖库内最新复权事实（`max(stock_daily_raw.trade_date)` 与
+   `max(stock_adjust_factor.ex_date)`）。回填会重建 state/hfq；历史 end 若
+   早于已有数据会回退窗口外派生，程序直接拒绝并返回
+   `error_kind="window_behind_data"`，零写入。历史窗口请用隔离库。
 
 ## 命令
 
@@ -57,7 +61,7 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
 | 参数 | 说明 |
 | --- | --- |
 | `--start` | 窗口起点 `yyyymmdd`；缺省 `QSTOCK_ADJ_WINDOW_START` 或 `20230101` |
-| `--end` | 窗口终点；缺省最近已收盘交易日；盘中显式指定当日会被拒（零落库） |
+| `--end` | 窗口终点；缺省最近已收盘交易日；必须覆盖库内最新复权事实；盘中显式指定当日会被拒（零落库） |
 | `--trading-days N` | 最近 N 个交易日；与 `--start` 互斥，可用 `--end` 指定截止日 |
 | `--limit N` | 只处理前 N 只有事件票（冒烟）；结果标记 `limited`，不宣称完整 |
 | `--force` | 忽略台账断点，整窗重抓事件与 raw |
@@ -68,17 +72,24 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
 
 1. **事件集**：窗口内每个历史交易日调用一次 `query_daily_adjust_factor(date)`。
    - 成功空结果 → `collection_log` 的 `stock_adjust_factor` 记 `empty`。
-   - 成功非空 → 事务内整日替换 `stock_adjust_factor`（支持修订/撤销），记 `ok`。
-   - 失败 → 按 0.5/1/2s 退避重试 3 次；仍失败记 `error`，保留旧事件，**绝不**
-     当“当日无事件”，并进入 `failed_days`。
+   - 成功非空 → 事务内整日替换 `stock_adjust_factor`（支持修订/撤销），记 `ok`；
+     同一事务把受影响 state 置 `rebuild_pending=true`，并把被撤销票写
+     `stock_factor_retracted` 标记（崩溃续跑可补齐）。
+   - **同 B 非阶跃行不写入事件表**：若某票当日 B 与它上一个事件 B 相等，说明
+     上游返回行没有价格阶跃，跳过（不写 `f=1` 占位行）；台账 detail 记
+     `equal_b_skipped=N`，当日若只剩这类行记 `ok, rows=0`。
+   - 失败 → 最多 3 次尝试，重试前 0.5s/1.0s 退避；仍失败记 `error`，保留旧
+     事件，**绝不**当“当日无事件”，并进入 `failed_days`。
 2. **事件票清单**：按 `stock_adjust_factor` 窗口内行导出；非事件票不写占位因子。
 3. **raw**：只对事件票逐只 `fetch_daily(..., adj="none")`（`adjustflag=3`），区间
    `[窗口首交易日, end]`；首事件恰在窗口首日时起点提前到窗口外最后一个交易日
-   作为 D-1 计算输入（该行保留在 raw 供审计，不写 hfq）。amount 元→万元由
+   作为 D-1 计算输入。该 D-1 行作为「窗口基线 D-1 输入」保留在 raw 供审计/
+   续跑，但不进入 hfq、事件集、`events.csv` 或窗口查询交付。amount 元→万元由
    适配层完成，`tradestatus`/`turn`/`pctChg` 原样入库。
 4. **重建**：`rebuild_stock(window_start, window_end)` 反推窗口基线
    `B0=B1×f1`，写事件 B、hfq F/F_latest 与 state；逐事件做 B 路径 vs 权威
-   pctChg 价格路径对账（相对误差 ≤0.1% 为一致）。
+   pctChg 价格路径对账（相对误差 ≤0.1% 为一致）。窗口外已有 hfq/事件时拒绝
+   重建，绝不回退窗口外派生。
 5. **待修复台账**：见下节；存在任何未决项时 `stage=rebuilt`，不输出
    「数据可以使用」。
 6. **导出**：逐日状态、事件集、事件票清单、raw 结果、待修复明细、summary。
@@ -87,8 +98,8 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
 
 | 对象 | 复用条件 |
 | --- | --- |
-| 因子日 | 该日 `collection_log(stock_adjust_factor)` 最近一条为 `ok/empty`，且事件表该日行数与台账 `rows` 一致 |
-| raw 票 | 该票本窗口最近一条 `adj-backfill raw` 台账为 `ok`，窗口内 raw 行数 > 0，且窗口首日事件票存在 D-1 行 |
+| 因子日 | 该日**本回填** `adj-backfill event <start>~<end>` 台账最近一条为 `ok/empty`，且事件表该日行数与台账 `rows` 一致；morning 的 pctChg 降级 ok 行不算已调权威接口 |
+| raw 票 | 该票本窗口最近一条 `adj-backfill raw` 台账为 `ok`，窗口内 raw 行数 > 0，首事件日与其 D-1（或上市日晚于 D-1 的事实）成立，且首/末事件都在 raw 覆盖内 |
 | 重建 | 每次运行都会重建入选事件票（幂等）；但不会重抓已有效 raw |
 
 失败/空日会重新请求；失败票会重新请求。`--force` 跳过全部复用。
@@ -97,25 +108,28 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
 
 事件被权威结果撤销时，**与整日事件替换同一事务**写
 `collection_log(section=stock_factor_retracted, status=ok, detail='adj-backfill
-retracted <code> <ex_date>')`；崩溃后断点续跑据此把旧事件票按“无事件”重建，
-不会留下旧 hfq/state。
+retracted <code> <ex_date>')`，并把受影响 `stock_factor_state.rebuild_pending`
+置 true；崩溃后断点续跑据此把旧事件票按“无事件”重建，读者在重建完成前只能
+看到 pending，不会把新事件分母配旧 hfq。
 
 未决项写 `collection_log` section `stock_factor_repair`，`status=error`，
-`error_kind` 取值：
+`error_kind` 取值（这些是复权审计原因，不是 ADR 0007 的抓取三态；抓取失败
+仍用 `upstream_unreachable`/`fetch_failed`/`no_data_for_date`）：
 
 | error_kind | 含义 | state |
 | --- | --- | --- |
 | `baseline_unverified` | 首个窗口事件缺 D-1/pctChg，或 B0 非正/非有限 | `baseline_factor=NULL`、`factor_latest=NULL`、`rebuild_pending=true`、coverage=partial；不猜 B0 |
 | `factor_mismatch` | 后续事件 B 路径与价格路径相对误差 >0.1% | 保留已建立基线，`rebuild_pending=true` |
 | `price_path_unverified` | 后续事件缺 D-1 raw 或权威 pctChg，价格路径不可验证 | 保留已建立基线，`rebuild_pending=true` |
-| `raw_gap` | 窗口内 raw 缺少交易日（含停牌占位行缺失） | `rebuild_pending=true` |
+| `raw_gap` | 窗口内 raw 缺少交易日（含停牌占位行缺失），或首/末事件日不在 raw（detail 带 `first_event=` / `last_event=`） | `rebuild_pending=true` |
 | `invalid_close` | close 为 NULL 或 ≤0；行保留在 raw、不进入 hfq | `rebuild_pending=true` |
 | `raw_unavailable` | 事件票 raw 抓取失败或上游空返回 | 无 raw 时不造 state；已有 raw 时沿用重建 |
 | `raw_refresh_failed` | 本次 raw 重抓失败，沿用库内已有 raw | 沿用重建结果并标记 pending |
 
 §2.4 允许 pending 时保留上一组有效值；只有**基线本身**不可验证时才强制
 NULL/NULL。待修复记录是 append-only 审计；重跑成功不会删除旧记录，但当前
-state 会恢复 `rebuild_pending=false`。
+state 会恢复 `rebuild_pending=false`。因此切读门禁看
+`stock_factor_state.rebuild_pending`，不要把历史修复行数当作当前未决数。
 
 查询示例：
 
@@ -172,6 +186,31 @@ WHERE s.latest_trade_date <> (
   SELECT max(trade_date) FROM stock_daily_raw r WHERE r.stock_code=s.stock_code
 );
 
+-- 2b. 首事件基线 B0=B1×f1（D-1 取首事件日前最近 raw 行；raw 缺口另查）
+WITH first_ev AS (
+  SELECT DISTINCT ON (stock_code) stock_code, ex_date, factor_cum
+  FROM stock_adjust_factor
+  WHERE ex_date BETWEEN '20230101' AND '20261104'
+  ORDER BY stock_code, ex_date
+), prev_raw AS (
+  SELECT f.stock_code, f.factor_cum, r.close, r.change_percent, p.close AS prev_close
+  FROM first_ev f
+  JOIN stock_daily_raw r ON r.stock_code=f.stock_code AND r.trade_date=f.ex_date
+  LEFT JOIN LATERAL (
+    SELECT close FROM stock_daily_raw p
+    WHERE p.stock_code=f.stock_code AND p.trade_date < f.ex_date
+    ORDER BY p.trade_date DESC LIMIT 1
+  ) p ON true
+)
+SELECT count(*) FROM prev_raw pr
+JOIN stock_factor_state s USING (stock_code)
+WHERE s.baseline_factor IS NOT NULL
+  AND pr.prev_close IS NOT NULL AND pr.change_percent IS NOT NULL
+  AND pr.prev_close > 0 AND pr.close > 0
+  AND abs(s.baseline_factor - pr.factor_cum * (
+        pr.close / (pr.prev_close * (1 + pr.change_percent / 100)))) >
+      1e-6 * s.baseline_factor;
+
 -- 3. hfq 只覆盖有效 raw；F 正且有限
 SELECT count(*) FROM stock_daily_hfq h
 LEFT JOIN stock_daily_raw r USING (stock_code, trade_date)
@@ -179,7 +218,32 @@ WHERE r.stock_code IS NULL OR r.close IS NULL OR r.close <= 0;
 SELECT count(*) FROM stock_daily_hfq
 WHERE factor_cum <= 0 OR factor_cum >= 'Infinity'::numeric;
 
--- 4. 未决异常必须为 0 才可切读
+-- 3b. hfq=raw×F（容差）
+SELECT count(*) FROM stock_daily_hfq h
+JOIN stock_daily_raw r USING (stock_code, trade_date)
+WHERE r.close IS NULL OR h.close IS NULL
+   OR abs(h.close - r.close * h.factor_cum) > 1e-6 * greatest(abs(h.close), 1);
+
+-- 3c. 事件日 F(D)×f(D)=F(D-1)（D-1 取 hfq 前一交易行；raw 缺口另查）
+WITH ev AS (
+  SELECT stock_code, ex_date, factor_cum,
+         lag(factor_cum) OVER (PARTITION BY stock_code ORDER BY ex_date) AS prev_b
+  FROM stock_adjust_factor
+  WHERE ex_date BETWEEN '20230101' AND '20261104'
+), hfq AS (
+  SELECT stock_code, trade_date, factor_cum,
+         lag(factor_cum) OVER (PARTITION BY stock_code ORDER BY trade_date) AS prev_f
+  FROM stock_daily_hfq
+  WHERE trade_date BETWEEN '20230101' AND '20261104'
+)
+SELECT count(*) FROM ev
+JOIN hfq h ON h.stock_code=ev.stock_code AND h.trade_date=ev.ex_date
+WHERE ev.prev_b IS NOT NULL
+  AND (h.prev_f IS NULL
+       OR abs(h.factor_cum * (ev.prev_b / ev.factor_cum) - h.prev_f)
+          > 1e-6 * greatest(abs(h.factor_cum), 1));
+
+-- 4. 切读门禁：当前 state 无 pending；修复台账只作审计（历史行可保留）
 SELECT count(*) FROM stock_factor_state WHERE rebuild_pending;
 SELECT error_kind, count(*) FROM collection_log
 WHERE section='stock_factor_repair'
@@ -187,8 +251,9 @@ WHERE section='stock_factor_repair'
 GROUP BY error_kind;
 ```
 
-完整八项验收（事件不变量、Golden、哈希幂等）由 issue #165 的测试套件承担；
-本回填只负责产出可审计的迁移数据集。
+上述 SQL 覆盖结构、首事件 B0、事件不变量、hfq 派生与覆盖关系的主要门禁；
+Golden 逐值、哈希幂等/续跑/修订撤销由 issue #165 的测试套件承担。正式回填后
+应先跑本组只读检查，再按 #166 切读。
 
 ## 回滚
 
@@ -235,5 +300,5 @@ COMMIT;
   请求成功，窗口 raw 41 行；3 票首事件在窗口首日，额外取 20261030 作 D-1
   且未进 hfq；001381 上市首日（20261103）事件无 D-1，按规则进入
   `baseline_unverified`，未猜 B0。首跑 25.9s（17 次真实请求、1.5s 间隔）；
-  原样重跑 0 次上游请求、3 日/14 票全部命中台账，耗时 0.048s，四表业务
+  原样重跑 0 次上游请求、3 日/14 票全部命中台账，耗时约 0.04s，四表业务
   哈希一致。该结果只代表当次样本，不构成全窗口成功率或耗时结论。

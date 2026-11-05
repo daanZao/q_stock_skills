@@ -5,7 +5,12 @@
 -- 占位缺席，非抓取结果非故障；现库三值约束经 016 幂等迁移为四值）。
 -- 复盘就绪检查先读本表："无台账行"= 未采集，"empty"= 上游确认无数据，
 -- "error"= 采集失败，"planned_absent"= 计划缺席（迁移占位，非故障）。
--- 承载：写一切写库路径（ledger.record_collection）；读 query_collection_log（就绪检查归因）
+-- 复权回填审计（issue #163）：section 扩出 stock_adjust_factor（逐日权威因子）/
+-- stock_daily_raw（逐票 raw）/stock_factor_repair（待修复原因）/
+-- stock_factor_retracted（事件撤销事实标记，status=ok）。repair 的 error_kind
+-- 是复权审计原因词表，不复用 ADR 0007 的抓取三态；抓取失败行仍严格三态。
+-- 承载：写一切写库路径（ledger.record_collection；复权回填另有同事务直插
+-- stock_factor_retracted）；读 query_collection_log（就绪检查归因）
 CREATE TABLE IF NOT EXISTS collection_log (
     id          bigserial PRIMARY KEY,
     trade_date  char(8) NOT NULL,   -- 采集目标交易日 yyyymmdd（区间采集记区间尾日，区间见 detail）

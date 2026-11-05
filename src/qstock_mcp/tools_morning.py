@@ -26,6 +26,7 @@ from .adapters import (
     default_index_daily_adapters,
 )
 from .adapters.base import FetchError, fetch_failure_kind
+from .adjustment import event_factor_from_pctchg, factor_relative_error
 from .dates import add_days, is_trading_time, normalize_date, prev_trading_day, today_str
 from .db import connect
 from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_index_daily_with_fallback
@@ -106,18 +107,6 @@ def _previous_b(
     return Decimal(str(previous_factor[0]))
 
 
-def _pctchg_event_factor(previous_close, row: dict) -> Decimal | None:
-    pct = row.get("change_percent")
-    close = row.get("close")
-    if pct is None or close is None or close <= 0 or previous_close <= 0:
-        return None
-    realclose = Decimal(str(previous_close)) * (1 + Decimal(str(pct)) / 100)
-    if realclose <= 0:
-        return None
-    event_factor = Decimal(str(close)) / realclose
-    return event_factor if event_factor > 0 else None
-
-
 def _derive_pctchg_events(
     conn, target: str, raw_rows: list[dict]
 ) -> tuple[list[dict], list[str]]:
@@ -134,7 +123,9 @@ def _derive_pctchg_events(
         if Decimal(str(row["preclose"])) == Decimal(str(previous[1])):
             continue
         previous_b = _previous_b(conn, stock_code, target)
-        event_factor = _pctchg_event_factor(previous[1], row)
+        event_factor = event_factor_from_pctchg(
+            previous[1], row.get("close"), row.get("change_percent")
+        )
         if previous_b is None or event_factor is None:
             unresolved.append(stock_code)
             continue
@@ -161,11 +152,13 @@ def _authoritative_factor_mismatches(
         previous_b = _previous_b(conn, stock_code, target, include_baseline=False)
         if previous is None or previous_b is None:
             continue
-        pct_factor = _pctchg_event_factor(previous[1], row)
+        pct_factor = event_factor_from_pctchg(
+            previous[1], row.get("close"), row.get("change_percent")
+        )
         if pct_factor is None or event["factor_cum"] <= 0:
             continue
         authoritative_factor = previous_b / Decimal(str(event["factor_cum"]))
-        relative_error = abs(pct_factor - authoritative_factor) / authoritative_factor
+        relative_error = factor_relative_error(pct_factor, authoritative_factor)
         if relative_error > Decimal("0.001"):
             mismatches.append({
                 "stock_code": stock_code,

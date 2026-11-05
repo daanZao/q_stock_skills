@@ -299,5 +299,6 @@ B0        =3.855379×f1=2.965588537153224...
 - 14 次单票 raw 请求均成功，窗口内 raw 41 行；3 只票首个事件在窗口首日（2026-11-02），额外请求 2026-10-30 作为 D-1 基线输入，D-1 行保留在 raw 但不进入 hfq。
 - 首跑耗时 25.9s（17 次真实请求，相邻 1.5s），状态 `partial_error`：14 票中 13 票建立 B0 并重建，1 票进入待修复台账。
 - 待修复样本 `001381`：2026-11-03 上市首日即出现 `backAdjustFactor=1.000000` 事件，raw 从上市首日开始、没有 D-1，按 §4.2 不套用首事件公式，state 为 `baseline_factor=NULL、factor_latest=NULL、rebuild_pending=true`，`coverage=partial`，未猜 B0；这不是回填 bug。
-- 原样重跑同一窗口：3 个因子日与 14 只票全部命中 `collection_log` 断点，上游请求 0 次（`summary.upstream_requests.total=0`），耗时 0.048s（14 票本地重建，跳过项不占节流等待）。四张业务表（raw/事件/hfq/state）按业务列排序的 MD5 与首跑逐表一致，见 `files/adj_backfill_smoke_before_hash.txt` / `after_hash.txt`。
-- 该样本只证明当次真实采集、IPO 无 D-1 边界与断点续跑，不构成全窗口成功率、事件完备率、长期 TPS 或全量耗时结论；正式回填后的结构/事件/B0/覆盖全检仍按 spec §7 与 `docs/adj-backfill-cli.md` 的只读 SQL 执行。
+- 原样重跑同一窗口：3 个因子日与 14 只票全部命中本回填 `collection_log` 断点，上游请求 0 次（`summary.upstream_requests.total=0`），耗时约 0.04s（14 票本地重建，跳过项不占节流等待）。四张业务表（raw/事件/hfq/state）按业务列排序的 MD5 与首跑逐表一致，见 `files/adj_backfill_final_before_hash.txt` / `after_hash.txt`。
+- 评审后（同窗口）复测一致：首跑 25.9s、重跑 0.039s/0 请求、业务哈希一致；本样本未出现同 B 非阶跃行，因此事件数仍为 14。同 B 过滤、morning 降级台账不冒充权威日、历史 `--end` 拒绝（`window_behind_data`）均有单测覆盖。
+- 该样本只证明当次真实采集、IPO 无 D-1 边界与断点续跑，不构成全窗口成功率、事件完备率、长期 TPS 或全量耗时结论；正式回填后的结构/事件/B0/覆盖全检按 `docs/adj-backfill-cli.md` 的只读 SQL 执行，Golden/哈希幂等归 #165。

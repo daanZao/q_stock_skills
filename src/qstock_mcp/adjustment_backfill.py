@@ -26,6 +26,7 @@ import os
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from decimal import Decimal
 from time import monotonic
 
 from psycopg2.extras import execute_values  # type: ignore[import-untyped]
@@ -51,7 +52,7 @@ ADJ_BACKFILL_DEFAULT_START = "20230101"
 # 未验证，回填固定串行并使用该间隔（不据此推断全历史容量）。
 ADJ_BACKFILL_THROTTLE_S = 1.5
 ADJ_BACKFILL_RETRIES = 3
-ADJ_BACKFILL_BACKOFF_S = (0.5, 1.0, 2.0)
+ADJ_BACKFILL_BACKOFF_S = (0.5, 1.0)
 PROGRESS_LOG_EVERY = 20
 PROGRESS_LOG_INTERVAL_S = 60
 RAW_DETAIL_PREFIX = "adj-backfill raw"
@@ -99,6 +100,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _decimal(value) -> Decimal:
+    return Decimal(str(value))
+
+
 def _valid_factor(value) -> bool:
     if value is None:
         return False
@@ -117,6 +122,15 @@ def _raw_detail_prefix(stock_code: str, start: str, end: str) -> str:
     return f"{RAW_DETAIL_PREFIX} {stock_code} {start}~{end}"
 
 
+def _failure_kind(error) -> str:
+    kind = fetch_failure_kind(error) if error is not None else "fetch_failed"
+    if kind == "connection":
+        return "upstream_unreachable"
+    if kind == "unsupported":
+        return "unsupported"
+    return "fetch_failed"
+
+
 def _repair_detail(stock_code: str, reason: str, detail: str) -> str:
     return (
         f"adj-backfill repair {stock_code} {reason}: {detail}"
@@ -127,16 +141,22 @@ def _repair_detail(stock_code: str, reason: str, detail: str) -> str:
 
 
 def _day_checkpoints(conn, start: str, end: str) -> dict[str, dict]:
-    """每个交易日最近一次因子采集台账（含 morning 写入的权威行）。"""
+    """本回填同窗口最近一次因子采集台账。
+
+    只认 `adj-backfill event <start>~<end>` 前缀：morning 的 pctChg 降级行也
+    可能记 ok，但回填仍须亲自调用一次权威逐日因子接口，不能把降级结果当作
+    已采过。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT DISTINCT ON (trade_date) trade_date, status, rows, error_kind
             FROM collection_log
             WHERE section = %s AND trade_date BETWEEN %s AND %s
+              AND detail LIKE %s
             ORDER BY trade_date, id DESC
             """,
-            (EVENT_SECTION, start, end),
+            (EVENT_SECTION, start, end, _event_detail_prefix(start, end) + "%"),
         )
         return {
             row[0]: {"status": row[1], "rows": row[2] or 0, "error_kind": row[3]}
@@ -228,16 +248,43 @@ def _has_row(conn, stock_code: str, trade_date: str) -> bool:
 # ---------------------------------------------------------------- 事件集
 
 
-def _replace_day_events(conn, trade_date: str, events: list[dict]) -> list[str]:
-    """事务内整日替换该日事件集，返回被撤销的股票代码（旧有新无）。"""
+def _replace_day_events(
+    conn, trade_date: str, events: list[dict]
+) -> tuple[list[str], int, int]:
+    """事务内整日替换事件集，过滤同 B 非阶跃行并标记受影响 state。
+
+    返回 (被撤销代码, 同 B 跳过数, 实际写入事件数)。同一事务内把受影响
+    state 置 rebuild_pending=true，避免崩溃后读者把新事件分母配旧 hfq；
+    撤销代码另落 durable 标记供续跑重建。
+    """
     by_code = {event["stock_code"]: event for event in events}
-    values = [
-        [code, trade_date, event["factor_cum"], event.get("kind"),
-         event.get("detail"), event.get("reg_date"),
-         event.get("source", "baostock-adjust-factor")]
-        for code, event in sorted(by_code.items())
-    ]
     with conn.cursor() as cur:
+        previous_b: dict[str, Decimal] = {}
+        if by_code:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (stock_code) stock_code, factor_cum
+                FROM stock_adjust_factor
+                WHERE stock_code = ANY(%s) AND ex_date < %s
+                ORDER BY stock_code, ex_date DESC
+                """,
+                (sorted(by_code), trade_date),
+            )
+            previous_b = {row[0]: _decimal(row[1]) for row in cur.fetchall()}
+        kept: dict[str, dict] = {}
+        equal_b_skipped = 0
+        for code, event in by_code.items():
+            previous = previous_b.get(code)
+            if previous is not None and previous == _decimal(event["factor_cum"]):
+                equal_b_skipped += 1
+                continue
+            kept[code] = event
+        values = [
+            [code, trade_date, event["factor_cum"], event.get("kind"),
+             event.get("detail"), event.get("reg_date"),
+             event.get("source", "baostock-adjust-factor")]
+            for code, event in sorted(kept.items())
+        ]
         cur.execute(
             "SELECT stock_code FROM stock_adjust_factor WHERE ex_date=%s",
             (trade_date,),
@@ -254,7 +301,7 @@ def _replace_day_events(conn, trade_date: str, events: list[dict]) -> list[str]:
                 """,
                 values,
             )
-        retracted = sorted(old_codes - set(by_code))
+        retracted = sorted(old_codes - set(kept))
         if retracted:
             # 与事件替换同事务落撤销标记：崩溃后断点续跑仍能知道哪些票需要
             # 按“无事件”重建，不会留下旧 hfq/state。
@@ -268,8 +315,15 @@ def _replace_day_events(conn, trade_date: str, events: list[dict]) -> list[str]:
                     for code in retracted
                 ],
             )
+        affected = sorted(old_codes | set(kept))
+        if affected:
+            cur.execute(
+                "UPDATE stock_factor_state SET rebuild_pending=true"
+                " WHERE stock_code = ANY(%s)",
+                (affected,),
+            )
         conn.commit()
-    return retracted
+    return retracted, equal_b_skipped, len(kept)
 
 
 def _fetch_with_retries(operation: Callable[[], list[dict]], retries: int,
@@ -307,11 +361,7 @@ def _ingest_event_day(conn, adapter, trade_date: str, start: str, end: str,
     result = _fetch_factor_day(adapter, trade_date, retries, pacer)
     if result["events"] is None:
         error = result["error"]
-        kind = fetch_failure_kind(error) if error is not None else "fetch_failed"
-        if kind == "connection":
-            kind = "upstream_unreachable"
-        elif kind != "unsupported":
-            kind = "fetch_failed"
+        kind = _failure_kind(error)
         record_collection(
             conn, trade_date=trade_date, section=EVENT_SECTION, status="error",
             error_kind=kind,
@@ -351,19 +401,22 @@ def _ingest_event_day(conn, adapter, trade_date: str, start: str, end: str,
             "detail": f"invalid factor rows: {invalid[:20]}", "retracted_codes": [],
         }
 
-    retracted = _replace_day_events(conn, trade_date, list(by_code.values()))
-    status = "ok" if by_code else "empty"
+    retracted, equal_b_skipped, kept_count = _replace_day_events(
+        conn, trade_date, list(by_code.values())
+    )
+    status = "ok" if (kept_count or equal_b_skipped) else "empty"
     record_collection(
         conn, trade_date=trade_date, section=EVENT_SECTION, status=status,
-        source=adapter.name, rows=len(by_code),
+        source=adapter.name, rows=kept_count,
         detail=(
             f"{_event_detail_prefix(start, end)} attempts={result['attempts']}"
-            f"; stocks={len(by_code)}"
+            f"; raw_rows={len(by_code)}; stored={kept_count}"
+            f"; equal_b_skipped={equal_b_skipped}"
         ),
         started_at=started,
     )
     return {
-        "trade_date": trade_date, "status": status, "rows": len(by_code),
+        "trade_date": trade_date, "status": status, "rows": kept_count,
         "attempts": result["attempts"], "error_kind": None,
         "detail": None, "retracted_codes": retracted,
     }
@@ -410,11 +463,7 @@ def _window_rows(rows: list[dict], start: str, end: str) -> list[dict]:
     ]
 
 
-def _raw_gap_dates(raw_rows: list[dict], start: str, end: str) -> list[str]:
-    dates = sorted(
-        row["trade_date"] for row in raw_rows
-        if start <= row["trade_date"] <= end
-    )
+def _missing_trading_days(dates: list[str]) -> list[str]:
     if len(dates) < 2:
         return []
     expected = trading_days_between(dates[0], dates[-1])
@@ -422,7 +471,15 @@ def _raw_gap_dates(raw_rows: list[dict], start: str, end: str) -> list[str]:
     return [day for day in expected if day not in actual]
 
 
-def _reasons_for_snapshot(snapshot: dict, gap_dates: list[str],
+def _raw_gap_dates(raw_rows: list[dict], start: str, end: str) -> list[str]:
+    dates = sorted(
+        row["trade_date"] for row in raw_rows
+        if start <= row["trade_date"] <= end
+    )
+    return _missing_trading_days(dates)
+
+
+def _reasons_for_snapshot(snapshot: dict, gap_details: list[str],
                           refresh_failed: bool) -> dict[str, list[str]]:
     reasons: dict[str, list[str]] = {}
     state = snapshot.get("state")
@@ -444,9 +501,9 @@ def _reasons_for_snapshot(snapshot: dict, gap_dates: list[str],
                 reasons.setdefault("price_path_unverified", []).append(
                     item["ex_date"]
                 )
-    if gap_dates:
-        shown = ",".join(gap_dates[:20])
-        suffix = "..." if len(gap_dates) > 20 else ""
+    if gap_details:
+        shown = ",".join(gap_details[:20])
+        suffix = "..." if len(gap_details) > 20 else ""
         reasons.setdefault("raw_gap", []).append(f"{shown}{suffix}")
     if snapshot.get("quarantined"):
         reasons.setdefault("invalid_close", []).append(
@@ -516,10 +573,7 @@ def _process_event_stock(conn, adapter, stock: dict, start: str, end: str,
     # 上市日晚于 D-1 时没有 D-1 是事实边界（新股/次新），重抓也补不出；
     # 其余缺 D-1 或窗口内断档都算“仍无效”，必须重抓。
     d1_unavailable_by_listing = bool(raw_dates) and raw_dates[0] > d1
-    gaps = (
-        set(trading_days_between(raw_dates[0], raw_dates[-1])) - set(raw_dates)
-        if len(raw_dates) >= 2 else set()
-    )
+    gaps = set(_missing_trading_days(raw_dates))
     reusable = (
         not force
         and checkpoint is not None
@@ -546,11 +600,7 @@ def _process_event_stock(conn, adapter, stock: dict, start: str, end: str,
         if fetched["rows"] is None:
             fetch_failed = True
             error = fetched["error"]
-            kind = fetch_failure_kind(error) if error is not None else "fetch_failed"
-            if kind == "connection":
-                kind = "upstream_unreachable"
-            elif kind != "unsupported":
-                kind = "fetch_failed"
+            kind = _failure_kind(error)
             _record_raw_ledger(
                 conn, stock_code, start, end, status="error", rows=0,
                 attempts=attempts, source=adapter.name, error_kind=kind,
@@ -613,10 +663,19 @@ def _process_event_stock(conn, adapter, stock: dict, start: str, end: str,
             error_kind=None if window_count else "no_data_for_date",
         )
 
-    gap_dates = _raw_gap_dates(
-        snapshot.get("raw_rows") or [], window_days[0], window_days[-1]
+    snapshot_raw = snapshot.get("raw_rows") or []
+    raw_dates = sorted(
+        row["trade_date"] for row in snapshot_raw
+        if window_days[0] <= row["trade_date"] <= window_days[-1]
     )
-    reasons = _reasons_for_snapshot(snapshot, gap_dates, refresh_failed=fetch_failed)
+    gap_details = _raw_gap_dates(snapshot_raw, window_days[0], window_days[-1])
+    if raw_dates and first_event not in set(raw_dates):
+        gap_details.append(f"first_event={first_event}")
+    if raw_dates and raw_dates[-1] < stock["last"]:
+        gap_details.append(f"last_event={stock['last']}")
+    reasons = _reasons_for_snapshot(
+        snapshot, gap_details, refresh_failed=fetch_failed
+    )
     if reasons or fetch_failed:
         with conn.cursor() as cur:
             cur.execute(
@@ -752,7 +811,7 @@ def _default_end(now) -> str:
     return trading_day_window(1, now=now)[1]
 
 
-def _load_export_rows(conn, start: str, end: str) -> tuple[list[dict], list[dict]]:
+def _load_event_exports(conn, start: str, end: str) -> tuple[list[dict], list[dict]]:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT stock_code, ex_date, factor_cum, source"
@@ -829,6 +888,24 @@ def run_adjustment_backfill(
         except Exception as e:  # noqa: BLE001 - 建表失败收敛为结构化错误
             return _error(tool, params, f"建表失败: {e}")
 
+        # 窗口必须覆盖库内最新复权事实：回填会重建 state/hfq，历史 end 不能
+        # 回退窗口外派生（CONTEXT「整窗刷新」：窗口外业务数据不动）。
+        with conn.cursor() as cur:
+            cur.execute("SELECT max(trade_date) FROM stock_daily_raw")
+            latest_raw = cur.fetchone()[0]
+            cur.execute("SELECT max(ex_date) FROM stock_adjust_factor")
+            latest_event = cur.fetchone()[0]
+        if (latest_raw and latest_raw > end_d) or (
+            latest_event and latest_event > end_d
+        ):
+            return _error(
+                tool, params,
+                f"窗口 end({end_d}) 早于库内已有复权事实（raw={latest_raw},"
+                f" event={latest_event}）；历史窗口请用隔离库，正式回填必须"
+                "覆盖到最新已有数据，避免回退窗口外 hfq/state",
+                error_kind="window_behind_data",
+            )
+
         # ---- 阶段 1：逐日全市场事件集
         checkpoints = _day_checkpoints(conn, start_d, end_d)
         counts = _event_counts(conn, start_d, end_d)
@@ -878,7 +955,7 @@ def run_adjustment_backfill(
                 )
 
         event_set_complete = not failed_days
-        events_export, event_stocks = _load_export_rows(conn, start_d, end_d)
+        events_export, event_stocks = _load_event_exports(conn, start_d, end_d)
         event_codes = {stock["stock_code"] for stock in event_stocks}
         retracted_with_raw = sorted(
             code for code in retracted_codes if code not in event_codes

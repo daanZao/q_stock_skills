@@ -21,21 +21,33 @@ def _decimal(value) -> Decimal:
     return Decimal(str(value))
 
 
+def event_factor_from_pctchg(previous_close, close, pct) -> Decimal | None:
+    """权威 pctChg 价格路径单次因子；不猜、不夹逼。"""
+    if pct is None or close is None or previous_close is None:
+        return None
+    if close <= 0 or previous_close <= 0:
+        return None
+    realclose = _decimal(previous_close) * (1 + _decimal(pct) / 100)
+    if realclose <= 0:
+        return None
+    factor = _decimal(close) / realclose
+    return factor if factor > 0 else None
+
+
+def factor_relative_error(price_factor: Decimal, authoritative: Decimal) -> Decimal:
+    """双路径相对误差（0.1% 容差由调用方判定）。"""
+    return abs(price_factor - authoritative) / authoritative
+
+
 def _event_price_factor(raw_by_date: dict[str, dict], ex_date: str) -> Decimal | None:
     """用权威 pctChg 计算事件日价格路径单次因子（D-1 必须是确切前一交易日）。"""
     row = raw_by_date.get(ex_date)
     previous = raw_by_date.get(prev_trading_day(ex_date))
     if row is None or previous is None:
         return None
-    pct = row.get("change_percent")
-    closes = (previous.get("close"), row.get("close"))
-    if any(close is None or close <= 0 for close in closes) or pct is None:
-        return None
-    realclose = _decimal(previous["close"]) * (1 + _decimal(pct) / 100)
-    if realclose <= 0:
-        return None
-    factor = _decimal(row["close"]) / realclose
-    return factor if factor > 0 else None
+    return event_factor_from_pctchg(
+        previous.get("close"), row.get("close"), row.get("change_percent")
+    )
 
 
 def _audit_event_factors(
@@ -59,7 +71,7 @@ def _audit_event_factors(
                 status = "unverified"
                 relative_error = None
             else:
-                relative_error = abs(price_factor - authoritative) / authoritative
+                relative_error = factor_relative_error(price_factor, authoritative)
                 status = "ok" if relative_error <= Decimal("0.001") else "mismatch"
         audit.append({
             "ex_date": event["ex_date"],
@@ -135,6 +147,26 @@ def rebuild_stock(
         )
 
     try:
+        if window_end is not None:
+            # 只拒绝“库内已有”的窗口外事实；调用方显式传入的窗口外输入由下方
+            # 窗口过滤处理。回填入口另有全局守卫，避免历史窗口回退生产派生。
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT max(trade_date) FROM stock_daily_raw WHERE stock_code=%s",
+                    (stock_code,),
+                )
+                latest_raw = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT max(ex_date) FROM stock_adjust_factor WHERE stock_code=%s",
+                    (stock_code,),
+                )
+                latest_event = cur.fetchone()[0]
+            if (latest_raw and latest_raw > window_end) or (
+                latest_event and latest_event > window_end
+            ):
+                raise ValueError(
+                    "window_end 早于库内已有复权事实，拒绝重建以免回退窗口外派生"
+                )
         with conn.cursor() as cur:
             raw_values = [
                 [stock_code] + [row.get(field) for field in _RAW_FIELDS[:-1]]
@@ -226,10 +258,11 @@ def rebuild_stock(
                 " FROM stock_adjust_factor WHERE stock_code=%s ORDER BY ex_date",
                 (stock_code,),
             )
-            events = [
+            events_all = [
                 dict(zip(("ex_date", "factor_cum", "kind", "detail", "reg_date", "source"), row))
-                for row in cur.fetchall() if _in_window(row[0])
+                for row in cur.fetchall()
             ]
+            events = [event for event in events_all if _in_window(event["ex_date"])]
 
             if not raw:
                 cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
@@ -336,12 +369,18 @@ def rebuild_stock(
                 })
 
             derive_start = rebuild_from if rebuild_from is not None else window_start
-            if derive_start is None:
+            if derive_start is None and window_end is None:
                 cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
-            else:
+            elif window_end is None:
                 cur.execute(
                     "DELETE FROM stock_daily_hfq WHERE stock_code=%s AND trade_date>=%s",
                     (stock_code, derive_start),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM stock_daily_hfq WHERE stock_code=%s"
+                    " AND trade_date BETWEEN %s AND %s",
+                    (stock_code, derive_start or "00000000", window_end),
                 )
             rebuilt_hfq = hfq
             if derive_start is not None:
@@ -386,7 +425,10 @@ def rebuild_stock(
                 " WHERE stock_code=%s"
             )
             select_args: list[str] = [stock_code]
-            if derive_start is not None:
+            if window_end is not None:
+                select_sql += " AND trade_date BETWEEN %s AND %s"
+                select_args.extend([derive_start or "00000000", window_end])
+            elif derive_start is not None:
                 select_sql += " AND trade_date>=%s"
                 select_args.append(derive_start)
             cur.execute(select_sql + " ORDER BY trade_date", select_args)

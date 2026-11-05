@@ -549,3 +549,30 @@ def test_window_end_excludes_later_events_and_rows(pg_test):
     assert snapshot["state"]["factor_latest"] == pytest.approx(1.25)
     assert snapshot["state"]["latest_trade_date"] == "20230104"
     conn.close()
+
+
+def test_window_end_rejects_post_window_facts_without_truncating(pg_test):
+    """#163 评审：历史窗口不得删除/回退窗口外 hfq；检测到窗口外事实即拒绝。"""
+    conn = _conn(pg_test)
+    rebuild_stock(
+        conn,
+        "600519",
+        [
+            _raw("20230103", 100.0, preclose=100.0, pct=0.0),
+            _raw("20230104", 80.0, preclose=80.0, pct=0.0),
+            _raw("20230105", 90.0, preclose=72.0, pct=25.0),
+            _raw("20230106", 90.0, preclose=90.0, pct=0.0),
+        ],
+        [{"ex_date": "20230104", "factor_cum": 2.0}],
+        baseline_factor=1.0,
+    )
+    before = _business_tables(conn, "600519")
+
+    with pytest.raises(ValueError, match="window_end"):
+        rebuild_stock(
+            conn, "600519", [], [],
+            window_start="20230103", window_end="20230104",
+        )
+
+    assert _business_tables(conn, "600519") == before
+    conn.close()
