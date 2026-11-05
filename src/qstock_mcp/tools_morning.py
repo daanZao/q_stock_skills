@@ -191,6 +191,7 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
     started = datetime.now(timezone.utc)
     mode = "baostock-adjust-factor"
     unresolved: list[str] = []
+    fallback_unavailable = False
     try:
         events = adapter.fetch_daily_adjust_factor(target)
     except FetchError as e:
@@ -204,6 +205,7 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
             error_kind=kind, detail=f"morning_batch: {e}", started_at=started,
         )
         mode = "baostock-pctchg-derived"
+        fallback_unavailable = not raw_rows
         events, unresolved = _derive_pctchg_events(conn, target, raw_rows)
 
     mismatches = (
@@ -262,7 +264,7 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
             conn.commit()
     error_kind = (
         "factor_mismatch" if mismatches
-        else "pctchg_derivation_failed" if unresolved
+        else "pctchg_derivation_failed" if unresolved or fallback_unavailable
         else "raw_gap" if raw_gaps
         else "rebuild_pending" if rebuild_pending
         else "invalid_close" if invalid_close else None

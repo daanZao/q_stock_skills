@@ -166,6 +166,25 @@ class TestStockDailyPart:
         assert rows[0][5] == "upstream_unreachable"
         assert _stock_daily_rows(pg_ready, "600519") == []
 
+    def test_raw_and_factor_failures_remain_both_errors(self, pg_ready):
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                exc=FetchError("raw unavailable"),
+                factor_exc=FetchError("factor unavailable"),
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        assert out["parts"]["stock_daily"]["status"] == "error"
+        factor = out["parts"]["stock_adjust_factor"]
+        assert factor["status"] == "error"
+        assert factor["error_kind"] == "pctchg_derivation_failed"
+        assert out["messages"] == ["数据处理完成"]
+        assert all(
+            row[2] == "error" for row in _ledger(pg_ready, "stock_adjust_factor")
+        )
+
     def test_empty_result_not_error(self, pg_ready):
         """非交易日/上游确认无数据：empty 落台账，非故障。"""
         out = fetch_morning_batch(
