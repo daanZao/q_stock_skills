@@ -107,6 +107,7 @@ def _no_backoff_sleep(monkeypatch):
     """重试退避 sleep 全局置空（issue #87）：测试不真的等待；退避专项测试
     在本夹具生效后自行覆盖为记录器。"""
     monkeypatch.setattr("qstock_mcp.fetch_chain.sleep", lambda _s: None)
+    monkeypatch.setattr("qstock_mcp.adjustment_backfill.sleep", lambda _s: None)
 
 
 @pytest.fixture

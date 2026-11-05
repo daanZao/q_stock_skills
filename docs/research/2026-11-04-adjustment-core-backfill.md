@@ -290,3 +290,14 @@ B0        =3.855379×f1=2.965588537153224...
 ## 9. #161 连续交易日 smoke（2026-11-05）
 
 实现后在 macOS 主进程串行调用 `query_daily_history_k_AStock(date)` 与 `query_daily_adjust_factor(date)`，样本为 2026-10-30、2026-11-02、2026-11-03 三个连续交易日；每次调用外部硬超时 120s，相邻请求间隔 1.5s，无并发、无写库、无历史重抓。六次请求均成功：raw 分别为 5223/5223/5224 行，close 均非空且为正，股票代码当日唯一；因子事件分别为 11/3/5 行，`(stock_code, ex_date)` 唯一。原始 amount 经适配层转换为万元，preclose 保留。该结果只代表本轮三日样本，不构成长期可用性、TPS 或全历史完备率结论。
+
+## 10. #163 回填 A 开发验收（2026-11-05）
+
+实现 `qstock-scheduler adj-backfill` 后，在隔离库 `qstock_test`、真实 baostock、macOS 主进程执行窗口 2026-11-02–2026-11-04（3 个连续交易日）的端到端小样本：串行、相邻请求 1.5s、单请求 120s 外部硬超时、无并发、`--limit 20`（本样本事件票 14 只，未触发截断）。命令产物见 `files/adj_backfill_smoke_20261102_20261104/`，原始 stdout/stderr 在同目录旁。
+
+- 3 次 `query_daily_adjust_factor` 均成功：ok=3、empty=0、error=0，共 14 行事件 / 14 只事件票；事件表只写这 14 行，无占位因子。
+- 14 次单票 raw 请求均成功，窗口内 raw 41 行；3 只票首个事件在窗口首日（2026-11-02），额外请求 2026-10-30 作为 D-1 基线输入，D-1 行保留在 raw 但不进入 hfq。
+- 首跑耗时 25.9s（17 次真实请求，相邻 1.5s），状态 `partial_error`：14 票中 13 票建立 B0 并重建，1 票进入待修复台账。
+- 待修复样本 `001381`：2026-11-03 上市首日即出现 `backAdjustFactor=1.000000` 事件，raw 从上市首日开始、没有 D-1，按 §4.2 不套用首事件公式，state 为 `baseline_factor=NULL、factor_latest=NULL、rebuild_pending=true`，`coverage=partial`，未猜 B0；这不是回填 bug。
+- 原样重跑同一窗口：3 个因子日与 14 只票全部命中 `collection_log` 断点，上游请求 0 次（`summary.upstream_requests.total=0`），耗时 0.048s（14 票本地重建，跳过项不占节流等待）。四张业务表（raw/事件/hfq/state）按业务列排序的 MD5 与首跑逐表一致，见 `files/adj_backfill_smoke_before_hash.txt` / `after_hash.txt`。
+- 该样本只证明当次真实采集、IPO 无 D-1 边界与断点续跑，不构成全窗口成功率、事件完备率、长期 TPS 或全量耗时结论；正式回填后的结构/事件/B0/覆盖全检仍按 spec §7 与 `docs/adj-backfill-cli.md` 的只读 SQL 执行。

@@ -423,3 +423,129 @@ def test_600519_dirty_fifth_column_does_not_reset_derived_factor(pg_test):
     )
     assert snapshot["state"]["factor_latest"] == pytest.approx(1.015351264363073)
     conn.close()
+
+
+def test_window_backfill_derives_first_event_baseline_and_hides_pre_window_rows(pg_test):
+    """#163：窗口外 D-1 只作 B0 计算输入；窗口内首个事件反推 B0。"""
+    conn = _conn(pg_test)
+    snapshot = rebuild_stock(
+        conn,
+        "688300",
+        [
+            _raw("20221230", 120.0),
+            _raw("20230103", 130.0, preclose=120.0, pct=8.333333),
+            _raw("20230104", 100.0, preclose=104.0, pct=-3.846154),
+        ],
+        [{"ex_date": "20230104", "factor_cum": 3.0}],
+        window_start="20230103",
+    )
+
+    assert snapshot["state"]["baseline_factor"] == pytest.approx(2.4)
+    assert snapshot["state"]["factor_latest"] == pytest.approx(1.25)
+    assert snapshot["state"]["rebuild_pending"] is False
+    assert [row["trade_date"] for row in snapshot["hfq_rows"]] == [
+        "20230103", "20230104",
+    ]
+    assert [row["close"] for row in snapshot["hfq_rows"]] == pytest.approx([130.0, 125.0])
+    assert [row["close"] for row in snapshot["qfq_rows"]] == pytest.approx([104.0, 100.0])
+    assert [row["trade_date"] for row in snapshot["raw_rows"]] == [
+        "20221230", "20230103", "20230104",
+    ]
+    assert snapshot["factor_audit"][0]["status"] == "ok"
+    assert snapshot["factor_audit"][0]["price_factor"] == pytest.approx(0.8)
+    conn.close()
+
+
+def test_window_backfill_audit_flags_authoritative_price_path_mismatch(pg_test):
+    """#163：同一事件双路径相对误差 >0.1% 时 pending，但保留已建立基线。"""
+    conn = _conn(pg_test)
+    snapshot = rebuild_stock(
+        conn,
+        "600519",
+        [
+            _raw("20230103", 100.0, preclose=100.0, pct=0.0),
+            _raw("20230104", 80.0, preclose=80.0, pct=0.0),
+            _raw("20230105", 90.0, preclose=72.0, pct=25.0),
+        ],
+        [
+            {"ex_date": "20230104", "factor_cum": 3.0},
+            {"ex_date": "20230105", "factor_cum": 4.0},
+        ],
+        window_start="20230103",
+    )
+
+    assert [item["status"] for item in snapshot["factor_audit"]] == ["ok", "mismatch"]
+    assert snapshot["factor_audit"][1]["relative_error"] == pytest.approx(0.2)
+    assert snapshot["state"]["rebuild_pending"] is True
+    assert snapshot["state"]["baseline_factor"] == pytest.approx(2.4)
+    assert snapshot["state"]["factor_latest"] == pytest.approx(4.0 / 2.4)
+    assert len(snapshot["hfq_rows"]) == 3
+    conn.close()
+
+
+def test_window_backfill_audit_flags_missing_pctchg_as_unverified(pg_test):
+    conn = _conn(pg_test)
+    snapshot = rebuild_stock(
+        conn,
+        "600519",
+        [
+            _raw("20230103", 100.0, preclose=100.0, pct=0.0),
+            _raw("20230104", 80.0, preclose=80.0, pct=0.0),
+            _raw("20230105", 90.0, preclose=72.0, pct=None),
+        ],
+        [
+            {"ex_date": "20230104", "factor_cum": 3.0},
+            {"ex_date": "20230105", "factor_cum": 4.0},
+        ],
+        window_start="20230103",
+    )
+
+    assert [item["status"] for item in snapshot["factor_audit"]] == ["ok", "unverified"]
+    assert snapshot["state"]["rebuild_pending"] is True
+    conn.close()
+
+
+def test_window_backfill_missing_d1_keeps_state_null_and_pending(pg_test):
+    conn = _conn(pg_test)
+    snapshot = rebuild_stock(
+        conn,
+        "688300",
+        [_raw("20230103", 130.0, preclose=120.0, pct=8.333333)],
+        [{"ex_date": "20230103", "factor_cum": 3.0}],
+        window_start="20230103",
+    )
+
+    assert snapshot["state"]["baseline_factor"] is None
+    assert snapshot["state"]["factor_latest"] is None
+    assert snapshot["state"]["rebuild_pending"] is True
+    assert snapshot["coverage"] == "partial"
+    assert snapshot["hfq_rows"] == []
+    assert snapshot["factor_audit"][0]["status"] == "unverified"
+    conn.close()
+
+
+def test_window_end_excludes_later_events_and_rows(pg_test):
+    conn = _conn(pg_test)
+    snapshot = rebuild_stock(
+        conn,
+        "600519",
+        [
+            _raw("20230103", 100.0, preclose=100.0, pct=0.0),
+            _raw("20230104", 80.0, preclose=80.0, pct=0.0),
+            _raw("20230105", 90.0, preclose=72.0, pct=25.0),
+        ],
+        [
+            {"ex_date": "20230104", "factor_cum": 3.0},
+            {"ex_date": "20230105", "factor_cum": 4.0},
+        ],
+        window_start="20230103",
+        window_end="20230104",
+    )
+
+    assert [item["ex_date"] for item in snapshot["factor_audit"]] == ["20230104"]
+    assert [row["trade_date"] for row in snapshot["hfq_rows"]] == [
+        "20230103", "20230104",
+    ]
+    assert snapshot["state"]["factor_latest"] == pytest.approx(1.25)
+    assert snapshot["state"]["latest_trade_date"] == "20230104"
+    conn.close()

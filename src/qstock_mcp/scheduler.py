@@ -26,6 +26,13 @@
                              回补行 source='swsresearch'。东财 push2his 回补
                              已随 issue #121 摘除。CLI 专用路径，不经历史
                              日期防线。
+  adj-backfill [--start D] [--end D | --trading-days N] [--limit N] [--force]
+                             复权回填 A（issue #163，spec #158 §6.1/§6.2）：
+                             逐日全市场累计因子事件集（失败重试、成功空日可
+                             审计）+ 只对有事件票重抓 baostock 不复权 raw、
+                             反推窗口基线 B0 并重建 hfq/state。断点续跑读采集
+                             台账；--force 整窗重抓；--limit 仅供小样本冒烟。
+                             官方手册见 docs/adj-backfill-cli.md。
   sw-boards [--date D] [--check] [--level 1|2|all] [--limit N]
                              申万板块固定入口（issue #118）：默认抓申万
                              双级实时快照落 market_boards（收盘后调用即当日
@@ -101,6 +108,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, SnapshotAdapter
+from .adjustment_backfill import run_adjustment_backfill
 from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
 from .dates import normalize_date, today_str, trading_day_window
@@ -203,6 +211,36 @@ def cmd_backfill(
         "job": "backfill", "source": source,
         "trading_days": trading_days, **result,
     }
+    _emit(out)
+    return 0 if result.get("status") == "ok" else 1
+
+
+def cmd_adj_backfill(
+    start: str | None = None,
+    end: str | None = None,
+    trading_days: int | None = None,
+    limit: int | None = None,
+    force: bool = False,
+    report_dir: str | None = None,
+    throttle: float | None = None,
+) -> int:
+    """复权回填 A（issue #163）：N 交易日窗口与显式起止日二选一。"""
+    tool = "adj-backfill"
+    if trading_days is not None:
+        if start:
+            _emit({"status": "error", "job": tool,
+                   "error": "--trading-days 与 --start 互斥；可用 --end 指定截止日"})
+            return 1
+        try:
+            start, end = trading_day_window(trading_days, end)
+        except ValueError as e:
+            _emit({"status": "error", "job": tool, "error": str(e)})
+            return 1
+    result = run_adjustment_backfill(
+        start=start, end=end, limit=limit, force=force,
+        report_dir=report_dir, throttle=throttle,
+    )
+    out = {"job": tool, "trading_days": trading_days, **result}
     _emit(out)
     return 0 if result.get("status") == "ok" else 1
 
@@ -812,6 +850,23 @@ def main(argv: list[str] | None = None,
                             help="最近 N 个交易日；可用 --end 指定截止日")
     p_backfill.add_argument("--force", action="store_true",
                             help="忽略同窗口成功台账，整窗重抓并覆盖同键记录")
+    p_adj = sub.add_parser(
+        "adj-backfill",
+        help="复权回填 A（issue #163）：逐日事件集 + 有事件票重抓 raw")
+    p_adj.add_argument("--start", default=None,
+                       help="回填起点 yyyymmdd；缺省 QSTOCK_ADJ_WINDOW_START 或 20230101")
+    p_adj.add_argument("--end", default=None,
+                       help="回填终点 yyyymmdd，缺省最近已收盘交易日")
+    p_adj.add_argument("--trading-days", type=int, default=None,
+                       help="最近 N 个交易日；与 --start 互斥，可用 --end 指定截止日")
+    p_adj.add_argument("--limit", type=int, default=None,
+                       help="只处理前 N 只有事件票（冒烟用；结果标记 limited）")
+    p_adj.add_argument("--force", action="store_true",
+                       help="忽略台账断点，整窗重抓事件与 raw")
+    p_adj.add_argument("--report-dir", default=None,
+                       help="审计产物目录，缺省 files/adj-backfill_<start>_<end>")
+    p_adj.add_argument("--throttle", type=float, default=None,
+                       help="相邻上游请求间隔秒，缺省 1.5（2026-11-04/05 串行实测）")
     p_sw_boards = sub.add_parser(
         "sw-boards", help="申万板块：双级实时快照落库 / 三方位对拍（--check）")
     p_sw_boards.add_argument("--date", default=None,
@@ -986,6 +1041,13 @@ def main(argv: list[str] | None = None,
             return cmd_backfill(
                 args.start, args.end, source=args.source,
                 trading_days=args.trading_days, force=args.force,
+            )
+        if args.command == "adj-backfill":
+            return cmd_adj_backfill(
+                start=args.start, end=args.end,
+                trading_days=args.trading_days, limit=args.limit,
+                force=args.force, report_dir=args.report_dir,
+                throttle=args.throttle,
             )
         if args.command == "sw-boards":
             return cmd_sw_boards(

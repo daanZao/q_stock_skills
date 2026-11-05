@@ -4,6 +4,8 @@ from decimal import Decimal
 
 from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
+from .dates import prev_trading_day
+
 _RAW_FIELDS = (
     "trade_date", "open", "high", "low", "close", "preclose", "volume",
     "amount", "amplitude", "change_percent", "change_amount", "turnover_rate",
@@ -19,25 +21,55 @@ def _decimal(value) -> Decimal:
     return Decimal(str(value))
 
 
-def _first_event_factor(raw_rows: list[dict], ex_date: str) -> Decimal | None:
-    from .dates import trading_days_between
+def _event_price_factor(raw_by_date: dict[str, dict], ex_date: str) -> Decimal | None:
+    """用权威 pctChg 计算事件日价格路径单次因子（D-1 必须是确切前一交易日）。"""
+    row = raw_by_date.get(ex_date)
+    previous = raw_by_date.get(prev_trading_day(ex_date))
+    if row is None or previous is None:
+        return None
+    pct = row.get("change_percent")
+    closes = (previous.get("close"), row.get("close"))
+    if any(close is None or close <= 0 for close in closes) or pct is None:
+        return None
+    realclose = _decimal(previous["close"]) * (1 + _decimal(pct) / 100)
+    if realclose <= 0:
+        return None
+    factor = _decimal(row["close"]) / realclose
+    return factor if factor > 0 else None
 
-    for index, row in enumerate(raw_rows):
-        if row["trade_date"] != ex_date or index == 0:
-            continue
-        previous = raw_rows[index - 1]
-        calendar = trading_days_between(previous["trade_date"], ex_date)
-        if len(calendar) < 2 or calendar[-2:] != [previous["trade_date"], ex_date]:
-            return None
-        pct = row.get("change_percent")
-        closes = (previous.get("close"), row.get("close"))
-        if any(close is None or close <= 0 for close in closes) or pct is None:
-            return None
-        realclose = _decimal(previous["close"]) * (1 + _decimal(pct) / 100)
-        if realclose <= 0:
-            return None
-        return _decimal(row["close"]) / realclose
-    return None
+
+def _audit_event_factors(
+    events: list[dict], raw_by_date: dict[str, dict], baseline: Decimal | None,
+) -> tuple[list[dict], bool]:
+    """逐事件做 B 路径与权威价格路径对账；返回 (audit, any_not_ok)。"""
+    audit: list[dict] = []
+    previous_b: Decimal | None = baseline
+    for event in events:
+        factor_cum = _decimal(event["factor_cum"])
+        price_factor = _event_price_factor(raw_by_date, event["ex_date"])
+        authoritative: Decimal | None
+        relative_error: Decimal | None
+        if previous_b is None:
+            authoritative = price_factor
+            status = "ok" if price_factor is not None else "unverified"
+            relative_error = Decimal(0) if price_factor is not None else None
+        else:
+            authoritative = previous_b / factor_cum
+            if price_factor is None:
+                status = "unverified"
+                relative_error = None
+            else:
+                relative_error = abs(price_factor - authoritative) / authoritative
+                status = "ok" if relative_error <= Decimal("0.001") else "mismatch"
+        audit.append({
+            "ex_date": event["ex_date"],
+            "event_factor": float(authoritative) if authoritative is not None else None,
+            "price_factor": float(price_factor) if price_factor is not None else None,
+            "relative_error": float(relative_error) if relative_error is not None else None,
+            "status": status,
+        })
+        previous_b = factor_cum
+    return audit, any(item["status"] != "ok" for item in audit)
 
 
 def _upsert_factor_events(cur, values: list[list]) -> None:
@@ -86,8 +118,22 @@ def rebuild_stock(
     authoritative_event_dates=(),
     baseline_factor=None,
     rebuild_from: str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
 ) -> dict:
-    """写入单票事实并原子重建派生；authoritative_event_dates 整日替换事件。"""
+    """写入单票事实并原子重建派生；authoritative_event_dates 整日替换事件。
+
+    window_start/window_end 是回填窗口（#163）：事件、派生与状态只按窗口内
+    事实计算，窗口外 raw 仅作首个事件 D-1 计算输入，不写入 hfq。窗口模式下
+    逐事件做 B 路径 vs 权威 pctChg 价格路径对账，未通过即 pending 但保留已
+    建立的基线（基线本身不可验证时仍 NULL/NULL）。
+    """
+    def _in_window(trade_date: str) -> bool:
+        return (
+            (window_start is None or trade_date >= window_start)
+            and (window_end is None or trade_date <= window_end)
+        )
+
     try:
         with conn.cursor() as cur:
             raw_values = [
@@ -168,11 +214,13 @@ def rebuild_stock(
                 (stock_code,),
             )
             raw_all = [dict(zip(_RAW_FIELDS, row)) for row in cur.fetchall()]
+            raw_window = [row for row in raw_all if _in_window(row["trade_date"])]
+            raw_by_date = {row["trade_date"]: row for row in raw_all}
             quarantined = [
                 {"stock_code": stock_code, "trade_date": row["trade_date"], "reason": "invalid_close"}
-                for row in raw_all if row["close"] is None or row["close"] <= 0
+                for row in raw_window if row["close"] is None or row["close"] <= 0
             ]
-            raw = [row for row in raw_all if row["close"] is not None and row["close"] > 0]
+            raw = [row for row in raw_window if row["close"] is not None and row["close"] > 0]
             cur.execute(
                 "SELECT ex_date, factor_cum, kind, detail, reg_date, source"
                 " FROM stock_adjust_factor WHERE stock_code=%s ORDER BY ex_date",
@@ -180,15 +228,17 @@ def rebuild_stock(
             )
             events = [
                 dict(zip(("ex_date", "factor_cum", "kind", "detail", "reg_date", "source"), row))
-                for row in cur.fetchall()
+                for row in cur.fetchall() if _in_window(row[0])
             ]
 
             if not raw:
                 cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
                 cur.execute("DELETE FROM stock_factor_state WHERE stock_code=%s", (stock_code,))
                 conn.commit()
-                if raw_all:
-                    _record_quarantine(conn, raw_all[-1]["trade_date"], quarantined)
+                if raw_window or raw_all:
+                    _record_quarantine(
+                        conn, (raw_window or raw_all)[-1]["trade_date"], quarantined
+                    )
                 return {
                     "stock_code": stock_code,
                     "coverage": "partial",
@@ -198,6 +248,7 @@ def rebuild_stock(
                         {**event, "factor_cum": float(event["factor_cum"]), "event_factor": None}
                         for event in events
                     ],
+                    "factor_audit": [],
                     "hfq_rows": [],
                     "qfq_rows": [],
                     "state": None,
@@ -207,7 +258,7 @@ def rebuild_stock(
             pending = False
             if baseline_factor is None:
                 if events:
-                    first_factor = _first_event_factor(raw_all, events[0]["ex_date"])
+                    first_factor = _event_price_factor(raw_by_date, events[0]["ex_date"])
                     if first_factor is None:
                         pending = True
                         baseline = None
@@ -218,7 +269,16 @@ def rebuild_stock(
             else:
                 baseline = _decimal(baseline_factor)
 
-            if pending:
+            factor_audit, audit_not_ok = _audit_event_factors(
+                events, raw_by_date, baseline
+            )
+            if window_start is not None and audit_not_ok:
+                pending = True
+            audit_by_date = {item["ex_date"]: item for item in factor_audit}
+            for event in events:
+                event["event_factor"] = audit_by_date[event["ex_date"]]["event_factor"]
+
+            if baseline is None:
                 latest_trade_date = raw[-1]["trade_date"]
                 cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
                 cur.execute(
@@ -241,9 +301,10 @@ def rebuild_stock(
                     "note": "首个事件缺少可信窗口基线",
                     "raw_rows": raw_all,
                     "factor_events": [
-                        {**event, "factor_cum": float(event["factor_cum"]), "event_factor": None}
+                        {**event, "factor_cum": float(event["factor_cum"])}
                         for event in events
                     ],
+                    "factor_audit": factor_audit,
                     "hfq_rows": [],
                     "qfq_rows": [],
                     "state": {
@@ -258,15 +319,6 @@ def rebuild_stock(
             assert baseline is not None
             current_b = baseline
             event_by_date = {event["ex_date"]: event for event in events}
-            previous_b = None
-            for event in events:
-                if previous_b is None:
-                    price_factor = _first_event_factor(raw_all, event["ex_date"])
-                    event_factor = float(price_factor) if price_factor is not None else None
-                else:
-                    event_factor = float(previous_b / _decimal(event["factor_cum"]))
-                event["event_factor"] = event_factor
-                previous_b = _decimal(event["factor_cum"])
 
             hfq = []
             for row in raw:
@@ -283,17 +335,18 @@ def rebuild_stock(
                     "close": float(_decimal(row["close"]) * factor),
                 })
 
-            if rebuild_from is None:
+            derive_start = rebuild_from if rebuild_from is not None else window_start
+            if derive_start is None:
                 cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
             else:
                 cur.execute(
                     "DELETE FROM stock_daily_hfq WHERE stock_code=%s AND trade_date>=%s",
-                    (stock_code, rebuild_from),
+                    (stock_code, derive_start),
                 )
             rebuilt_hfq = hfq
-            if rebuild_from is not None:
+            if derive_start is not None:
                 rebuilt_hfq = [
-                    row for row in hfq if str(row["trade_date"]) >= rebuild_from
+                    row for row in hfq if str(row["trade_date"]) >= derive_start
                 ]
             if rebuilt_hfq:
                 execute_values(
@@ -316,14 +369,15 @@ def rebuild_stock(
                 """
                 INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,
                     latest_trade_date, rebuild_pending, last_rebuilt_at)
-                VALUES (%s, %s, %s, %s, false, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (stock_code) DO UPDATE SET
                     baseline_factor=EXCLUDED.baseline_factor,
                     factor_latest=EXCLUDED.factor_latest,
                     latest_trade_date=EXCLUDED.latest_trade_date,
-                    rebuild_pending=false, last_rebuilt_at=CURRENT_TIMESTAMP
+                    rebuild_pending=EXCLUDED.rebuild_pending,
+                    last_rebuilt_at=CURRENT_TIMESTAMP
                 """,
-                (stock_code, baseline, factor_latest, latest_trade_date),
+                (stock_code, baseline, factor_latest, latest_trade_date, pending),
             )
 
             select_sql = (
@@ -332,9 +386,9 @@ def rebuild_stock(
                 " WHERE stock_code=%s"
             )
             select_args: list[str] = [stock_code]
-            if rebuild_from is not None:
+            if derive_start is not None:
                 select_sql += " AND trade_date>=%s"
-                select_args.append(rebuild_from)
+                select_args.append(derive_start)
             cur.execute(select_sql + " ORDER BY trade_date", select_args)
             stored_hfq = [dict(zip(_HFQ_FIELDS, row)) for row in cur.fetchall()]
         conn.commit()
@@ -353,11 +407,12 @@ def rebuild_stock(
         qfq.append(adjusted)
     return {
         "stock_code": stock_code,
-        "coverage": "partial" if quarantined else "unknown",
+        "coverage": "partial" if (quarantined or pending) else "unknown",
         "raw_rows": raw_all,
         "factor_events": [
             {**event, "factor_cum": float(event["factor_cum"])} for event in events
         ],
+        "factor_audit": factor_audit,
         "hfq_rows": [
             {**row, "factor_cum": float(row["factor_cum"])} for row in stored_hfq
         ],
@@ -367,7 +422,7 @@ def rebuild_stock(
             "baseline_factor": float(baseline),
             "factor_latest": float(factor_latest),
             "latest_trade_date": latest_trade_date,
-            "rebuild_pending": False,
+            "rebuild_pending": pending,
         },
         "quarantined": quarantined,
     }

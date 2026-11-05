@@ -126,6 +126,10 @@ _Avoid_: 早盘补抓
 **板块回补**:
 `qstock-scheduler backfill` 执行的板块历史补数入 `market_boards`，申万官网 trend 指数全历史回补申万双级口径行（issue #118，spec #111；issue #121 定稿单源——东财 push2his 回补与概念板块回补已整体摘除，BoardHistoryAdapter 协议随之退役）：默认窗口 = 19990101 起、历史深至 1999，解除 5/10 日涨跌"自落库日起积累"限制。回补行带 source 标注（'swsresearch'）与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。存量 'push2his' 回补行为东财退役前产物，保留只读。概念维度已永久退役（issue #119：THS 概念成分端点准入闸未过，#106 弃用方案）——收盘后批的概念成分积累（'em' 体系）已摘除，存量 'em' 行保留只读，无任何采集路径再写概念板块。
 
+**复权事件回填**:
+`qstock-scheduler adj-backfill` 执行的复权回填 A（issue #163，spec #158 §6.1/§6.2）：窗口内逐日全市场累计因子事件集（成功空日/失败日可审计，失败不当作无事件）+ 只对窗口内有事件的票重抓不复权 raw、反推窗口基线 B0 并重建 hfq/state；断点续跑读采集台账，失败重试，未决项落 `stock_factor_repair` 待修复台账，事件撤销落 `stock_factor_retracted` 标记（与整日替换同事务）。无事件票 raw 回补归 #164；北交所与替代源全市场回填不在本入口。
+_Avoid_: 全量回溯（那是 legacy 个股日线全历史）、板块回补
+
 **个股日线入口**:
 `qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
 _Avoid_: 日线脚本、补数脚本

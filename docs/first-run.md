@@ -221,6 +221,27 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 - **结果判断**：关注 `status`、逐板块结果和是否出现熔断；完成后用 `coverage` 验收窗口。
 - **详细手册**：[申万板块 CLI](sw-boards-cli.md)。
 
+#### `adj-backfill`：复权回填 A（逐日事件集 + 有事件票 raw）
+
+- **写库**：写 `stock_adjust_factor`、`stock_daily_raw`、`stock_daily_hfq`、
+  `stock_factor_state`，并落 `stock_adjust_factor`/`stock_daily_raw`/
+  `stock_factor_repair` 三类审计台账。
+- **常用命令**：
+
+  ```bash
+  .venv/bin/qstock-scheduler adj-backfill --trading-days 3 --limit 20
+  .venv/bin/qstock-scheduler adj-backfill --start 20230101 --end 20261104
+  ```
+
+- **关键参数**：`--start` 缺省 `QSTOCK_ADJ_WINDOW_START`/`20230101`；
+  `--trading-days` 与 `--start` 互斥；`--limit` 仅冒烟并标记 `limited`；
+  `--force` 忽略台账断点整窗重抓；`--report-dir` 指定 CSV/summary 产物目录。
+- **结果判断**：只有 `status="ok"` 且无 `stock_factor_repair` 未决项才输出
+  「数据可以使用」；`partial_error` 时先看 `summary.failed_days`、
+  `summary.repair_counts` 与 `repairs.csv`。断点续跑看
+  `summary.upstream_requests.total`（全部命中时应为 0）。
+- **详细手册**：[复权回填 A CLI](adj-backfill-cli.md)。
+
 #### `lhb`：龙虎榜单日抓取、历史回溯与对拍
 
 - **写库**：单日写 basic、沪深席位详情、两个营业部榜与滚动统计；历史模式写 basic、沪深详情与滚动统计，不写两个营业部累计榜；北交所不存详情且不计缺失。`--check` 不写库。

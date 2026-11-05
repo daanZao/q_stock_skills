@@ -68,6 +68,17 @@ class TestTradingDay:
     def test_holiday_weekday_not_trading(self):
         assert not is_trading_day("20261005")  # 周一，国庆休市（10/1~10/7）
 
+    def test_2023_historical_closures(self):
+        """回填窗口从 2023 起：2023 休市日必须排除，否则事件集多出假交易日。"""
+        assert not is_trading_day("20230123")  # 春节
+        assert not is_trading_day("20230405")  # 清明
+        assert not is_trading_day("20230501")  # 劳动节
+        assert not is_trading_day("20230622")  # 端午
+        assert not is_trading_day("20230929")  # 中秋
+        assert not is_trading_day("20231002")  # 国庆
+        assert is_trading_day("20230130")  # 春节后开市
+        assert is_trading_day("20230103")  # 元旦后开市
+
     def test_next_trading_day_passthrough(self):
         assert next_trading_day("20261014") == "20261014"
 
