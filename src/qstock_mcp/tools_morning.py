@@ -16,6 +16,7 @@
 
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Sequence
 
 from .adapters import (
@@ -73,60 +74,71 @@ def _stock_daily_part(conn, adapter, target: str) -> tuple[dict, list[dict]]:
     }, rows
 
 
+def _previous_raw(conn, stock_code: str, target: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT trade_date, close FROM stock_daily_raw"
+            " WHERE stock_code=%s AND trade_date<%s"
+            " ORDER BY trade_date DESC LIMIT 1",
+            (stock_code, target),
+        )
+        return cur.fetchone()
+
+
+def _previous_b(
+    conn, stock_code: str, target: str, *, include_baseline: bool = True
+) -> Decimal | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT factor_cum FROM stock_adjust_factor"
+            " WHERE stock_code=%s AND ex_date<%s ORDER BY ex_date DESC LIMIT 1",
+            (stock_code, target),
+        )
+        previous_factor = cur.fetchone()
+        if previous_factor is None and include_baseline:
+            cur.execute(
+                "SELECT baseline_factor FROM stock_factor_state WHERE stock_code=%s",
+                (stock_code,),
+            )
+            previous_factor = cur.fetchone()
+    if previous_factor is None or previous_factor[0] is None:
+        return None
+    return Decimal(str(previous_factor[0]))
+
+
+def _pctchg_event_factor(previous_close, row: dict) -> Decimal | None:
+    pct = row.get("change_percent")
+    close = row.get("close")
+    if pct is None or close is None or close <= 0 or previous_close <= 0:
+        return None
+    realclose = Decimal(str(previous_close)) * (1 + Decimal(str(pct)) / 100)
+    if realclose <= 0:
+        return None
+    event_factor = Decimal(str(close)) / realclose
+    return event_factor if event_factor > 0 else None
+
+
 def _derive_pctchg_events(
     conn, target: str, raw_rows: list[dict]
 ) -> tuple[list[dict], list[str]]:
-    from decimal import Decimal
-
     events = []
     unresolved = []
     for row in raw_rows:
         stock_code = row["stock_code"]
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT trade_date, close FROM stock_daily_raw"
-                " WHERE stock_code=%s AND trade_date<%s"
-                " ORDER BY trade_date DESC LIMIT 1",
-                (stock_code, target),
-            )
-            previous = cur.fetchone()
+        previous = _previous_raw(conn, stock_code, target)
         if previous is None or row.get("preclose") is None or previous[1] is None:
             continue
         if Decimal(str(row["preclose"])) == Decimal(str(previous[1])):
             continue
-        pct = row.get("change_percent")
-        close = row.get("close")
-        if pct is None or close is None or close <= 0 or previous[1] <= 0:
-            unresolved.append(stock_code)
-            continue
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT factor_cum FROM stock_adjust_factor"
-                " WHERE stock_code=%s AND ex_date<%s ORDER BY ex_date DESC LIMIT 1",
-                (stock_code, target),
-            )
-            previous_factor = cur.fetchone()
-            if previous_factor is None:
-                cur.execute(
-                    "SELECT baseline_factor FROM stock_factor_state WHERE stock_code=%s",
-                    (stock_code,),
-                )
-                previous_factor = cur.fetchone()
-        if previous_factor is None or previous_factor[0] is None:
-            unresolved.append(stock_code)
-            continue
-        realclose = Decimal(str(previous[1])) * (1 + Decimal(str(pct)) / 100)
-        if realclose <= 0:
-            unresolved.append(stock_code)
-            continue
-        event_factor = Decimal(str(close)) / realclose
-        if event_factor <= 0:
+        previous_b = _previous_b(conn, stock_code, target)
+        event_factor = _pctchg_event_factor(previous[1], row)
+        if previous_b is None or event_factor is None:
             unresolved.append(stock_code)
             continue
         events.append({
             "stock_code": stock_code,
             "ex_date": target,
-            "factor_cum": Decimal(str(previous_factor[0])) / event_factor,
+            "factor_cum": previous_b / event_factor,
             "source": "baostock-pctchg-derived",
         })
     return events, unresolved
@@ -135,43 +147,25 @@ def _derive_pctchg_events(
 def _authoritative_factor_mismatches(
     conn, target: str, raw_rows: list[dict], events: list[dict]
 ) -> list[dict]:
-    from decimal import Decimal
-
     raw_by_stock = {row["stock_code"]: row for row in raw_rows}
     mismatches = []
     for event in events:
-        row = raw_by_stock.get(event["stock_code"])
+        stock_code = event["stock_code"]
+        row = raw_by_stock.get(stock_code)
         if row is None:
             continue
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT close FROM stock_daily_raw WHERE stock_code=%s AND trade_date<%s"
-                " ORDER BY trade_date DESC LIMIT 1",
-                (event["stock_code"], target),
-            )
-            previous = cur.fetchone()
-            cur.execute(
-                "SELECT factor_cum FROM stock_adjust_factor"
-                " WHERE stock_code=%s AND ex_date<%s ORDER BY ex_date DESC LIMIT 1",
-                (event["stock_code"], target),
-            )
-            previous_factor = cur.fetchone()
-        if previous is None or previous_factor is None:
+        previous = _previous_raw(conn, stock_code, target)
+        previous_b = _previous_b(conn, stock_code, target, include_baseline=False)
+        if previous is None or previous_b is None:
             continue
-        pct = row.get("change_percent")
-        if previous[0] is None or previous[0] <= 0 or row.get("close") is None or pct is None:
+        pct_factor = _pctchg_event_factor(previous[1], row)
+        if pct_factor is None or event["factor_cum"] <= 0:
             continue
-        realclose = Decimal(str(previous[0])) * (1 + Decimal(str(pct)) / 100)
-        if realclose <= 0 or event["factor_cum"] <= 0:
-            continue
-        pct_factor = Decimal(str(row["close"])) / realclose
-        authoritative_factor = Decimal(str(previous_factor[0])) / Decimal(
-            str(event["factor_cum"])
-        )
+        authoritative_factor = previous_b / Decimal(str(event["factor_cum"]))
         relative_error = abs(pct_factor - authoritative_factor) / authoritative_factor
         if relative_error > Decimal("0.001"):
             mismatches.append({
-                "stock_code": event["stock_code"],
+                "stock_code": stock_code,
                 "relative_error": float(relative_error),
             })
     return mismatches
@@ -182,14 +176,7 @@ def _raw_gap_codes(conn, target: str, raw_rows: list[dict]) -> list[str]:
 
     gaps = []
     for row in raw_rows:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT trade_date FROM stock_daily_raw"
-                " WHERE stock_code=%s AND trade_date<%s"
-                " ORDER BY trade_date DESC LIMIT 1",
-                (row["stock_code"], target),
-            )
-            previous = cur.fetchone()
+        previous = _previous_raw(conn, row["stock_code"], target)
         if previous is None:
             continue
         calendar = trading_days_between(previous[0], target)
@@ -227,6 +214,10 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
     pending_codes = (
         {item["stock_code"] for item in mismatches} | set(unresolved) | set(raw_gaps)
     )
+    unknown_event_codes = (
+        set(unresolved) | set(raw_gaps)
+        if mode == "baostock-pctchg-derived" else set()
+    )
     raw_by_stock: dict[str, list[dict]] = {}
     for row in raw_rows:
         raw_by_stock.setdefault(row["stock_code"], []).append(row)
@@ -250,7 +241,9 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
             stock_code,
             raw_by_stock.get(stock_code, []),
             events_by_stock.get(stock_code, []),
-            authoritative_event_dates=(target,),
+            authoritative_event_dates=(
+                () if stock_code in unknown_event_codes else (target,)
+            ),
             baseline_factor=state[0] if state is not None and state[1] else None,
             rebuild_from=min(
                 [target] + [event["ex_date"] for event in events_by_stock.get(stock_code, [])]

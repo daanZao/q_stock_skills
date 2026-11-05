@@ -419,6 +419,56 @@ class TestAdjustmentMorning:
         finally:
             conn.close()
 
+    def test_unknown_fallback_does_not_retract_existing_event(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        previous = {
+            **_morning_rows("20261015")[0], "stock_code": "688300",
+            "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01,
+        }
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": -1.8352,
+        }
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "688300", [previous, current],
+                [{"ex_date": "20260610", "factor_cum": 2.965589},
+                 {"ex_date": TARGET, "factor_cum": 3.855379}],
+                baseline_factor=2.965589,
+            )
+        finally:
+            conn.close()
+
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[{**current, "change_percent": None}],
+                factor_exc=FetchError("factor unavailable"),
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT factor_cum, source FROM stock_adjust_factor"
+                    " WHERE stock_code='688300' AND ex_date=%s",
+                    (TARGET,),
+                )
+                factor, source = cur.fetchone()
+                assert float(factor) == 3.855379
+                assert source == "baostock-adjust-factor"
+                cur.execute(
+                    "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='688300'"
+                )
+                assert cur.fetchone()[0] is True
+        finally:
+            conn.close()
+
     def test_unknown_first_baseline_blocks_verified(self, pg_ready):
         current = {
             **_morning_rows()[0], "stock_code": "688300",
