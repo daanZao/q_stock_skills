@@ -482,3 +482,26 @@ def test_baostock_persistent_session_relogs_after_kick(monkeypatch):
     assert logouts == [clients[0]]
     adapter.close()
     assert logouts == [clients[0], clients[1]]
+
+
+def test_baostock_ensure_session_logs_in_once(monkeypatch):
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    client = object()
+    logins = []
+    logouts = []
+
+    def login():
+        logins.append(1)
+        return client
+
+    monkeypatch.setattr(module, "_login", login)
+    monkeypatch.setattr(module, "_logout", logouts.append)
+
+    adapter = module.BaostockAdapter(persistent=True)
+    adapter.ensure_session()
+    adapter.ensure_session()
+    assert len(logins) == 1
+    assert logouts == []
+    adapter.close()
+    assert logouts == [client]

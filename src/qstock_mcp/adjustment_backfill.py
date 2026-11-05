@@ -912,6 +912,18 @@ def run_adjustment_backfill(
                 error_kind="window_behind_data",
             )
 
+        # 预登录探测：上游登录不可用时零写入快速失败，避免逐日重试放大限速。
+        ensure_session = getattr(adapter, "ensure_session", None)
+        if ensure_session is not None:
+            try:
+                ensure_session()
+            except FetchError as e:
+                return _error(
+                    tool, params,
+                    f"baostock 登录失败，回填未开始（断点保留）：{e}",
+                    error_kind="upstream_unreachable",
+                )
+
         # ---- 阶段 1：逐日全市场事件集
         checkpoints = _day_checkpoints(conn, start_d, end_d)
         counts = _event_counts(conn, start_d, end_d)

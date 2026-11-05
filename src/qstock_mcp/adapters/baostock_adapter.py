@@ -241,6 +241,14 @@ class BaostockAdapter:
         if session is not None:
             _logout_quietly(session)
 
+    def ensure_session(self) -> None:
+        """persistent 模式预登录；登录失败直接抛 FetchError（回填前置探测）。"""
+        if not self._persistent:
+            return
+        if self._session is None:
+            with _request_deadline():
+                self._session = _login()
+
     def close(self) -> None:
         """关闭常驻会话（persistent=True 的回填结束时调用）。"""
         self._drop_session()
