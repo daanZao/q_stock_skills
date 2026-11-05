@@ -126,7 +126,10 @@ def _derive_pctchg_events(
     for row in raw_rows:
         stock_code = row["stock_code"]
         previous = _previous_raw(conn, stock_code, target)
-        if previous is None or row.get("preclose") is None or previous[1] is None:
+        if previous is None:
+            continue
+        if row.get("preclose") is None or previous[1] is None:
+            unresolved.append(stock_code)
             continue
         if Decimal(str(row["preclose"])) == Decimal(str(previous[1])):
             continue

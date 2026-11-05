@@ -464,7 +464,7 @@ class TestAdjustmentMorning:
         out = fetch_morning_batch(
             trade_date=TARGET,
             adapter=FakeMorningAdapter(
-                rows=[{**current, "change_percent": None}],
+                rows=[{**current, "preclose": None}],
                 factor_exc=FetchError("factor unavailable"),
             ),
             adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
