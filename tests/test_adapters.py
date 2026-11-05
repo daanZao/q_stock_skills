@@ -368,3 +368,117 @@ def test_baostock_astock_raw_relogs_in_after_session_kicked(monkeypatch):
 
     assert rows == []
     assert logins == clients
+
+
+def test_baostock_persistent_session_logs_in_once_and_closes(monkeypatch):
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    class FactorResult:
+        error_code = "0"
+        error_msg = ""
+        fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+
+        def __init__(self):
+            self.returned = False
+
+        def next(self):
+            if self.returned:
+                return False
+            self.returned = True
+            return True
+
+        def get_row_data(self):
+            return ["sh.688300", "2026-10-16", "1.0", "3.855379", "3.855379"]
+
+    class RawResult:
+        error_code = "0"
+        fields = ("date,open,high,low,close,preclose,volume,amount,"
+                  "pctChg,tradestatus,turn").split(",")
+
+        def __init__(self):
+            self.returned = False
+
+        def next(self):
+            if self.returned:
+                return False
+            self.returned = True
+            return True
+
+        def get_row_data(self):
+            return ["2026-10-16", "104.62", "105", "100", "102.70", "104.62",
+                    "1000", "10270000", "-1.8352", "1", "0.1"]
+
+    class Client:
+        def query_daily_adjust_factor(self, date):
+            return FactorResult()
+
+        def query_history_k_data_plus(self, *args, **kwargs):
+            return RawResult()
+
+    client = Client()
+    logins = []
+    logouts = []
+
+    def login():
+        logins.append(1)
+        return client
+
+    monkeypatch.setattr(module, "_login", login)
+    monkeypatch.setattr(module, "_logout", logouts.append)
+
+    adapter = module.BaostockAdapter(persistent=True)
+    first = adapter.fetch_daily_adjust_factor("20261016")
+    second = adapter.fetch_daily_adjust_factor("20261017")
+    raw = adapter.fetch_daily("688300", "20261016", "20261016", adj="none")
+
+    assert first == [{
+        "stock_code": "688300", "ex_date": "20261016", "factor_cum": 3.855379,
+    }]
+    assert second == first
+    assert raw[0]["close"] == 102.70
+    assert len(logins) == 1
+    assert logouts == []
+    adapter.close()
+    assert logouts == [client]
+
+
+def test_baostock_persistent_session_relogs_after_kick(monkeypatch):
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    class Result:
+        error_msg = "用户未登录"
+        fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+
+        def __init__(self, error_code):
+            self.error_code = error_code
+
+        def next(self):
+            return False
+
+    class Client:
+        def __init__(self, error_code):
+            self.error_code = error_code
+
+        def query_daily_adjust_factor(self, date):
+            return Result(self.error_code)
+
+    clients = [Client("10001001"), Client("0")]
+    logins = []
+    logouts = []
+
+    def login():
+        client = clients[len(logins)]
+        logins.append(client)
+        return client
+
+    monkeypatch.setattr(module, "_login", login)
+    monkeypatch.setattr(module, "_logout", logouts.append)
+
+    adapter = module.BaostockAdapter(persistent=True)
+    events = adapter.fetch_daily_adjust_factor("20261016")
+
+    assert events == []
+    assert logins == clients
+    assert logouts == [clients[0]]
+    adapter.close()
+    assert logouts == [clients[0], clients[1]]

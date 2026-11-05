@@ -809,3 +809,30 @@ def test_missing_first_event_raw_is_recorded_as_raw_gap(pg_test, tmp_path):
     )[0]
     assert state[0] is None
     assert state[1] is True
+
+
+def test_backfill_uses_persistent_adapter_and_closes_it(pg_test, tmp_path, monkeypatch):
+    from qstock_mcp.adapters import baostock_adapter
+
+    created = []
+
+    class FakePersistent(FakeBackfillAdapter):
+        def __init__(self, persistent=False):
+            super().__init__()
+            self.persistent = persistent
+            self.closed = False
+            created.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(baostock_adapter, "BaostockAdapter", FakePersistent)
+    out = run_adjustment_backfill(
+        start=START, end=END, adapter=None, throttle=0,
+        report_dir=str(tmp_path), now=NOW,
+    )
+
+    assert out["status"] == "ok"
+    assert len(created) == 1
+    assert created[0].persistent is True
+    assert created[0].closed is True

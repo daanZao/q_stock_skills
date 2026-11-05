@@ -77,9 +77,18 @@ def _request_deadline():
             signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
+def _logout_quietly(bs) -> None:
+    try:
+        with _request_deadline():
+            _logout(bs)
+    except Exception:  # noqa: BLE001 - 清理路径不抛
+        pass
+
+
 def _with_relogin(operation):
     for attempt in range(3):
-        bs = _login()
+        with _request_deadline():
+            bs = _login()
         try:
             with _request_deadline():
                 return operation(bs)
@@ -87,7 +96,7 @@ def _with_relogin(operation):
             if attempt == 2:
                 raise FetchError("baostock 会话被踢，重登重试 3 次后仍失败") from e
         finally:
-            _logout(bs)
+            _logout_quietly(bs)
     raise AssertionError("unreachable")
 
 
@@ -217,6 +226,47 @@ def map_adjust_factor_rows(fields: list[str], rows: list[list[str]]) -> list[dic
 class BaostockAdapter:
     name = "baostock"
 
+    def __init__(self, persistent: bool = False):
+        """persistent=True 时同一 adapter 复用一次登录会话（回填专用）。
+
+        正式回填若每请求登录/登出，数百次握手会触发上游登录限速
+        （2026-11-05 实测约 508 次后登录/查询 20s 无响应）；长会话内串行
+        查询可显著减少握手。会话被踢时按既有规则重登 ≤3 次。
+        """
+        self._persistent = persistent
+        self._session = None
+
+    def _drop_session(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            _logout_quietly(session)
+
+    def close(self) -> None:
+        """关闭常驻会话（persistent=True 的回填结束时调用）。"""
+        self._drop_session()
+
+    def _run(self, operation):
+        if not self._persistent:
+            return _with_relogin(operation)
+        for attempt in range(3):
+            if self._session is None:
+                with _request_deadline():
+                    self._session = _login()
+            try:
+                with _request_deadline():
+                    return operation(self._session)
+            except _SessionKicked as e:
+                self._drop_session()
+                if attempt == 2:
+                    raise FetchError(
+                        "baostock 会话被踢，重登重试 3 次后仍失败"
+                    ) from e
+            except Exception:
+                # 超时/协议错误后旧 socket 可能不可继续用，丢弃会话。
+                self._drop_session()
+                raise
+        raise AssertionError("unreachable")
+
     def fetch_daily(
         self, stock_code: str, start: str, end: str, adj: str = "qfq"
     ) -> list[dict]:
@@ -226,8 +276,8 @@ class BaostockAdapter:
                 kind="unsupported",
             )
         bs_code = to_baostock_code(stock_code)
-        bs = _login()
-        try:
+
+        def operation(bs):
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 _FIELDS,
@@ -242,8 +292,8 @@ class BaostockAdapter:
             while rs.next():
                 rows.append(rs.get_row_data())
             return map_baostock_rows(list(rs.fields), rows)
-        finally:
-            _logout(bs)
+
+        return self._run(operation)
 
     def fetch_market_snapshot(self) -> dict:
         """baostock 无全市场快照接口，明确拒绝（不伪造）。"""
@@ -285,7 +335,7 @@ class BaostockAdapter:
                     rows.append(rs.get_row_data())
             return map_adjust_factor_rows(list(rs.fields), rows)
 
-        return _with_relogin(operation)
+        return self._run(operation)
 
     # ---------------------------------------------------------------- init 轻量初始化（issue #8）
 
