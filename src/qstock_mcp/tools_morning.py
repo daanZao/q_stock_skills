@@ -1,24 +1,17 @@
-"""次晨批核心层（issue #83，spec #71/W5）：开盘前采集前一交易日数据。
+"""次晨批核心层：开盘前采集前一交易日数据并重建复权派生。
 
-两个部分独立成败、独立落采集台账：
-1. stock_daily：baostock `query_daily_history_k_AStock` 一把抓全市场日线
-   （实测 5,225 行/约 20s），按业务键 (stock_code, trade_date, adj) 幂等
-   落库——与既有日线头尾自愈共用业务键，重复执行幂等覆盖，不冲突。
-   单源调用不走 fallback 链（一把抓是 baostock 独有接口）；失败按三态
-   契约分类 error_kind 落台账。
-2. index_daily：7 大指数白名单尾行缺失即补（spec 补充输入 07a/07b）——
-2. index_daily：7 大指数白名单尾行缺失即补（spec 补充输入 07a/07b）——
-   尾行早于目标日的指数按尾行次日起经指数日线 fallback 链补抓
-   （issue #117：腾讯 → baostock，腾讯 T+0 当日行先落、baostock 次晨
-   权威复核经本批对账覆盖）；尾行已在目标日的指数零请求。
-3. sw_board_valuation：申万板块每日分析报表（issue #118，spec #111）——
-   换手率/PE/PB/流通市值/股息率，T+1 发布（前一交易日报表次晨可查），
-   申万官网单源（SwBoardsAdapter 协议，注入缝 sw_adapters），按业务键
-   (trade_date, board_code) 幂等落 sw_board_valuation 表。
+各部分独立成败、独立落采集台账：
+1. stock_daily：baostock `query_daily_history_k_AStock` 一把抓全市场 raw，
+   amount 元→万元，单源不走全市场 fallback；切换前保留 legacy 同键写入。
+2. stock_adjust_factor：逐日全市场累计 B 事件与 raw 经 `rebuild_stock` 写入
+   影子表。成功空结果整日替换事件；失败时用权威 raw+pctChg 降级，双路径
+   按 0.1% 对账。无事件票只写当日 hfq，事件票从 ex_date 重建并推进 anchor。
+   raw 缺口、无效 close、基线未知和未决异常均阻止 verified。
+3. index_daily：7 大指数白名单尾行缺失即补，尾行已在目标日的指数零请求。
+4. sw_board_valuation：申万板块每日分析报表按业务键幂等落库。
 
 盘中禁写防线（issue #78）延伸：显式指定目标日为当日且正在交易时段时报错
-零落库（次晨批语义是抓"已收盘"的前一交易日）。调度入口见 scheduler.py
-morning 子命令；本层不注册 MCP 工具。
+零落库。调度入口见 scheduler.py morning 子命令；本层不注册 MCP 工具。
 """
 
 import logging
@@ -49,7 +42,7 @@ from .tools_init import MAJOR_INDICES
 log = logging.getLogger(__name__)
 
 
-def _stock_daily_part(conn, adapter, target: str) -> dict:
+def _stock_daily_part(conn, adapter, target: str) -> tuple[dict, list[dict]]:
     started = datetime.now(timezone.utc)
     try:
         rows = adapter.fetch_astock_daily(target)
@@ -63,7 +56,7 @@ def _stock_daily_part(conn, adapter, target: str) -> dict:
             conn, trade_date=target, section="stock_daily", status="error",
             error_kind=kind, detail=f"morning_batch: {e}", started_at=started,
         )
-        return {"status": "error", "error": str(e), "error_kind": kind}
+        return {"status": "error", "error": str(e), "error_kind": kind}, []
     n = upsert_daily_rows(conn, rows, adapter.name)
     record_collection(
         conn, trade_date=target, section="stock_daily",
@@ -77,6 +70,229 @@ def _stock_daily_part(conn, adapter, target: str) -> dict:
         "rows": n,
         "source": adapter.name,
         **({"empty_kind": "no_data_for_date"} if n == 0 else {}),
+    }, rows
+
+
+def _derive_pctchg_events(
+    conn, target: str, raw_rows: list[dict]
+) -> tuple[list[dict], list[str]]:
+    from decimal import Decimal
+
+    events = []
+    unresolved = []
+    for row in raw_rows:
+        stock_code = row["stock_code"]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date, close FROM stock_daily_raw"
+                " WHERE stock_code=%s AND trade_date<%s"
+                " ORDER BY trade_date DESC LIMIT 1",
+                (stock_code, target),
+            )
+            previous = cur.fetchone()
+        if previous is None or row.get("preclose") is None or previous[1] is None:
+            continue
+        if Decimal(str(row["preclose"])) == Decimal(str(previous[1])):
+            continue
+        pct = row.get("change_percent")
+        close = row.get("close")
+        if pct is None or close is None or close <= 0 or previous[1] <= 0:
+            unresolved.append(stock_code)
+            continue
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT factor_cum FROM stock_adjust_factor"
+                " WHERE stock_code=%s AND ex_date<%s ORDER BY ex_date DESC LIMIT 1",
+                (stock_code, target),
+            )
+            previous_factor = cur.fetchone()
+            if previous_factor is None:
+                cur.execute(
+                    "SELECT baseline_factor FROM stock_factor_state WHERE stock_code=%s",
+                    (stock_code,),
+                )
+                previous_factor = cur.fetchone()
+        if previous_factor is None or previous_factor[0] is None:
+            unresolved.append(stock_code)
+            continue
+        realclose = Decimal(str(previous[1])) * (1 + Decimal(str(pct)) / 100)
+        if realclose <= 0:
+            unresolved.append(stock_code)
+            continue
+        event_factor = Decimal(str(close)) / realclose
+        if event_factor <= 0:
+            unresolved.append(stock_code)
+            continue
+        events.append({
+            "stock_code": stock_code,
+            "ex_date": target,
+            "factor_cum": Decimal(str(previous_factor[0])) / event_factor,
+            "source": "baostock-pctchg-derived",
+        })
+    return events, unresolved
+
+
+def _authoritative_factor_mismatches(
+    conn, target: str, raw_rows: list[dict], events: list[dict]
+) -> list[dict]:
+    from decimal import Decimal
+
+    raw_by_stock = {row["stock_code"]: row for row in raw_rows}
+    mismatches = []
+    for event in events:
+        row = raw_by_stock.get(event["stock_code"])
+        if row is None:
+            continue
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT close FROM stock_daily_raw WHERE stock_code=%s AND trade_date<%s"
+                " ORDER BY trade_date DESC LIMIT 1",
+                (event["stock_code"], target),
+            )
+            previous = cur.fetchone()
+            cur.execute(
+                "SELECT factor_cum FROM stock_adjust_factor"
+                " WHERE stock_code=%s AND ex_date<%s ORDER BY ex_date DESC LIMIT 1",
+                (event["stock_code"], target),
+            )
+            previous_factor = cur.fetchone()
+        if previous is None or previous_factor is None:
+            continue
+        pct = row.get("change_percent")
+        if previous[0] is None or previous[0] <= 0 or row.get("close") is None or pct is None:
+            continue
+        realclose = Decimal(str(previous[0])) * (1 + Decimal(str(pct)) / 100)
+        if realclose <= 0 or event["factor_cum"] <= 0:
+            continue
+        pct_factor = Decimal(str(row["close"])) / realclose
+        authoritative_factor = Decimal(str(previous_factor[0])) / Decimal(
+            str(event["factor_cum"])
+        )
+        relative_error = abs(pct_factor - authoritative_factor) / authoritative_factor
+        if relative_error > Decimal("0.001"):
+            mismatches.append({
+                "stock_code": event["stock_code"],
+                "relative_error": float(relative_error),
+            })
+    return mismatches
+
+
+def _raw_gap_codes(conn, target: str, raw_rows: list[dict]) -> list[str]:
+    from .dates import trading_days_between
+
+    gaps = []
+    for row in raw_rows:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date FROM stock_daily_raw"
+                " WHERE stock_code=%s AND trade_date<%s"
+                " ORDER BY trade_date DESC LIMIT 1",
+                (row["stock_code"], target),
+            )
+            previous = cur.fetchone()
+        if previous is None:
+            continue
+        calendar = trading_days_between(previous[0], target)
+        if len(calendar) < 2 or calendar[-2:] != [previous[0], target]:
+            gaps.append(row["stock_code"])
+    return gaps
+
+
+def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> dict:
+    from .adjustment import rebuild_stock
+
+    started = datetime.now(timezone.utc)
+    mode = "baostock-adjust-factor"
+    unresolved: list[str] = []
+    try:
+        events = adapter.fetch_daily_adjust_factor(target)
+    except FetchError as e:
+        kind = fetch_failure_kind(e)
+        if kind == "connection":
+            kind = "upstream_unreachable"
+        elif kind != "unsupported":
+            kind = "fetch_failed"
+        record_collection(
+            conn, trade_date=target, section="stock_adjust_factor", status="error",
+            error_kind=kind, detail=f"morning_batch: {e}", started_at=started,
+        )
+        mode = "baostock-pctchg-derived"
+        events, unresolved = _derive_pctchg_events(conn, target, raw_rows)
+
+    mismatches = (
+        _authoritative_factor_mismatches(conn, target, raw_rows, events)
+        if mode == "baostock-adjust-factor" else []
+    )
+    raw_gaps = _raw_gap_codes(conn, target, raw_rows)
+    pending_codes = (
+        {item["stock_code"] for item in mismatches} | set(unresolved) | set(raw_gaps)
+    )
+    raw_by_stock: dict[str, list[dict]] = {}
+    for row in raw_rows:
+        raw_by_stock.setdefault(row["stock_code"], []).append(row)
+    events_by_stock: dict[str, list[dict]] = {}
+    for event in events:
+        events_by_stock.setdefault(event["stock_code"], []).append(event)
+    rebuild_pending: list[str] = []
+    invalid_close: list[str] = []
+    for stock_code in sorted(raw_by_stock.keys() | events_by_stock.keys()):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT s.baseline_factor, EXISTS("
+                " SELECT 1 FROM stock_adjust_factor f"
+                " WHERE f.stock_code=s.stock_code AND f.ex_date<%s)"
+                " FROM stock_factor_state s WHERE s.stock_code=%s",
+                (target, stock_code),
+            )
+            state = cur.fetchone()
+        snapshot = rebuild_stock(
+            conn,
+            stock_code,
+            raw_by_stock.get(stock_code, []),
+            events_by_stock.get(stock_code, []),
+            authoritative_event_dates=(target,),
+            baseline_factor=state[0] if state is not None and state[1] else None,
+            rebuild_from=min(
+                [target] + [event["ex_date"] for event in events_by_stock.get(stock_code, [])]
+            ),
+        )
+        if snapshot.get("state") and snapshot["state"]["rebuild_pending"]:
+            rebuild_pending.append(stock_code)
+        if snapshot["quarantined"]:
+            invalid_close.append(stock_code)
+        if stock_code in pending_codes:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stock_factor_state SET rebuild_pending=true WHERE stock_code=%s",
+                    (stock_code,),
+                )
+            conn.commit()
+    error_kind = (
+        "factor_mismatch" if mismatches
+        else "pctchg_derivation_failed" if unresolved
+        else "raw_gap" if raw_gaps
+        else "rebuild_pending" if rebuild_pending
+        else "invalid_close" if invalid_close else None
+    )
+    result_status = "error" if error_kind else ("ok" if events else "empty")
+    record_collection(
+        conn, trade_date=target, section="stock_adjust_factor",
+        status=result_status, source=adapter.name, rows=len(events),
+        error_kind=error_kind or (None if events else "no_data_for_date"),
+        detail=(
+            f"morning_batch:{mode};mismatches={mismatches};unresolved={unresolved}"
+        ),
+        started_at=started,
+    )
+    return {
+        "status": result_status,
+        "rows": len(events),
+        "rebuilt": len(raw_by_stock.keys() | events_by_stock.keys()),
+        "source": adapter.name,
+        "mode": mode,
+        **({"error_kind": error_kind, "mismatches": mismatches,
+            "unresolved": unresolved} if error_kind else {}),
+        **({"empty_kind": "no_data_for_date"} if not events and not error_kind else {}),
     }
 
 
@@ -197,8 +413,12 @@ def fetch_morning_batch(
     if err:
         return _error(tool, params, err)
     try:
+        stock_part, raw_rows = _stock_daily_part(conn, adapter, target)
         parts = {
-            "stock_daily": _stock_daily_part(conn, adapter, target),
+            "stock_daily": stock_part,
+            "stock_adjust_factor": _stock_adjustment_part(
+                conn, adapter, target, raw_rows
+            ),
             "index_daily": _index_daily_part(conn, adapters, target),
             "sw_board_valuation": _sw_board_valuation_part(conn, sw_adapters, target),
         }
@@ -207,7 +427,9 @@ def fetch_morning_batch(
     failed = [k for k, v in parts.items() if v["status"] == "error"]
     status = aggregate_batch_status(len(parts), len(failed))
     out = {"status": status, "tool": tool, "params": params,
-           "trade_date": target, "parts": parts}
+           "trade_date": target, "parts": parts,
+           "stage": "verified" if not failed else "rebuilt",
+           "messages": ["数据处理完成"] + ([] if failed else ["数据可以使用"])}
     if failed:
         out["failed_parts"] = failed
     return out

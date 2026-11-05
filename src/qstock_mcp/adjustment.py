@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 _RAW_FIELDS = (
     "trade_date", "open", "high", "low", "close", "preclose", "volume",
@@ -85,6 +85,7 @@ def rebuild_stock(
     *,
     authoritative_event_dates=(),
     baseline_factor=None,
+    rebuild_from: str | None = None,
 ) -> dict:
     """写入单票事实并原子重建派生；authoritative_event_dates 整日替换事件。"""
     try:
@@ -282,8 +283,19 @@ def rebuild_stock(
                     "close": float(_decimal(row["close"]) * factor),
                 })
 
-            cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
-            if hfq:
+            if rebuild_from is None:
+                cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
+            else:
+                cur.execute(
+                    "DELETE FROM stock_daily_hfq WHERE stock_code=%s AND trade_date>=%s",
+                    (stock_code, rebuild_from),
+                )
+            rebuilt_hfq = hfq
+            if rebuild_from is not None:
+                rebuilt_hfq = [
+                    row for row in hfq if str(row["trade_date"]) >= rebuild_from
+                ]
+            if rebuilt_hfq:
                 execute_values(
                     cur,
                     """
@@ -294,7 +306,7 @@ def rebuild_stock(
                     [
                         [stock_code] + [row.get(field) for field in _HFQ_FIELDS[:-1]]
                         + [row["factor_cum"]]
-                        for row in hfq
+                        for row in rebuilt_hfq
                     ],
                 )
             latest_b = _decimal(events[-1]["factor_cum"]) if events else baseline
@@ -314,12 +326,16 @@ def rebuild_stock(
                 (stock_code, baseline, factor_latest, latest_trade_date),
             )
 
-            cur.execute(
+            select_sql = (
                 "SELECT trade_date, open, high, low, close, volume, amount,"
                 " turnover_rate, tradestatus, factor_cum FROM stock_daily_hfq"
-                " WHERE stock_code=%s ORDER BY trade_date",
-                (stock_code,),
+                " WHERE stock_code=%s"
             )
+            select_args: list[str] = [stock_code]
+            if rebuild_from is not None:
+                select_sql += " AND trade_date>=%s"
+                select_args.append(rebuild_from)
+            cur.execute(select_sql + " ORDER BY trade_date", select_args)
             stored_hfq = [dict(zip(_HFQ_FIELDS, row)) for row in cur.fetchall()]
         conn.commit()
     except Exception:

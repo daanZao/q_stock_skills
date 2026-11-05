@@ -15,10 +15,10 @@
                              status=planned_absent、不计失败、不影响退出码。
                              lhb section 走专用链（交易所官方单源，issue #114/
                              #121；新浪互补校验走 lhb --check 对拍）。
-  morning [--date YYYYMMDD]  次晨批：baostock 一把抓前一交易日全市场日线
-                             + 7 大指数尾行补漏 + 申万板块分析报表估值维度
-                             （sw_board_valuation part，issue #118，T+1），
-                             默认目标日为前一交易日。
+  morning [--date YYYYMMDD]  次晨批：baostock 一把抓前一交易日全市场 raw
+                             + 逐日累计因子与 hfq/anchor 重建（issue #161）
+                             + 7 大指数尾行补漏 + 申万板块分析报表估值维度。
+                             默认目标日为前一交易日；仅全部校验通过才 verified。
   backfill [--start D] [--end D] [--source sw]
                              板块历史回补（issue #121 定稿申万单源）：申万官网
                              trend 指数全历史回补申万双级口径行（issue #118，
@@ -169,8 +169,7 @@ def cmd_close(date_arg: str | None,
 
 
 def cmd_morning(date_arg: str | None) -> int:
-    """次晨批：全市场日线 + 指数尾行补漏。任一部分 error 时 exit 1
-    （partial_error 也算失败——调度侧需要感知）。"""
+    """次晨批：raw + 因子 + 派生重建及其他部分。任一部分 error 时 exit 1。"""
     result = fetch_morning_batch(trade_date=date_arg)
     out = {"job": "morning", **result}
     _emit(out)

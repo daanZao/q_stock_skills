@@ -12,6 +12,7 @@ init 轻量初始化（issue #8）：支持股票清单（query_stock_basic 过�
 
 import contextlib
 import io
+import signal
 from datetime import date
 from typing import NoReturn
 
@@ -29,7 +30,7 @@ def _login():
     baostock 登录会向 stdout print，重定向以保住 stdio JSON 通道纯净（旧契约）。
     """
     try:
-        import baostock as bs
+        import baostock as bs  # type: ignore[import-untyped]
     except ImportError as e:
         raise FetchError("baostock 未安装：pip install qstock-mcp[sources]") from e
     try:
@@ -46,6 +47,56 @@ def _logout(bs) -> None:
     """登出；baostock logout 同样向 stdout print，一并重定向。"""
     with contextlib.redirect_stdout(io.StringIO()):
         bs.logout()
+
+
+BAOSTOCK_REQUEST_TIMEOUT_S = 120
+
+
+class _SessionKicked(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def _request_deadline():
+    def timeout_handler(_signum, _frame):
+        raise FetchError(
+            f"baostock 请求超过 {BAOSTOCK_REQUEST_TIMEOUT_S}s 外部硬超时",
+            kind="connection",
+        )
+
+    previous_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    previous_timer = signal.setitimer(
+        signal.ITIMER_REAL, BAOSTOCK_REQUEST_TIMEOUT_S
+    )
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def _with_relogin(operation):
+    for attempt in range(3):
+        bs = _login()
+        try:
+            with _request_deadline():
+                return operation(bs)
+        except _SessionKicked as e:
+            if attempt == 2:
+                raise FetchError("baostock 会话被踢，重登重试 3 次后仍失败") from e
+        finally:
+            _logout(bs)
+    raise AssertionError("unreachable")
+
+
+def _query_result(rs, label: str):
+    if rs.error_code == "10001001":
+        raise _SessionKicked(rs.error_msg)
+    if rs.error_code != "0":
+        raise FetchError(f"{label}: {rs.error_msg}")
+    return rs
 
 
 def to_baostock_code(stock_code: str) -> str:
@@ -203,37 +254,38 @@ class BaostockAdapter:
 
         单次调用全量返回（上游单页上限 20000 行）；映射见 map_astock_daily_rows。
         """
-        bs = _login()
-        try:
+        def operation(bs):
             with contextlib.redirect_stdout(io.StringIO()):
-                rs = bs.query_daily_history_k_AStock(date=dash_date(trade_date))
-            if rs.error_code != "0":
-                raise FetchError(f"baostock 查询失败: {rs.error_msg}")
-            rows = []
-            while rs.next():
-                rows.append(rs.get_row_data())
+                rs = _query_result(
+                    bs.query_daily_history_k_AStock(date=dash_date(trade_date)),
+                    "baostock 查询失败",
+                )
+                rows = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
             return map_astock_daily_rows(list(rs.fields), rows)
-        finally:
-            _logout(bs)
+
+        return _with_relogin(operation)
 
     def fetch_daily_adjust_factor(self, trade_date: str) -> list[dict]:
         """逐日全市场事件；B 只取 backAdjustFactor（issue #160）。
 
         2026-11-04 定点实测采用单会话串行、请求间隔 ≥1.5s、90s 外部超时；
-        长期 TPS/并发上限仍待验证，调用方不得据此放量。
+        长期 TPS/并发上限仍待验证，调用方不得据此放量。生产单请求硬超时
+        120s；10001001 会话被踢时自动重登，最多 3 次尝试。
         """
-        bs = _login()
-        try:
+        def operation(bs):
             with contextlib.redirect_stdout(io.StringIO()):
-                rs = bs.query_daily_adjust_factor(date=dash_date(trade_date))
-            if rs.error_code != "0":
-                raise FetchError(f"baostock 因子查询失败: {rs.error_msg}")
-            rows = []
-            while rs.next():
-                rows.append(rs.get_row_data())
+                rs = _query_result(
+                    bs.query_daily_adjust_factor(date=dash_date(trade_date)),
+                    "baostock 因子查询失败",
+                )
+                rows = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
             return map_adjust_factor_rows(list(rs.fields), rows)
-        finally:
-            _logout(bs)
+
+        return _with_relogin(operation)
 
     # ---------------------------------------------------------------- init 轻量初始化（issue #8）
 

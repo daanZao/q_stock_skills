@@ -1,12 +1,8 @@
-"""次晨批测试（issue #83，spec #71/W5）：baostock 一把抓全市场日线 + 指数尾行补漏
-+ 申万板块分析报表估值维度（issue #118 的 sw_board_valuation part）。
+"""次晨批测试：raw + 逐日累计因子 + hfq/anchor + 指数与申万估值补采。
 
-fetch_morning_batch：默认目标日 = 前一交易日（时钟可注入）；一把抓结果按
-业务键 (stock_code, trade_date, adj) 幂等落 stock_daily（tradestatus/turn
-等字段映射在适配器映射层）；7 大指数白名单尾行缺失即补（fetch_index_daily
-fallback 链）；申万估值维度按业务键 (trade_date, board_code) 幂等落
-sw_board_valuation；各部分独立成败、逐部分落采集台账；baostock/申万不可达
-按三态契约报错落台账，不影响其余 part。
+fetch_morning_batch 使用 fake 适配器与真实 PG 测试库覆盖完整 morning、
+pctChg 降级、双路径对账、raw 缺口、无效 close、pending 门控与增量重建；
+既有 legacy 日线、指数和申万部分保持独立成败并逐部分落采集台账。
 """
 
 import json
@@ -46,19 +42,28 @@ def pg_ready(pg_test):
 
 
 class FakeMorningAdapter:
-    """一把抓全市场日线的 fake 源：rows 为已映射行（含 stock_code/adj）。"""
+    """一把抓全市场日线与逐日因子的 fake 源。"""
 
-    def __init__(self, name="baostock", rows=None, exc=None):
+    def __init__(self, name="baostock", rows=None, exc=None, events=None, factor_exc=None):
         self.name = name
         self._rows = rows
         self._exc = exc
+        self._events = events
+        self._factor_exc = factor_exc
         self.calls = []
+        self.factor_calls = []
 
     def fetch_astock_daily(self, trade_date):
         self.calls.append(trade_date)
         if self._exc is not None:
             raise self._exc
         return list(self._rows or [])
+
+    def fetch_daily_adjust_factor(self, trade_date):
+        self.factor_calls.append(trade_date)
+        if self._factor_exc is not None:
+            raise self._factor_exc
+        return list(self._events or [])
 
 
 def _morning_rows(target=TARGET):
@@ -168,6 +173,419 @@ class TestStockDailyPart:
             adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
         assert out["parts"]["stock_daily"]["status"] == "empty"
         assert _ledger(pg_ready, section="stock_daily")[0][2] == "empty"
+
+
+class TestAdjustmentMorning:
+    def test_raw_no_event_rows_initialize_hfq_and_anchor(self, pg_ready):
+        adapter = FakeMorningAdapter(rows=_morning_rows(), events=[])
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=adapter,
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert adapter.calls == [TARGET]
+        assert adapter.factor_calls == [TARGET]
+        assert out["status"] == "ok"
+        assert out["stage"] == "verified"
+        assert out["messages"] == ["数据处理完成", "数据可以使用"]
+        assert out["parts"]["stock_adjust_factor"]["status"] == "empty"
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM stock_daily_raw WHERE trade_date=%s", (TARGET,))
+                assert cur.fetchone()[0] == 2
+                cur.execute("SELECT COUNT(*) FROM stock_adjust_factor WHERE ex_date=%s", (TARGET,))
+                assert cur.fetchone()[0] == 0
+                cur.execute(
+                    "SELECT baseline_factor, factor_latest, latest_trade_date, rebuild_pending"
+                    " FROM stock_factor_state WHERE stock_code='600519'"
+                )
+                baseline, latest, anchor, pending = cur.fetchone()
+                assert float(baseline) == 1.0
+                assert float(latest) == 1.0
+                assert anchor == TARGET
+                assert pending is False
+                cur.execute(
+                    "SELECT close, factor_cum, tradestatus FROM stock_daily_hfq"
+                    " WHERE stock_code='002813' AND trade_date=%s",
+                    (TARGET,),
+                )
+                close, factor, tradestatus = cur.fetchone()
+                assert close == 26.38
+                assert float(factor) == 1.0
+                assert tradestatus == 0
+        finally:
+            conn.close()
+
+    def test_authoritative_event_rebuilds_from_ex_date(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "688300",
+                [{**_morning_rows("20261015")[0], "stock_code": "688300",
+                  "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01}],
+                [{"ex_date": "20260610", "factor_cum": 2.965589}],
+                baseline_factor=2.965589,
+            )
+        finally:
+            conn.close()
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": -1.8352,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[current],
+                events=[{"stock_code": "688300", "ex_date": TARGET,
+                         "factor_cum": 3.855379}],
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "ok"
+        assert out["parts"]["stock_adjust_factor"]["rows"] == 1
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT factor_cum, source FROM stock_adjust_factor"
+                    " WHERE stock_code='688300' AND ex_date=%s",
+                    (TARGET,),
+                )
+                factor, source = cur.fetchone()
+                assert float(factor) == 3.855379
+                assert source == "baostock-adjust-factor"
+                cur.execute(
+                    "SELECT close, factor_cum FROM stock_daily_hfq"
+                    " WHERE stock_code='688300' AND trade_date=%s",
+                    (TARGET,),
+                )
+                close, normalized = cur.fetchone()
+                assert close == pytest.approx(133.51392364215)
+                assert float(normalized) == pytest.approx(1.300038204889484)
+                cur.execute(
+                    "SELECT baseline_factor, factor_latest, rebuild_pending"
+                    " FROM stock_factor_state WHERE stock_code='688300'"
+                )
+                baseline, latest, pending = cur.fetchone()
+                assert float(baseline) == pytest.approx(2.965589)
+                assert float(latest) == pytest.approx(1.300038204889484)
+                assert pending is False
+        finally:
+            conn.close()
+
+    def test_factor_failure_uses_authoritative_pctchg_fallback(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "688300",
+                [{**_morning_rows("20261015")[0], "stock_code": "688300",
+                  "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01}],
+                [{"ex_date": "20260610", "factor_cum": 2.965589}],
+                baseline_factor=2.965589,
+            )
+        finally:
+            conn.close()
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": -1.8352,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[current], factor_exc=FetchError("factor unavailable")
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "ok"
+        assert out["stage"] == "verified"
+        part = out["parts"]["stock_adjust_factor"]
+        assert part["status"] == "ok"
+        assert part["mode"] == "baostock-pctchg-derived"
+        assert part["rows"] == 1
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT factor_cum, source FROM stock_adjust_factor"
+                    " WHERE stock_code='688300' AND ex_date=%s",
+                    (TARGET,),
+                )
+                factor, source = cur.fetchone()
+                assert float(factor) == pytest.approx(3.8553795, abs=1e-6)
+                assert source == "baostock-pctchg-derived"
+        finally:
+            conn.close()
+
+    def test_authoritative_pctchg_mismatch_is_pending_and_not_verified(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "688300",
+                [{**_morning_rows("20261015")[0], "stock_code": "688300",
+                  "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01}],
+                [{"ex_date": "20260610", "factor_cum": 2.965589}],
+                baseline_factor=2.965589,
+            )
+        finally:
+            conn.close()
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": -1.8352,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[current],
+                events=[{"stock_code": "688300", "ex_date": TARGET,
+                         "factor_cum": 3.0}],
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        assert out["stage"] == "rebuilt"
+        assert out["messages"] == ["数据处理完成"]
+        assert out["parts"]["stock_adjust_factor"]["error_kind"] == "factor_mismatch"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT factor_cum FROM stock_adjust_factor"
+                    " WHERE stock_code='688300' AND ex_date=%s",
+                    (TARGET,),
+                )
+                assert float(cur.fetchone()[0]) == 3.0
+                cur.execute(
+                    "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='688300'"
+                )
+                assert cur.fetchone()[0] is True
+        finally:
+            conn.close()
+        mismatch = [row for row in _ledger(pg_ready, "stock_adjust_factor")
+                    if row[5] == "factor_mismatch"]
+        assert len(mismatch) == 1
+
+    def test_pctchg_fallback_missing_evidence_is_unresolved(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "688300",
+                [{**_morning_rows("20261015")[0], "stock_code": "688300",
+                  "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01}],
+                [], baseline_factor=1.0,
+            )
+        finally:
+            conn.close()
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": None,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[current], factor_exc=FetchError("factor unavailable")
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        assert out["stage"] == "rebuilt"
+        assert out["messages"] == ["数据处理完成"]
+        assert out["parts"]["stock_adjust_factor"]["error_kind"] == "pctchg_derivation_failed"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='688300'"
+                )
+                assert cur.fetchone()[0] is True
+                cur.execute(
+                    "SELECT COUNT(*) FROM stock_adjust_factor"
+                    " WHERE stock_code='688300' AND ex_date=%s",
+                    (TARGET,),
+                )
+                assert cur.fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_unknown_first_baseline_blocks_verified(self, pg_ready):
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": -1.8352,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[current],
+                events=[{"stock_code": "688300", "ex_date": TARGET,
+                         "factor_cum": 3.855379}],
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        assert out["stage"] == "rebuilt"
+        assert out["messages"] == ["数据处理完成"]
+        assert out["parts"]["stock_adjust_factor"]["error_kind"] == "rebuild_pending"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT baseline_factor, factor_latest, rebuild_pending"
+                    " FROM stock_factor_state WHERE stock_code='688300'"
+                )
+                baseline, latest, pending = cur.fetchone()
+                assert baseline is None and latest is None
+                assert pending is True
+        finally:
+            conn.close()
+
+    def test_invalid_close_is_quarantined_and_blocks_verified(self, pg_ready):
+        current = {
+            **_morning_rows()[0], "open": 0.0, "high": 0.0, "low": 0.0,
+            "close": 0.0,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=[current]),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        assert out["stage"] == "rebuilt"
+        assert out["parts"]["stock_adjust_factor"]["error_kind"] == "invalid_close"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM stock_daily_raw WHERE stock_code='600519'")
+                assert cur.fetchone()[0] == 1
+                cur.execute("SELECT COUNT(*) FROM stock_daily_hfq WHERE stock_code='600519'")
+                assert cur.fetchone()[0] == 0
+        finally:
+            conn.close()
+        invalid = [row for row in _ledger(pg_ready, "stock_daily_raw")
+                   if row[5] == "invalid_close"]
+        assert len(invalid) == 1
+
+    def test_no_event_day_only_writes_current_hfq_row(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "600519",
+                [{**_morning_rows("20261015")[0], "close": 1700.0}], []
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stock_daily_hfq SET rebuilt_at=%s"
+                    " WHERE stock_code='600519' AND trade_date='20261015'",
+                    (datetime(2000, 1, 1, tzinfo=timezone.utc),),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()[:1]),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+        assert out["status"] == "ok"
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rebuilt_at FROM stock_daily_hfq"
+                    " WHERE stock_code='600519' AND trade_date='20261015'"
+                )
+                assert cur.fetchone()[0] == datetime(2000, 1, 1, tzinfo=timezone.utc)
+                cur.execute(
+                    "SELECT COUNT(*) FROM stock_daily_hfq"
+                    " WHERE stock_code='600519' AND trade_date=%s",
+                    (TARGET,),
+                )
+                assert cur.fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_raw_trading_day_gap_blocks_verified(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "600519",
+                [{**_morning_rows("20261014")[0], "close": 1700.0}], []
+            )
+        finally:
+            conn.close()
+        current = {**_morning_rows()[0], "preclose": 1700.0}
+        out = fetch_morning_batch(
+            trade_date=TARGET, adapter=FakeMorningAdapter(rows=[current]),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "partial_error"
+        assert out["stage"] == "rebuilt"
+        assert out["parts"]["stock_adjust_factor"]["error_kind"] == "raw_gap"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='600519'"
+                )
+                assert cur.fetchone()[0] is True
+        finally:
+            conn.close()
+
+    def test_first_authoritative_event_recomputes_no_event_baseline(self, pg_ready):
+        from qstock_mcp.adjustment import rebuild_stock
+
+        conn = psycopg2.connect(pg_ready)
+        try:
+            rebuild_stock(
+                conn, "688300",
+                [{**_morning_rows("20261015")[0], "stock_code": "688300",
+                  "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01}],
+                [], baseline_factor=1.0,
+            )
+        finally:
+            conn.close()
+        current = {
+            **_morning_rows()[0], "stock_code": "688300",
+            "open": 104.62, "high": 105.0, "low": 100.0, "close": 102.70,
+            "preclose": 104.62, "change_percent": -1.8352,
+        }
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=FakeMorningAdapter(
+                rows=[current],
+                events=[{"stock_code": "688300", "ex_date": TARGET,
+                         "factor_cum": 3.855379}],
+            ),
+            adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+
+        assert out["status"] == "ok"
+        conn = psycopg2.connect(pg_ready)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT baseline_factor, factor_latest FROM stock_factor_state"
+                    " WHERE stock_code='688300'"
+                )
+                baseline, latest = cur.fetchone()
+                assert float(baseline) == pytest.approx(2.965588537153224)
+                assert float(latest) == pytest.approx(1.300038204889484)
+        finally:
+            conn.close()
 
 
 class TestDefaultTargetDate:

@@ -265,3 +265,106 @@ def test_baostock_fetch_daily_adjust_factor(monkeypatch):
     assert events == [{
         "stock_code": "688300", "ex_date": "20261016", "factor_cum": 3.855379,
     }]
+
+
+def test_baostock_relogs_in_after_session_kicked(monkeypatch):
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    class Result:
+        error_msg = "用户未登录"
+        fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+
+        def __init__(self, error_code):
+            self.error_code = error_code
+
+        def next(self):
+            return False
+
+    class Client:
+        def __init__(self, error_code):
+            self.error_code = error_code
+
+        def query_daily_adjust_factor(self, date):
+            return Result(self.error_code)
+
+    clients = [Client("10001001"), Client("0")]
+    logins = []
+    logouts = []
+
+    def login():
+        client = clients[len(logins)]
+        logins.append(client)
+        return client
+
+    monkeypatch.setattr(module, "_login", login)
+    monkeypatch.setattr(module, "_logout", logouts.append)
+    events = module.BaostockAdapter().fetch_daily_adjust_factor("20261016")
+
+    assert events == []
+    assert logins == clients
+    assert logouts == [clients[0], clients[1]]
+
+
+def test_baostock_request_has_external_hard_timeout(monkeypatch):
+    import time
+
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    class Result:
+        error_code = "0"
+        error_msg = ""
+        fields = "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFacto".split(",")
+
+        def next(self):
+            return False
+
+    class Client:
+        def query_daily_adjust_factor(self, date):
+            time.sleep(0.05)
+            return Result()
+
+    client = Client()
+    logouts = []
+    monkeypatch.setattr(module, "_login", lambda: client)
+    monkeypatch.setattr(module, "_logout", logouts.append)
+    monkeypatch.setattr(module, "BAOSTOCK_REQUEST_TIMEOUT_S", 0.001)
+
+    with pytest.raises(FetchError, match="超时"):
+        module.BaostockAdapter().fetch_daily_adjust_factor("20261016")
+    assert logouts == [client]
+
+
+def test_baostock_astock_raw_relogs_in_after_session_kicked(monkeypatch):
+    import qstock_mcp.adapters.baostock_adapter as module
+
+    class Result:
+        error_msg = "用户未登录"
+        fields = "date,code,open,high,low,close,preclose,volume,amount,pctChg,tradestatus,turn".split(",")
+
+        def __init__(self, error_code):
+            self.error_code = error_code
+
+        def next(self):
+            return False
+
+    class Client:
+        def __init__(self, error_code):
+            self.error_code = error_code
+
+        def query_daily_history_k_AStock(self, date):
+            return Result(self.error_code)
+
+    clients = [Client("10001001"), Client("0")]
+    logins = []
+
+    def login():
+        client = clients[len(logins)]
+        logins.append(client)
+        return client
+
+    monkeypatch.setattr(module, "_login", login)
+    monkeypatch.setattr(module, "_logout", lambda _client: None)
+    rows = module.BaostockAdapter().fetch_astock_daily("20261016")
+
+    assert rows == []
+    assert logins == clients

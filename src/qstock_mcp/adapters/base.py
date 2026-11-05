@@ -208,7 +208,7 @@ def import_akshare():
     到调用点。akshare_adapter 与 sina_adapter 共用此入口（issue #112）。
     """
     try:
-        import akshare as ak
+        import akshare as ak  # type: ignore[import-untyped]
     except ImportError as e:
         raise FetchError("akshare 未安装：pip install qstock-mcp[sources]") from e
     return ak
@@ -358,6 +358,10 @@ class AStockDailyAdapter(Protocol):
     name: str
 
     def fetch_astock_daily(self, trade_date: str) -> list[dict]: ...
+
+    def fetch_daily_adjust_factor(self, trade_date: str) -> list[dict]:
+        """逐日全市场累计 B 事件；成功空结果表示当日无事件。"""
+        ...
 
 
 class SwBoardsAdapter(Protocol):

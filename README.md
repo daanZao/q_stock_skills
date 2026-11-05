@@ -100,7 +100,7 @@ python3 -m venv .venv
 
 | 任务 | 命令 |
 | --- | --- |
-| 次晨全市场日线与指数补采 | `qstock-scheduler morning` |
+| 次晨全市场 raw、累计因子、hfq 重建与指数补采 | `qstock-scheduler morning` |
 | 收盘后盘面采集 | `qstock-scheduler close` |
 | 个股日线补采 | `qstock-scheduler daily --codes 600519,000001 --date 20261023` |
 | 最近 90 日个股整窗刷新 | `qstock-scheduler daily --all --trading-days 90 --force --throttle 1` |
