@@ -42,6 +42,12 @@ LONG_SUSPENSION_DAYS = 20
 DEFAULT_THROTTLE_S = 1.0
 
 
+class _BatchStop(RuntimeError):
+    def __init__(self, result: dict) -> None:
+        super().__init__(result.get("error", "baostock 批次终止"))
+        self.result = result
+
+
 def _market_group(code: str) -> str | None:
     return next(
         (name for name, prefixes in MARKET_GROUPS.items() if code.startswith(prefixes)),
@@ -110,6 +116,8 @@ def _query_stock(
         for key in BAOSTOCK_ERROR_FIELDS:
             if key in raw:
                 result[key] = raw[key]
+        if result.get("error_kind") in BAOSTOCK_BATCH_STOP_ERRORS:
+            raise _BatchStop(result)
         return result
 
     rows = raw.get("rows", [])
@@ -446,6 +454,17 @@ def run_live_sample(
                 throttle=throttle,
                 sleep=sleep,
             )
+    except _BatchStop as exc:
+        raw = exc.result
+        out = _error(
+            "live_sample", {"seed": seed, "end": end}, raw.get("error", str(exc))
+        )
+        for key in BAOSTOCK_ERROR_FIELDS:
+            if key in raw:
+                out[key] = raw[key]
+        out["scope"] = "live_sample"
+        out["summary"] = {"errors": 1}
+        return out
     except TestRunnerConflict as exc:
         return {
             **_error("live_sample", {"seed": seed, "end": end}, str(exc)),

@@ -100,11 +100,13 @@ def test_live_sample_daily_baostock_locked_is_top_level_error(pg_test):
             super().fetch_daily(stock_code, start, end, adj)
             raise BaostockLocked("未持有有效的 baostock 租约")
 
-    out = _run(pg_test, LockedDailyAdapter())
+    adapter = LockedDailyAdapter()
+    out = _run(pg_test, adapter)
 
     assert out["status"] == "error"
     assert out["error_kind"] == "baostock_locked"
-    assert out["summary"]["errors"] > 0
+    assert out["summary"]["errors"] == 1
+    assert len(adapter.calls) == 1
 
 
 def test_live_sample_is_reproducible_and_scopes_universe(pg_test):
