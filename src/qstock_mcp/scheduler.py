@@ -94,18 +94,14 @@
                              （清单链健康巡检/冒烟）；--check 逐源独立抓取互证
                              （行数/代码集合差集/北交所覆盖），不落库；手册见
                              docs/stock-list-cli.md。
-  baostock-lock acquire [--owner O] [--reason R]
-                status
-                release [--force]
-                             baostock 显式租约（issue #170，ADR 0019）：无活动
-                             会话时只读写本地文件，不登录、不查询 baostock。
-                             acquire 在无租约且当日预算未达 50,000 时创建
-                             baostock.lock/token；status 只读显示持有者/命令/
-                             时间/age/token_present/token_valid/当日协议动作；
-                             release 删除租约并关闭本进程已有会话（可能 logout），
-                             --force 清理 token 缺失/哈希不匹配/文件损坏的遗留。
-                             owner 仅作展示，不是权限校验。
-                             进程退出不会自动释放。详见 docs/baostock-lease.md。
+  baostock-lock status
+                release --force
+                             baostock 实例租约（issue #173，ADR 0019）：数据命令
+                             首次实际抓取时自动 acquire，整个命令复用并在 finally
+                             关会话、release。公开锁命令仅 status 与人工确认 stale
+                             后的 force；status 显示 entry/PID/instance_id、持有者、
+                             token 与预算。锁操作不登录、不查询 baostock。
+                             详见 docs/baostock-lease.md。
 
 退出码：0 = 全部 section/part 成功（含 empty 无数据，非故障）；1 = 任一
 section/part 失败或输入非法（失败明细在 stdout JSON）；2 = 参数错误
@@ -116,11 +112,14 @@ import argparse
 import logging
 import sys
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, SnapshotAdapter
+from .baostock_api import BaostockApi
 from .baostock_errors import BaostockError
+from .baostock_lease import BaostockLease, LeaseContext, use_lease_context
 from .adjustment_backfill import run_adjustment_backfill
 from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
@@ -156,10 +155,17 @@ from .tools_snapshot import fetch_market_snapshot
 CLOSE_SECTIONS = ("indices", "boards", "zt_pool", "strong_stocks", "lhb")
 
 cli_output = CliOutput()
+_EMIT_CAPTURE: ContextVar[list[dict] | None] = ContextVar(
+    "qstock_cli_emit_capture", default=None
+)
 
 
 def _emit(payload: dict) -> None:
-    cli_output.emit(payload)
+    captured = _EMIT_CAPTURE.get()
+    if captured is None:
+        cli_output.emit(payload)
+    else:
+        captured.append(payload)
 
 
 def cmd_baostock_lock(
@@ -883,6 +889,27 @@ def cmd_stock_list(
         conn.close()
 
 
+def _cleanup_cli_lease(context: LeaseContext) -> dict | None:
+    if not context.auto_acquired:
+        return None
+    errors = []
+    try:
+        BaostockApi.reset_instance()
+    except Exception as exc:
+        errors.append(f"关闭 baostock 会话失败: {type(exc).__name__}: {exc}")
+    try:
+        BaostockLease(identity=context.identity).release()
+    except Exception as exc:
+        errors.append(f"释放 baostock 实例租约失败: {type(exc).__name__}: {exc}")
+    if not errors:
+        return None
+    return {
+        "error_kind": "baostock_cleanup_error",
+        "error": "；".join(errors),
+        "note": "数据结果保留；请 status 核对锁状态，确认持有进程终止后才可 force",
+    }
+
+
 def main(argv: list[str] | None = None,
          adapters: Sequence[BoardAdapter] | None = None,
          daily_adapters: Sequence | None = None,
@@ -891,6 +918,52 @@ def main(argv: list[str] | None = None,
          index_adapters: Sequence | None = None,
          lhb_adapters: Sequence[BoardAdapter] | None = None,
          list_adapters: Sequence | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    context = LeaseContext.create(
+        "cli", "qstock-scheduler " + " ".join(raw_argv)
+    )
+    emitted: list[dict] = []
+    capture_token = _EMIT_CAPTURE.set(emitted)
+    try:
+        with use_lease_context(context):
+            try:
+                rc = _main(
+                    argv,
+                    adapters=adapters,
+                    daily_adapters=daily_adapters,
+                    fundamentals_adapters=fundamentals_adapters,
+                    snapshot_adapters=snapshot_adapters,
+                    index_adapters=index_adapters,
+                    lhb_adapters=lhb_adapters,
+                    list_adapters=list_adapters,
+                )
+            finally:
+                cleanup = _cleanup_cli_lease(context)
+    finally:
+        _EMIT_CAPTURE.reset(capture_token)
+    if cleanup:
+        if not emitted:
+            emitted.append({"job": raw_argv[0] if raw_argv else "unknown"})
+        for payload in emitted:
+            if rc == 0:
+                payload.update(cleanup)
+                payload["status"] = "error"
+            else:
+                payload["cleanup_warning"] = cleanup
+        rc = 1
+    for payload in emitted:
+        cli_output.emit(payload)
+    return rc
+
+
+def _main(argv: list[str] | None = None,
+          adapters: Sequence[BoardAdapter] | None = None,
+          daily_adapters: Sequence | None = None,
+          fundamentals_adapters: Sequence | None = None,
+          snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
+          index_adapters: Sequence | None = None,
+          lhb_adapters: Sequence[BoardAdapter] | None = None,
+          list_adapters: Sequence | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qstock-scheduler",
         description="调度 CLI：定时批采集（直调 tools_* 核心层，不经 MCP）")
@@ -1060,15 +1133,11 @@ def main(argv: list[str] | None = None,
                          help="互证模式：逐源独立抓取比对（行数/代码集/北交所覆盖），不落库")
     p_bslock = sub.add_parser(
         "baostock-lock",
-        help="baostock 显式租约：acquire/status/release（无活动会话时不触 baostock）")
-    p_bslock.add_argument("action", choices=("acquire", "status", "release"),
-                          help="申请 / 只读查看 / 释放本地租约")
-    p_bslock.add_argument("--owner", default=None,
-                          help="持有者标识，缺省当前系统用户")
-    p_bslock.add_argument("--reason", default=None,
-                          help="申请原因（写入 lock，便于排查）")
+        help="baostock 实例租约：status / release --force（不触 baostock）")
+    p_bslock.add_argument("action", choices=("status", "release"),
+                          help="只读查看 / 人工确认 stale 后强制清理")
     p_bslock.add_argument("--force", action="store_true",
-                          help="release 时清理 stale/损坏/换 owner 的租约")
+                          help="release 必需：确认持有进程已终止后清理指定代际")
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(argv)  # 参数错误由 argparse 以退出码 2 终止
     # stdout 留给最终结构化 JSON；进度/日志走 stderr（与 MCP 侧"日志只走
@@ -1079,8 +1148,6 @@ def main(argv: list[str] | None = None,
         if args.command == "baostock-lock":
             return cmd_baostock_lock(
                 args.action,
-                owner=args.owner,
-                reason=args.reason,
                 force=args.force,
                 command="qstock-scheduler " + " ".join(raw_argv),
             )

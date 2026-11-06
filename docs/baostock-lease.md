@@ -1,203 +1,117 @@
-# baostock 显式租约与请求预算
+# baostock 实例租约与请求预算
 
-状态：**设计契约（ADR 0019），expand/migrate 已落地；#172 验收发现互斥语义阻断（#173
-待决策）**。CLI `qstock-scheduler baostock-lock`、MCP `baostock_lock`、`BaostockLease` 与
-进程内 `BaostockApi` 已实现（#170）；所有适配器数据请求已经收口到代理并强制检查租约
-（#171）。实际进入 baostock 路径而无有效租约时，数据命令/工具返回 `baostock_locked`，
-不自动 acquire/release；旧每请求登录路径已删除。验收中发现的阻断项、证据与决策选项见
-[2026-11-06 验收报告](research/2026-11-06-baostock-lease-acceptance.md) 与 #173。
+状态：**#173 已实现并通过定向、双进程、stdio 与 962 项全量回归；#172 新契约验收证据
+已完整记录但 issue 尚未关闭，#163 正式回填继续暂停**。历史验收证据保留在
+[2026-11-06 验收报告](research/2026-11-06-baostock-lease-acceptance.md)，其中被新契约取代的
+结论不得继续引用。决策原因见 [ADR 0019](adr/0019-baostock-explicit-lease-and-quota.md)。
 
-官方规则：<https://www.baostock.com/blacklist>；一手证据与配额数学：
-[2026-11-05-baostock-session-and-quota.md](research/2026-11-05-baostock-session-and-quota.md)；
-决策：[ADR 0019](adr/0019-baostock-explicit-lease-and-quota.md)。
+官方规则：<https://www.baostock.com/blacklist>；每日 API 请求不超过 5 万次，不能并发连接访问。
+单主机文件租约只协调使用同一锁目录的合作进程，不覆盖多主机、不同用户或仓库外客户端。
 
-## 1. 一句话
+## 1. 核心模型
 
-**谁要使用 baostock，谁先显式申请本地租约；一次只允许一个租约/会话；用完必须显式释放；
-数据命令只检查租约，不自动申请/释放。**
+**一次只允许一个进程实例持有 baostock 租约和会话。** 租约归属
+`entry=cli|mcp + PID + instance_id`，不是“同机进程都能使用的许可”。即使另一个进程属于同一
+入口、能读取 token，也不能使用数据路径或正常释放该租约。
 
-## 2. 为什么是显式租约
+- **CLI 命令级自动租约**：首次实际抓取 baostock 时自动 acquire，同一命令复用，命令结束自动
+  release。
+- **MCP 实例显式租约**：agent 获得用户确认后显式 acquire，仅持有实例可用相关数据工具，持有实例
+  显式 release。
+- 锁冲突返回 `baostock_locked`，显示真实持有者；不重试、不静默换源。
+- 正常 release 只允许持有实例。其他进程只能在确认持有进程终止后 `release --force`。
 
-- 官方：每日 API 请求 ≤ 5 万、**不能并发连接访问**；首次黑名单冻结 6 小时，同年按
-  `本年累计限制次数 × 6 小时` 增长，黑名单码 `10001011`。
-- 2026-11-05 正式回填：每请求 login/logout 跑到约 508 个因子日后，登录/查询 20s 无响应
-  （`10002007`，不是 `10001011`）；45 分钟约 1,524 次协议动作只占日额度约 3%。问题首先是
-  握手节奏/并发，其次才是日总量。
-- 自动按批次加锁无法满足“从另一个入口主动解锁”和“锁住时明确告诉用户”；因此做成**显式
-  租约**，而不是 API 内部隐式锁。
-
-## 3. 租约文件与权限
+## 2. 文件与归属
 
 | 文件 | 内容 | 权限 |
 | --- | --- | --- |
-| `~/.qstock-mcp/baostock.lock` | JSON：owner、pid、command、acquired_at、token_hash、reason | 0600 |
-| `~/.qstock-mcp/baostock.token` | token 原文（数据命令自动读取） | 0600 |
-| `~/.qstock-mcp/baostock-budget.json` | 当日 login/logout/query/page/total 与日期 | 0600 |
+| `~/.qstock-mcp/baostock.lock` | entry、PID、instance_id、owner、command、acquired_at、reason、token_hash | 0600 |
+| `~/.qstock-mcp/baostock.token` | token 原文；哈希匹配之外仍须通过实例归属校验 | 0600 |
+| `~/.qstock-mcp/baostock-budget.json` | 当日 login/logout/query/page/total | 0600 |
 
-- 租约是**本地文件租约**，不是 OS `flock`；**进程退出不自动释放**，崩溃遗留由
-  `release --force` 清理。
-- 目录默认 `~/.qstock-mcp/`，可用 `QSTOCK_BAOSTOCK_LOCK_DIR` 覆盖（隔离环境/测试）。
-- 数据命令读取 token 原文并与 lock 里的 `token_hash` 比对；不匹配或文件缺失 → 视为未租约。
-- 一次只允许一个租约（单主机；单出口 IP 下等价于单 IP）。多主机共享出口 IP 时需要额外的
-  跨主机协调，不在本期范围。
+目录可用 `QSTOCK_BAOSTOCK_LOCK_DIR` 覆盖，用于隔离环境和测试。`status` 只读且不创建目录。
+锁没有 TTL，不自动判断进程是否存活；随机 instance_id 用于区分租约代际，不作为存活证明。
 
-## 4. CLI
+acquire、正常 release 和 force 在同一租约操作临界区内核对代际。旧持有者收尾或旧 force 操作不得
+误删后来建立的新租约。文件损坏或代际无法确认时保留现场，返回清理错误，由人工确认后 force。
 
-```bash
-# 申请（只在没有租约时成功；不发 baostock 请求）
-qstock-scheduler baostock-lock acquire --owner qstock-agent --reason "adj-backfill 20230101-20261104"
-
-# 查看（可在没租约时运行；显示 owner/pid/command/acquired_at/age/token_present/token_valid/当日预算）
-qstock-scheduler baostock-lock status
-
-# 释放（从另一个终端/会话执行；token 缺失/哈希不匹配/文件损坏用 --force）
-qstock-scheduler baostock-lock release
-qstock-scheduler baostock-lock release --force
-```
-
-行为：
-
-- `acquire` 时已有租约 → **失败**并打印持有者/命令/开始时间/建议的 `release` 入口；不覆盖。
-- `acquire` 时当日预算 ≥ 50,000 → 拒绝；≥ 45,000 → 成功但打印警告。
-- `release` 删除 token/lock，并关闭当前进程已有的 `BaostockApi` 会话（可能发送 logout）；
-  重新 acquire 后的首次查询必须重新 login。token 缺失/哈希不匹配/文件损坏时需 `--force`。
-  `--force` 不校验 owner（owner 仅作展示，不是权限边界），用于崩溃遗留或无法读取 token 的场景。
-  没有活动会话时，acquire/status/release 均只操作本地文件，不发 baostock 请求。
-- `status` 只读，不申请、不释放、不登录 baostock；显示 `token_present`/`token_valid`。
-- `--owner`/`--reason` 只用于 `acquire`，`--force` 只用于 `release`；其他组合明确报错，
-  不静默忽略。
-
-## 5. MCP
-
-新增 `baostock_lock` 工具（**与 CLI 共用同一组文件**）：
-
-```json
-{"action": "acquire", "owner": "qstock-agent", "reason": "daily-review"}
-{"action": "status"}
-{"action": "release", "force": false}
-```
-
-- 所有 baostock 数据类 MCP 工具（`query_daily`、`fetch_daily`、`get_fundamentals` 等）在
-  无租约时返回结构化错误：
-
-```json
-{"status":"error","error_kind":"baostock_locked",
- "lock":{"owner":"...","command":"...","acquired_at":"..."},
- "note":"先调用 baostock_lock(acquire)；锁住时请从另一个 CLI/MCP 会话 release"}
-```
-
-- 数据工具**不会**自动 acquire/release；agent 必须显式 `baostock_lock`。
-- 租约被另一个 owner 占用时，agent 把 `lock` 信息转告用户；用户去另一个 terminal/会话
-  `baostock-lock release`（或 `baostock_lock release --force`）后，再 acquire。
-- **验收发现（#172，阻断，待 #173 决策）**：当前实现只拒绝**再次 acquire**
-  （`baostock_lock(acquire)` / `baostock-lock acquire`）；CLI 持锁时另一个入口的数据工具
-  仍通过同一租约的 `require()`，不会返回 `baostock_locked`。这与 ADR 0019「租约保证不同
-  CLI 进程不并发」的表述存在缺口，已拆到 #173 决策「改实现（会话级互斥）」还是「改契约
-  （主机级许可、互斥只在 acquire）」。**在 #173 解决前，操作者必须保证同一租约下不并发
-  启动两个数据进程**；正式回填保持暂停（报告 §7.1）。
-
-### MCP 描述契约（`baostock_lock` 与数据工具描述均已落入 server.py）
-
-- `baostock_lock` description：
-  > 申请/释放/查询 baostock 显式租约。baostock 数据工具必须在本租约下运行；租约不会自动
-  > 释放；已锁定时返回持有者信息，需从另一个 CLI/MCP 会话 release。
-- 所有 baostock 数据工具 description 增补：
-  > baostock 路径受显式租约保护：先调用 baostock_lock(acquire)，完成后
-  > baostock_lock(release)；无租约返回 baostock_locked。
-- MCP server instructions / 相关 skill 文档同步声明“先申请租约、无租约返回
-  `baostock_locked`、需显式 release”。实现与描述在同一提交更新，不得先声明不存在的工具。
-
-## 6. 一个租约内怎么用
-
-- **一个进程一个会话**：进程内 `BaostockApi` 单例 + `threading.Lock`；同一进程内所有请求复用
-  一次 `login`，串行；**禁止每请求 login/logout**。
-- 不同 CLI 进程（例如先跑 `daily --all`，再跑 `fundamentals`）各自建立一次会话；租约保证
-  它们不并发，不承诺跨进程共享同一个 socket。
-- MCP server 是常驻进程：在同一个租约下可跨工具调用复用进程内会话；租约释放时关闭。
-- 单请求超时 **60s**；超时/协议错误重置会话并释放请求锁，下个请求重登；正常完成只释放
-  请求锁，会话保留到租约释放。
-- 所有入口统一走 `BaostockApi`：`fetch_daily`、`fetch_astock_daily`、
-  `fetch_daily_adjust_factor`、`fetch_stock_list`、`fetch_index_daily`、
-  `fetch_fundamentals`；删除 `persistent` 开关和每请求 `_with_relogin`。
-
-## 7. 日预算
-
-- 计数单位：**协议动作** = login、logout、query、每次翻页（page）。这是保守口径；官方未
-  明确 login/logout 是否计入 5 万，按计入处理。
-- 计数落点：`BaostockApi` / 会话边界；`fetch_chain`/调用方不重复计数。每次协议动作即时
-  原子写入 `~/.qstock-mcp/baostock-budget.json`（保证 50k 门禁跨进程可见），当日计数按
-  Asia/Shanghai 日期键归零。
-- 自然日：Asia/Shanghai 00:00 重置。
-- **45,000 警告；50,000 停止**新租约/新请求，返回 `baostock_budget_exhausted`。
-- 大回填不得与 morning/close/daily 同一天/同一时段并发；先估算请求数（如 #163 正式回填
-  约 5,000 次查询，单会话下安全；`daily --all` 最坏情形才压线）。
-
-## 8. 错误与重试
-
-| 错误 | 处理 |
-| --- | --- |
-| `baostock_locked` | 不重试；提示先 acquire 或从另一入口 release |
-| `baostock_budget_exhausted` | 不重试；停止批次，等次日或人工处理 |
-| `10001011` 黑名单 | **致命、零重试、零换源、零换 IP**；终止当前批次并审计；人工看官方统计页释放 |
-| `10001005` 账号登录数达上限 | 致命，不自动重试；提示等待其他会话释放 |
-| `10001001` 用户未登录/会话被踢 | 重登一次，重试**同一请求**；不得记成“无数据” |
-| `10002004`/`10002007`/超时/连接重置 | 重置会话；瞬时错误最多重试一次，指数退避 |
-| 参数类/`10004xxx`/unsupported | 不重试 |
-
-结构化错误种类与 spec #169 一致：`baostock_locked`、`baostock_budget_exhausted`、
-`baostock_blacklisted`、`baostock_login_limit`、`baostock_timeout`、
-`baostock_upstream_error`；它们是 baostock 专属错误，到 fetch 边界再映射到抓取三态
-（ADR 0007），不与之混用。
-
-## 9. 崩溃、stale 与排查
+## 3. CLI：数据命令自动管理
 
 ```bash
-qstock-scheduler baostock-lock status
-# owner/pid/command/acquired_at/age/token_present/token_valid/预算不合适时：
-qstock-scheduler baostock-lock release --force
-qstock-scheduler baostock-lock acquire --owner ... --reason ...
-```
-
-- 进程崩溃后 lock/token 会残留；这是“显式解锁”的预期代价，`status` 看 age，`--force` 清理。
-- `baostock.token` 与 `baostock.lock` 的 `token_hash` 不匹配：视为陈旧/损坏，`release --force`
-  后重新 acquire。
-- `10001011`：先看 <https://www.baostock.com/blacklist> 的 `今年被限制次数`/`待释放时间`；
-  释放前不发任何 baostock 请求。不要换账号/代理/节点绕过。
-- 当日预算接近 45k：先跑 `status`；优先保留 morning/close，暂停大回填。
-
-## 10. 与 #163 正式回填的关系
-
-验收未通过（#172，2026-11-06）：真实小样本 1 login + 3 串行 query + 1 logout（5 个协议
-动作）通过，未触发黑名单/登录上限；但 AC6「CLI acquire 后 MCP 数据工具被拒」未满足，
-#173 决策/修复前**正式回填保持暂停**（断点 510/928 因子日、raw 0 行）。解除后按下述流程
-续跑（正式全窗口回填与回填后检查仍归 #163）：
-
-```bash
-qstock-scheduler baostock-lock acquire --owner qstock-agent --reason "adj-backfill 20230101-20261104"
+# 直接运行；首次实际需要 baostock 时自动申请，整个命令结束自动释放
 qstock-scheduler adj-backfill --start 20230101 --end 20261104
-qstock-scheduler baostock-lock release
+
+# 任何进程均可只读查看
+qstock-scheduler baostock-lock status
+
+# 仅确认持有进程已终止、锁已 stale 后清理
+qstock-scheduler baostock-lock release --force
 ```
 
-期间不得与 morning/close/daily 并发；续跑前先用官方统计端点确认
-`今年被限制次数=0`、`待释放时间` 为空。
+- 首次实际进入 baostock 抓取才 acquire；不触 baostock 的命令完全不申请。
+- 同一命令多次查询只 acquire 一次，复用同一 `BaostockApi` 会话；禁止每请求 acquire/release 或
+  login/logout。
+- 正常结束或数据异常时先关闭会话，再 finally release。进程崩溃不自动删除文件租约。
+- 锁被其他实例占用时，返回 `baostock_locked`、真实持有者及处理提示；不重试、不静默换源。
+- 公开 CLI 不再提供独立 `acquire` 或普通 `release`：旧三段式命令会创建无法被数据进程继承的
+  实例租约，已废止。
+- 数据成功但 logout/release 失败时返回非零 `baostock_cleanup_error`，保留数据结果并提示锁可能
+  残留；数据本身失败时保留原错误，并附 cleanup 警告。
 
-## 11. 实现验收清单（#170 expand + #171 migrate 已落地；#172 验收未通过，AC6 待 #173）
+## 4. MCP：用户确认后显式管理
 
-- [x] `baostock.lock` / `baostock.token` / `baostock-budget.json` 的 acquire/status/release/force
-- [x] 无 TTL、进程退出不自动释放；token 缺失/哈希不匹配视为未租约
-- [x] `BaostockApi` 进程内单例 + 会话复用；60s 超时（主线程 SIGALRM 外部 deadline；
-      MCP worker 线程用 login 前配置的 socket 超时，仅覆盖 socket 阻塞）、
-      `10001001` 重登一次、瞬时错误一次退避
-- [x] 45k/50k 预算计数、45k 警告、50k 拒绝新请求/新租约（`baostock_budget_exhausted`）；
-      翻页即时计数，达到 50k 后不再发下一页
-- [ ] 静默翻页截断（baostock 0.9.3 空 recv 不置 error_code）的页级校验（后续硬化，非 #171 验收）
-- [x] CLI `baostock-lock` 与 MCP `baostock_lock` 共用文件；无活动会话时零 baostock 请求，
-      release 关闭本进程已有会话，重新 acquire 后重新 login
-- [x] MCP `baostock_lock` 描述与 server instructions 已声明租约/不自动释放
-- [x] 数据命令/工具无租约返回 `baostock_locked`，不自动申请/释放（#171）
-- [x] 所有 baostock 数据请求经 `BaostockApi`；删除 `persistent` 与每请求 `_with_relogin`（#171）
-- [x] 数据工具 description / 相关 skill 文档声明租约（#171）
-- [ ] CLI↔MCP 数据路径互斥：CLI acquire 后 MCP 数据工具被拒（#172 AC6 未通过；待 #173 决策）
-- [x] 真实小样本 5 协议动作（1 login + 3 串行 query + 1 logout；#172，[验收报告](research/2026-11-06-baostock-lease-acceptance.md)）
-- [ ] 长会话/正式回填容量验证（5 动作样本不足以证明；#163 正式执行）
-- [x] 更新 `docs/adj-backfill-cli.md` 的租约状态与 `docs/knowledge-graph.md`
+```json
+{"action": "status"}
+{"action": "acquire", "owner": "qstock-agent", "reason": "daily-review"}
+{"action": "release"}
+{"action": "release", "force": true}
+```
+
+agent 行为契约：
+
+1. 调用 baostock 相关数据工具前检查当前 MCP 实例是否持有租约。
+2. 无锁时数据工具返回 `baostock_locked`；agent 询问用户“是否尝试申请 baostock 锁？”。
+3. 只有得到用户确认才调用 `baostock_lock(acquire)`；成功后才继续数据工具。
+4. acquire 失败时返回真实持有者。持有进程仍活跃时等待或由持有方正常 release；确认其已终止后，
+   才可经用户确认执行 force。
+5. 完成后由当前持有实例 `baostock_lock(release)`，同时关闭当前 MCP 进程的会话。
+
+MCP server 本身和非 baostock 工具不受租约限制。`init_database`、`fetch_daily`、legacy
+`query_daily`、`get_fundamentals` 无锁时在整个工具入口拒绝，不连接 PG、不尝试其他数据源。
+`QSTOCK_PRICE_SOURCE=new` 的 `query_daily` 仅读 PG、不触 baostock，属于明确豁免。
+
+工具 description 与 server instructions 必须写明确认流程、实例归属和 release；实现与描述同步
+更新，不得让 agent 未经用户确认自动 acquire。
+
+## 5. 会话、预算与错误
+
+- 一个实例租约内、一个进程一个 `BaostockApi` 会话；进程内单例与 `threading.Lock` 串行查询。
+- 单请求 60s 超时；`10001001` 重登一次并重试同一请求；瞬时错误最多一次退避重试。
+- `10001011` 黑名单与 `10001005` 登录数上限均致命、零自动重试；不得换账号、代理或节点绕过。
+- 日预算按协议动作 login/logout/query/page 计入，Asia/Shanghai 自然日重置；45,000 警告、50,000
+  拒绝新租约和新请求。
+- `baostock_locked` 与 `baostock_budget_exhausted` 不重试、不静默换源。
+- `baostock_cleanup_error` 表示数据命令收尾失败；它不是数据抓取成功，也不能被忽略。
+
+## 6. 崩溃与恢复
+
+1. 用 CLI 或 MCP `status` 查看 entry、PID、instance_id、持有时间与 token 状态。
+2. 持有进程仍活跃时，不得 force；等待其结束，或由持有实例正常 release。
+3. 确认持有进程已经终止后，执行 `release --force` / `baostock_lock(release, force=true)`。
+4. 重新运行 CLI 数据命令，或由用户在 MCP 中确认后重新 acquire。
+5. 若出现 `10001011`，先看官方统计页；解除前不得继续发 baostock 请求。
+
+## 7. #172/#163 验收与回填状态
+
+#172 必须按本手册的新契约重新验收：真实双进程互斥、同入口实例隔离、CLI finally 自动释放、
+MCP 工具入口门禁与用户确认、正常 release 归属、stale force、代际保护和 cleanup 错误。原报告中的
+共享租约结论只代表旧实现，不是新契约的通过证据。
+
+#172 重新验收通过前，#163 正式回填继续暂停。解除后直接运行：
+
+```bash
+qstock-scheduler adj-backfill --start 20230101 --end 20261104
+```
+
+不再执行独立 acquire/release。期间不得与 morning/close/daily 并发；真实小样本和历史回归证据不得
+外推为长期容量或全市场性能结论。

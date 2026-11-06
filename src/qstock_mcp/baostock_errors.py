@@ -3,7 +3,8 @@
 错误对象同时用于 CLI/MCP 输出：`to_dict()` 返回 `status=error` +
 `error_kind` 的统一错误载荷。错误种类与 spec #169 的错误契约一致：
 `baostock_locked` / `baostock_budget_exhausted` / `baostock_blacklisted` /
-`baostock_login_limit` / `baostock_timeout` / `baostock_upstream_error`。
+`baostock_login_limit` / `baostock_timeout` / `baostock_upstream_error`；
+CLI 收尾另输出 `baostock_cleanup_error`。
 它们是 baostock 专属错误，到 fetch 边界再映射到抓取三态（ADR 0007）。
 """
 

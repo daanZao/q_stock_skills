@@ -1,5 +1,9 @@
 # baostock 显式租约、单会话与 CLI/MCP 互锁验收报告（issue #172）
 
+> **历史契约说明（2026-11-06，#173）**：本文记录的是旧共享租约实现的实测证据；其中
+> “CLI 手工 acquire/release、跨入口 normal release、数据路径只检查共享 token”等口径已由
+> #173 的进程实例租约契约取代。保留原文供审计，不作为新实现的验收通过证据。
+
 2026-11-06（周五，Asia/Shanghai）。范围：spec #169、ADR 0019、#170（expand）与
 #171（migrate）的**验收**；#163 正式回填的解除条件。**本 ticket 只做验收，不改实现代码**：
 本轮提交是本文档与 `docs/baostock-lease.md`、`docs/knowledge-graph.md`、

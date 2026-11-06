@@ -127,7 +127,7 @@ class TestLeaseFiles:
         assert state["lock"]["age_seconds"] == 36000
         assert later.require()["leased"] is True
 
-    def test_orphan_token_without_lock_is_cleaned_by_release(self, tmp_path):
+    def test_orphan_token_without_lock_requires_force(self, tmp_path):
         (tmp_path / "baostock.token").write_text("left-over")
         lease = BaostockLease(tmp_path, now=_now())
 
@@ -136,7 +136,11 @@ class TestLeaseFiles:
         assert state["lock_present"] is False
         assert state["token_present"] is True
 
-        released = lease.release()
+        with pytest.raises(BaostockLocked):
+            lease.release()
+        assert (tmp_path / "baostock.token").exists()
+
+        released = lease.release(force=True)
         assert released["released"] is False
         assert released["token_removed"] is True
         assert not (tmp_path / "baostock.token").exists()
@@ -211,3 +215,53 @@ def test_lease_defaults_to_env_lock_dir(tmp_path, monkeypatch):
     lease.acquire(owner="qstock-agent")
     assert (tmp_path / "baostock.lock").exists()
     assert (tmp_path / "baostock.token").exists()
+
+
+def test_lease_belongs_to_one_process_instance(tmp_path):
+    from qstock_mcp.baostock_lease import LeaseIdentity
+
+    holder = BaostockLease(
+        tmp_path,
+        now=_now(),
+        identity=LeaseIdentity(entry="cli", pid=101, instance_id="holder"),
+    )
+    other_same_entry = BaostockLease(
+        tmp_path,
+        now=_now(),
+        identity=LeaseIdentity(entry="cli", pid=102, instance_id="other"),
+    )
+    holder.acquire(owner="first")
+
+    with pytest.raises(BaostockLocked) as require_error:
+        other_same_entry.require()
+    assert require_error.value.to_dict()["lock"]["instance_id"] == "holder"
+    with pytest.raises(BaostockLocked):
+        other_same_entry.release()
+
+    assert holder.require()["leased"] is True
+    assert holder.release()["released"] is True
+    assert other_same_entry.status()["leased"] is False
+
+
+def test_delayed_force_cannot_delete_a_newer_lease(tmp_path):
+    from qstock_mcp.baostock_lease import LeaseIdentity
+
+    holder = BaostockLease(
+        tmp_path, identity=LeaseIdentity("cli", 101, "old")
+    )
+    observer = BaostockLease(
+        tmp_path, identity=LeaseIdentity("mcp", 202, "observer")
+    )
+    replacement = BaostockLease(
+        tmp_path, identity=LeaseIdentity("mcp", 303, "new")
+    )
+    holder.acquire()
+    expected_old_generation = observer.status()["lock"]
+    holder.release()
+    replacement.acquire()
+
+    with pytest.raises(BaostockLocked) as exc:
+        observer.release(force=True, expected=expected_old_generation)
+
+    assert "代际" in str(exc.value)
+    assert replacement.require()["lock"]["instance_id"] == "new"

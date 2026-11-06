@@ -4,9 +4,12 @@
 数据库连接在工具调用时按需建立，server 启动本身不依赖 PG 可达。
 """
 
-from typing import Any
+import os
+from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
+
+from .baostock_lease import LeaseContext, use_lease_context
 
 from . import (
     tools_baostock,
@@ -22,14 +25,25 @@ from . import (
 )
 
 SERVER_INSTRUCTIONS = (
-    "baostock 访问采用显式租约：使用 baostock 相关能力前先调用 "
-    "baostock_lock(action='acquire') 申请，完成后 baostock_lock(action='release') 释放；"
-    "租约一次只允许一个会话，不会自动释放；baostock_lock(action='status') 可查看持有者。"
-    "数据工具实际进入 baostock 路径时无租约返回 baostock_locked，不自动申请/释放；"
-    "锁住时 acquire 返回持有者信息，请从另一个 CLI/MCP 会话 release。"
+    "baostock 使用进程实例租约：相关数据工具无当前 MCP 实例租约时返回 baostock_locked。"
+    "agent 必须先询问用户是否尝试申请，得到确认后才调用 baostock_lock(action='acquire')；"
+    "不得自动申请。成功后仅当前实例可用，完成后由当前实例 baostock_lock(action='release')。"
+    "其他实例持锁时查看真实持有者并等待其 release；确认持有进程终止后才可 force。"
+    "QSTOCK_PRICE_SOURCE=new 的纯 PG query_daily 豁免，其他非 baostock 工具不受影响。"
 )
 
 mcp = MCPServer("qstock-mcp", instructions=SERVER_INSTRUCTIONS)
+MCP_LEASE_CONTEXT = LeaseContext.create("mcp", "mcp:server")
+
+
+def _run_baostock_tool(
+    tool: str, params: dict, operation: Callable[[], dict]
+) -> dict:
+    with use_lease_context(MCP_LEASE_CONTEXT):
+        locked = tools_baostock.require_mcp_data_lease(tool, params)
+        if locked is not None:
+            return locked
+        return operation()
 
 
 @mcp.tool()
@@ -39,24 +53,23 @@ def baostock_lock(
     reason: str | None = None,
     force: bool = False,
 ) -> dict:
-    """申请/释放/查询 baostock 显式租约。baostock 数据工具必须在本租约下运行；租约不会自动释放；已锁定时返回持有者信息，需从另一个 CLI/MCP 会话 release。
+    """管理当前 MCP 进程实例的 baostock 显式租约。
 
-    action: acquire 申请（无租约且当日预算 < 50,000 时成功）；status 只读查看
-    持有者/命令/时间/age/token_present/token_valid/当日协议动作；release 释放，
-    force=True 清理 token 缺失/哈希不匹配/文件损坏的遗留（owner 仅作展示，不是
-    权限校验）。与 CLI `qstock-scheduler baostock-lock` 共用 ~/.qstock-mcp/
-    下的同一组文件（QSTOCK_BAOSTOCK_LOCK_DIR 可覆盖）。
-    无活动会话时只读写本地文件，不发 baostock 请求；release 会关闭本进程
-    已有的 BaostockApi 会话（可能 logout），release 后再次查询需重新 login。
+    agent 不得自动 acquire：无锁时先询问用户，得到确认后才可 action=acquire。
+    acquire 成功后仅当前实例的数据工具可用；完成后由当前实例 action=release。
+    其他实例仍活跃时不得 force；确认持有进程终止、锁已 stale 后才可 force=True。
+    status 只读查看 entry/PID/instance_id/持有者/预算。正常 release 校验实例归属，
+    并关闭当前进程已有的 BaostockApi 会话；锁操作不自动发起数据查询。
     """
-    return tools_baostock.baostock_lock(
-        action,
-        owner=owner,
-        reason=reason,
-        force=force,
-        command=tools_baostock.MCP_COMMAND,
-        default_owner=tools_baostock.MCP_DEFAULT_OWNER,
-    )
+    with use_lease_context(MCP_LEASE_CONTEXT):
+        return tools_baostock.baostock_lock(
+            action,
+            owner=owner,
+            reason=reason,
+            force=force,
+            command=tools_baostock.MCP_COMMAND,
+            default_owner=tools_baostock.MCP_DEFAULT_OWNER,
+        )
 
 
 @mcp.tool()
@@ -65,9 +78,13 @@ def init_database(backfill_history: bool = False) -> dict:
 
     backfill_history=True 追加全市场个股历史日线回溯（重操作：数千只 × 全历史，
     显式开启，绝非默认；进度与失败在 parts.backfill 中报告，单股失败不中断）。
-    进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
+    无当前 MCP 实例租约时返回 baostock_locked；agent 须先获得用户确认再 acquire，完成后由持有实例显式 release。
     """
-    return tools_init.init_database(backfill_history)
+    return _run_baostock_tool(
+        "init_database",
+        {"backfill_history": backfill_history},
+        lambda: tools_init.init_database(backfill_history),
+    )
 
 
 @mcp.tool()
@@ -82,9 +99,15 @@ def fetch_daily(
 
     stock_code: 6 位 A 股代码（如 600519；北交所旧码 43x/83x/87x 自动归一化到 920）；days 与 start/end 二选一；
     日期格式 yyyymmdd 或 yyyy-mm-dd；adj: qfq/hfq/none。
-    进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
+    无当前 MCP 实例租约时返回 baostock_locked；agent 须先获得用户确认再 acquire，完成后由持有实例显式 release。
     """
-    return tools_daily.fetch_daily(stock_code, days=days, start=start, end=end, adj=adj)
+    return _run_baostock_tool(
+        "fetch_daily",
+        {"stock_code": stock_code, "days": days, "start": start, "end": end, "adj": adj},
+        lambda: tools_daily.fetch_daily(
+            stock_code, days=days, start=start, end=end, adj=adj
+        ),
+    )
 
 
 @mcp.tool()
@@ -97,10 +120,21 @@ def query_daily(
 ) -> dict:
     """查询个股日线，参数同 fetch_daily；行含 price_basis，顶层含 adjust 覆盖状态。
 
-    缺省 legacy 路径保留头尾自愈；QSTOCK_PRICE_SOURCE=new 时纯读 raw/hfq 并派生 qfq。
-    legacy 进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
+    缺省 legacy 路径保留头尾自愈，无当前 MCP 实例租约时返回 baostock_locked；
+    agent 须先获得用户确认再 acquire，完成后由持有实例显式 release；
+    QSTOCK_PRICE_SOURCE=new 时纯读 PG，豁免租约。
     """
-    return tools_daily.query_daily(stock_code, days=days, start=start, end=end, adj=adj)
+    operation = lambda: tools_daily.query_daily(
+        stock_code, days=days, start=start, end=end, adj=adj
+    )
+    if os.environ.get("QSTOCK_PRICE_SOURCE") == "new":
+        with use_lease_context(MCP_LEASE_CONTEXT):
+            return operation()
+    return _run_baostock_tool(
+        "query_daily",
+        {"stock_code": stock_code, "days": days, "start": start, "end": end, "adj": adj},
+        operation,
+    )
 
 
 @mcp.tool()
@@ -247,9 +281,13 @@ def get_fundamentals(stock_code: str) -> dict:
     输出自描述 JSON：data 为 {section: 原始记录}（字段名保留上游），source 为实际
     数据源（akshare → baostock fallback，issue #115）；全失败返回 status:"error"
     与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
-    进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
+    无当前 MCP 实例租约时返回 baostock_locked；agent 须先获得用户确认再 acquire，完成后由持有实例显式 release。
     """
-    return tools_fundamentals.get_fundamentals(stock_code)
+    return _run_baostock_tool(
+        "get_fundamentals",
+        {"stock_code": stock_code},
+        lambda: tools_fundamentals.get_fundamentals(stock_code),
+    )
 
 
 @mcp.tool()

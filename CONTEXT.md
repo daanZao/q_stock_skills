@@ -171,20 +171,28 @@ _Avoid_: qfq 快照、固定前复权价
 新价格模型数据可用性分级：complete 要求生命周期内 raw 连续、逐日事件证据完整、基线可信且无未决异常；pending、已知缺口或无效 raw 为 partial；尚无足够状态为 unknown。单票 walking skeleton 只提供 complete 门控，不代替完整覆盖核验。
 _Avoid_: 有行即完整、采集成功即 complete
 
-**baostock 显式租约**:
-使用 baostock 前必须由操作者显式申请的本地租约；一次只允许一个租约/会话，数据命令与 MCP 工具只检查租约、不自动申请或释放；进程退出不自动释放，崩溃遗留用 `release --force` 清理。CLI `baostock-lock` 与 MCP `baostock_lock` 是唯一申请/释放入口（ADR 0019）。
-_Avoid_: 自动锁、进程锁、每次请求登录、并发会话
+**baostock 实例租约**:
+单个 CLI 命令或 MCP 进程实例持有的本地 baostock 互斥许可；其他进程即使属于同一入口也不能共享。正常释放归持有实例，崩溃残留经人工确认 stale 后 force 清理（ADR 0019）。
+_Avoid_: 主机级共享许可、同入口共享锁、并发会话
+
+**CLI 命令级自动租约**:
+CLI 数据命令首次实际使用 baostock 时自动取得实例租约，并在整个命令结束时自动释放；同命令复用租约与会话，不按请求申请或释放。
+_Avoid_: CLI 三段式手工锁、每次请求加锁
+
+**MCP 实例显式租约**:
+MCP agent 获得用户确认后为当前进程实例显式申请的 baostock 实例租约；相关数据工具仅在该实例持锁时可用，并由该实例显式释放。
+_Avoid_: MCP 自动申请、未经确认申请、跨 MCP 实例共享
 
 **baostock 会话**:
-一个租约内复用的单例 `BaostockApi` 会话；同一会话串行查询，单请求 60s 超时，`10001001` 重登一次并重试同一请求，`10001011` 致命不重试。租约释放时关闭。
-_Avoid_: 每请求 login/logout、进程级 idle 会话
+一个实例租约内复用的单例 `BaostockApi` 会话；同一会话串行查询，单请求 60s 超时，`10001001` 重登一次并重试同一请求，`10001011` 致命不重试。租约释放时关闭。
+_Avoid_: 每请求 login/logout、跨进程共享会话
 
 **baostock 日请求预算**:
 baostock 协议动作（login/logout/query/page）的本地自然日额度；45,000 警告、50,000 停止新租约/新请求，Asia/Shanghai 重置（ADR 0019）。
 _Avoid_: 只统计数据查询、5 万后再说
 
 **MCP baostock 租约工具**:
-`baostock_lock`（acquire/release/status）；所有数据类 MCP 工具在无租约时返回 `baostock_locked`，tool description 与 server instructions 必须声明先申请租约（ADR 0019）。
+`baostock_lock`（acquire/release/status）；无实例租约的相关数据工具返回 `baostock_locked`，agent 必须先获得用户确认再 acquire（ADR 0019）。
 _Avoid_: 数据工具自动申请租约、静默排队
 
 ### Skill 家族（继承自旧项目词汇）

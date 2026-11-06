@@ -1,15 +1,15 @@
-"""baostock 显式租约的 MCP/CLI 共用核心层（issue #170，ADR 0019）。
+"""baostock 实例租约的 MCP/CLI 共用核心层（issue #173，ADR 0019）。
 
-`server.py` 只做薄包装；租约动作分发、参数校验与结构化错误转换都在这里。
-acquire/status 只读写本地文件；release 还会关闭本进程已有的 BaostockApi
-会话（可能 logout），无活动会话时不创建 client、不发 baostock 请求。
+`server.py` 只做薄包装；租约动作、实例归属、参数校验与结构化错误转换在这里。
+CLI 公开动作仅 status/stale force；MCP acquire 由 agent 经用户确认后显式调用。
+release 关闭本进程已有的 BaostockApi 会话；无活动会话时不创建 client。
 """
 
 from __future__ import annotations
 
 from .baostock_api import BaostockApi
 from .baostock_errors import BaostockError
-from .baostock_lease import BaostockLease
+from .baostock_lease import BaostockLease, current_lease_context
 from .output import error as output_error
 
 ACTIONS = ("acquire", "status", "release")
@@ -80,6 +80,21 @@ def baostock_lock(
             f"未知 action: {action!r}（可选 acquire/status/release）",
             error_kind="invalid_argument",
         )
+    entry = current_lease_context().identity.entry
+    if entry == "cli" and action == "acquire":
+        return output_error(
+            "baostock_lock",
+            params,
+            "CLI 数据命令自动 acquire；公开锁命令只支持 status/release --force",
+            error_kind="invalid_argument",
+        )
+    if entry == "cli" and action == "release" and not force:
+        return output_error(
+            "baostock_lock",
+            params,
+            "CLI 普通 release 已移除；仅确认持有进程终止、锁已 stale 后可 --force",
+            error_kind="invalid_argument",
+        )
     if action != "acquire" and (owner or reason):
         return output_error(
             "baostock_lock",
@@ -106,8 +121,17 @@ def baostock_lock(
         elif action == "status":
             state = lease.status()
         else:
-            state = lease.release(force=force)
-            BaostockApi.reset_instance()
+            try:
+                BaostockApi.reset_instance()
+            except Exception as exc:
+                return output_error(
+                    "baostock_lock",
+                    params,
+                    f"关闭当前 baostock 会话失败，租约未释放: {type(exc).__name__}: {exc}",
+                    error_kind="baostock_cleanup_error",
+                )
+            expected = lease.status()["generation"]
+            state = lease.release(force=force, expected=expected)
     except BaostockError as exc:
         return baostock_error("baostock_lock", params, exc)
     except OSError as exc:
@@ -121,9 +145,18 @@ def baostock_lock(
     return {"status": "ok", "action": action, **state}
 
 
+def require_mcp_data_lease(tool: str, params: dict) -> dict | None:
+    try:
+        BaostockLease().require()
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
+    return None
+
+
 __all__ = [
     "ACTIONS",
     "MCP_COMMAND",
     "MCP_DEFAULT_OWNER",
     "baostock_lock",
+    "require_mcp_data_lease",
 ]

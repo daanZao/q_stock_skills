@@ -32,21 +32,14 @@ Issue [#163](https://github.com/daanZao/q_stock_skills/issues/163)，spec [#158]
    `max(stock_adjust_factor.ex_date)`）。回填会重建 state/hfq；历史 end 若
    早于已有数据会回退窗口外派生，程序直接拒绝并返回
    `error_kind="window_behind_data"`，零写入。历史窗口请用隔离库。
-7. **先申请 baostock 显式租约**（ADR 0019）。回填本身不会自动申请/释放：
+7. **使用 CLI 命令级自动租约**（ADR 0019/#173）。直接运行 `adj-backfill`；首次实际抓取时自动
+   acquire，整个命令复用同一实例租约与会话，正常或异常结束均 finally release。不要执行旧的独立
+   `acquire → adj-backfill → release`。
 
-   ```bash
-   qstock-scheduler baostock-lock acquire --owner qstock-agent \
-     --reason "adj-backfill 20230101-20261104"
-   qstock-scheduler baostock-lock status
-   # 跑完后显式释放（从当前或另一个终端）
-   qstock-scheduler baostock-lock release
-   ```
-
-   `baostock-lock acquire` 在已锁住时返回 `baostock_locked` 并给出持有者；请到另一个 terminal/MCP 会话
-   `release` 后再 acquire。进程退出**不会**自动释放；崩溃遗留用 `release --force`。
-   租约机制详见 [baostock-lease.md](baostock-lease.md)。
-   `adj-backfill` 数据路径已强制检查租约（#171）：无有效租约时返回
-   `error_kind="baostock_locked"`，不自动申请或释放。
+   锁冲突返回 `baostock_locked` 和真实持有者，不重试、不静默换源；持有进程仍活跃时等待或终止
+   持有命令。确认持有进程已终止后，才用 `qstock-scheduler baostock-lock release --force` 清理
+   stale。数据成功但清理失败返回 `baostock_cleanup_error`。详见
+   [baostock-lease.md](baostock-lease.md)。
 
 ## 命令
 
@@ -308,18 +301,18 @@ COMMIT;
 
 - 串行、无并发；相邻上游请求默认 1.5s。单请求 60s 超时、`10001001` 重登一次
   重试同一请求、瞬时错误最多重试一次，均由 `BaostockApi` 承载（ADR 0019）。
-- 正式回填在**显式租约**（ADR 0019）下运行：一个进程一个 `BaostockApi` 会话，
-  因子日与事件票 raw 复用同一登录，禁止每请求 login/logout；`10001011` 致命零重试。
-- 设计要求一个租约只允许一个进程/会话；不同 CLI 命令各登录一次。当前实现只保证再次
-  acquire 被拒，数据路径共享租约（#172 AC6 阻断，待 #173 决策）；在解决前必须由操作者
-  保证同一租约下不并发启动两个数据进程。
-- 日预算按协议动作计，45,000 警告、50,000 停止；大回填不得与 morning/close/daily
-  并发。数据门禁已生效（#171），无有效租约返回 `baostock_locked`，不自动申请/释放；
-  #172 验收发现 AC6 互斥语义阻断（2026-11-06，见
-  [验收报告](research/2026-11-06-baostock-lease-acceptance.md) 与 #173）；#173 决策/修复前
-  正式回填保持暂停。
-- 回填不自动 acquire/release，也不在进程内主动关闭共享会话；会话保留到操作者显式
-  release。首个实际请求失败时保留断点，按结构化错误退出，不逐日放大登录限速。
+- 正式回填使用 **CLI 命令级自动实例租约**（ADR 0019/#173）：首次实际抓取自动 acquire，
+  整个回填进程复用一个 `BaostockApi` 会话，正常或异常结束先关会话再 finally release；
+  禁止每请求 login/logout，`10001011` 致命零重试。
+- 租约归属具体进程实例；另一个 CLI/MCP 进程即使同入口也不能共享或正常 release。锁冲突返回
+  `baostock_locked`，不重试、不静默换源。
+- 日预算按协议动作计，45,000 警告、50,000 停止；大回填不得与 morning/close/daily 并发。
+  崩溃不自动删除文件租约；确认持有进程终止后才可 `release --force`。
+- 数据成功但会话关闭或 release 失败返回 `baostock_cleanup_error`；数据失败时保留原错误并附
+  cleanup 警告。首个实际请求失败保留断点，不逐日放大登录限速。
+- #172 原验收的共享租约结论已被 #173 新契约取代；新契约的定向、双进程、stdio 与全量回归
+  证据已记录。#172 正式关闭前回填继续暂停，历史证据见
+  [验收报告](research/2026-11-06-baostock-lease-acceptance.md)。
 - 2026-11-04/05 已验证：单会话串行、相邻 ≥1.5s 的少量样本可承载；长期
   TPS、并发上限、全历史完备率**未验证**，不得据小样本放量。
 - 2026-11-05 正式回填事故记录：每请求登录/登出跑到约 508 个因子日后，

@@ -1,6 +1,6 @@
 # q_stock_skills
 
-证券数据 MCP 服务 + agent skill 家族。核心交付物是 `src/qstock_mcp` 的 stdio MCP server（`server.py` 只做 19 个工具的薄包装，逻辑全在 `tools_*` 核心层；baostock 显式租约入口 `baostock_lock` 见 ADR 0019），数据落 PostgreSQL 独立库，`skills/` 下是交付给外部 agent 的 skill（indicator-tools / sepa / daily-review / limit-up-analysis）。
+证券数据 MCP 服务 + agent skill 家族。核心交付物是 `src/qstock_mcp` 的 stdio MCP server（`server.py` 只做 19 个工具的薄包装，逻辑全在 `tools_*` 核心层；MCP 实例显式租约入口 `baostock_lock` 见 ADR 0019），数据落 PostgreSQL 独立库，`skills/` 下是交付给外部 agent 的 skill（indicator-tools / sepa / daily-review / limit-up-analysis）。
 
 ## Commands
 
@@ -12,9 +12,9 @@
 - 方案设计必须评估数据源的可用性与持续服务能力，明确请求节奏、最短请求间隔、上游可承载 TPS、并发支持及上限。已有实测的指标用实测值；缺失项标为“待验证”，先采用串行、低频的保守参数，经限定样本验证后再放量。
 - 实测记录须注明日期、接口、样本范围、请求条件与成败。单次或单轮结果只代表当次样本，不据此推断长期可用性或全市场性能。
 - 开发时在对应数据源客户端或限流参数旁，以注释记录已验证的请求节奏、最短间隔、TPS/并发上限及验证日期、条件；实现参数与实测结论保持一致，未验证指标不得写成已验证结论。
-- **baostock 必须先申请显式租约**：CLI `qstock-scheduler baostock-lock acquire|release|status`，MCP `baostock_lock`。一次只允许一个租约/会话；数据命令与数据类 MCP 工具只检查租约，不自动申请/释放；锁住时返回 `baostock_locked` 并提示去另一入口 release；进程退出不自动释放，stale 用 `release --force`。一个租约内复用单会话，禁止每请求 login/logout；单请求 60s 超时；`10001001` 重登一次重试同一请求；`10001011` 致命零重试。
+- **baostock 实例租约**：CLI 数据命令首次实际抓取时自动 acquire，整个命令复用并 finally release；MCP 由 agent 获得用户确认后显式 acquire、持有实例显式 release。锁归属 `entry + PID + instance_id`，同入口其他进程也不能共享；锁冲突返回 `baostock_locked`，不重试、不静默换源。正常 release 只允许持有实例；确认持有进程终止后才可 `release --force`，不自动判定 stale。一个租约内复用单会话，禁止每请求 login/logout；单请求 60s 超时；`10001001` 重登一次重试同一请求；`10001011` 致命零重试。
 - **baostock 日预算**：按协议动作（login/logout/query/page）计入本地自然日额度，45,000 警告、50,000 停止；大回填不得与 morning/close/daily 并发；官方 5 万/日 + 禁止并发规则见 ADR 0019 与研究文档，登录/登出是否计入额度是保守假设（待官方确认）。
-- **MCP 描述必须声明租约机制**：`baostock_lock` 与所有 baostock 数据工具的 description、server instructions、相关 skill 文档必须写明“先申请租约、无租约返回 `baostock_locked`、需显式 release”；实现与描述在同一提交更新，不得先声明不存在的工具。
+- **MCP 描述必须声明租约机制**：`baostock_lock` 与所有 baostock 数据工具的 description、server instructions、相关 skill 文档必须写明“无锁先询问用户、确认后 acquire、无实例租约返回 `baostock_locked`、持有实例显式 release”；实现与描述在同一提交更新，不得先声明不存在的工具。
 
 ## 数据契约
 

@@ -546,3 +546,21 @@ def test_failed_page_request_is_counted_before_retry(tmp_path):
     assert result.rows == [["ok"]]
     assert len(client.query_calls) == 2
     assert api.budget.snapshot()["page"] == 1
+
+
+def test_explicit_close_propagates_logout_failure(tmp_path):
+    class LogoutFailureClient(FakeClient):
+        def logout(self):
+            self.logout_calls += 1
+            raise RuntimeError("logout failed")
+
+    client = LogoutFailureClient([FakeResult()])
+    api = _api(tmp_path, client)
+    api.fetch_stock_list()
+
+    with pytest.raises(RuntimeError, match="logout failed"):
+        api.close()
+
+    assert client.logout_calls == 1
+    api.close()
+    assert client.logout_calls == 1

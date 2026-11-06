@@ -7,7 +7,7 @@ description: 每日复盘编排（午市/全天），市场级总结。当用户
 
 收盘后（午市或全天）基于当日盘面数据做的市场级总结（术语见 `CONTEXT.md`）。本 skill 为每日复盘编排的 agent skill，**轻脚本、重编排**：编排逻辑在本文件，agent 自身即 LLM，复盘结论与 markdown 报告由 agent 手写生成，不调外部 LLM API。数据一律来自 MCP 工具（盘面/快照经 `query_board_data`、`query_snapshot`、`fetch_board_snapshot`、`fetch_market_snapshot`，指数历史经 `query_index_daily`，资讯经 `mx_search`、`query_news`），不直接访问数据库；相关性矩阵、量价判定与偏离值累计经 indicator-tools 管道（`corr` / `vol_price` / `deviation`，指标目录见 `skills/indicator-tools/SKILL.md`）计算，agent 不得手算这些数字；涨停/连板章节由 limit-up-analysis 子技能承担（见 `skills/limit-up-analysis/SKILL.md`），其晋级率/梯队数字只认其落库结论 `limit_up.close`。结论经 `save_conclusion` 落库（通用结论表，见 ADR 0003 `docs/adr/0003-generic-conclusions-table.md`）；markdown 报告不走 MCP，由本 skill 落盘，路径记入结论 payload。
 
-**baostock 显式租约**：可能进入 baostock 路径的 MCP 调用须先 `baostock_lock(action="acquire")`，完成后显式 `release`；无租约返回 `baostock_locked`，不自动申请/释放。历史模式仍禁用一切 fetch，不得为绕过租约而补抓。
+**MCP 实例显式租约**：baostock 相关数据工具无锁时返回 `baostock_locked`；agent 先询问用户，得到确认后才 `baostock_lock(action="acquire")`，不得自动申请。成功后仅当前 MCP 实例可用，完成后由持有实例显式 `release`。纯 PG 的 `query_daily`（`QSTOCK_PRICE_SOURCE=new`）豁免；历史模式仍禁用一切 fetch，不得为绕过租约而补抓。
 
 ## 触发与模式
 

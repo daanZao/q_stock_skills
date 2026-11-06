@@ -191,6 +191,14 @@ def main() -> int:
             print(f"参数错误: 未知聚合项 {args.local_aggregate}（可选: {', '.join(_AGGREGATE_KINDS)}）", file=sys.stderr)
             return 2
 
+    if args.tool == "baostock_lock" and params.get("action") == "acquire":
+        print(
+            "错误: mcp_dump 的 server 随调用退出，不能持有实例租约；"
+            "请在长期驻留的 MCP 会话中经用户确认后 acquire",
+            file=sys.stderr,
+        )
+        return 1
+
     client = None
     try:
         client = McpStdioClient(shlex.split(args.server), args.timeout)

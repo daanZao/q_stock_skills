@@ -9,7 +9,7 @@ description: 涨停/连板分析编排（收盘后），可单独调用、也是
 
 本技能以复盘为主、可单独调用；每日复盘（daily-review skill）调用本技能并把其摘要编进复盘报告（引用键见"输出形态"节）。
 
-**baostock 显式租约**：补日线等可能进入 baostock 路径的调用须先 `baostock_lock(action="acquire")`，完成后显式 `release`；无租约返回 `baostock_locked`，不自动申请/释放。
+**MCP 实例显式租约**：baostock 相关数据工具无锁时返回 `baostock_locked`；agent 先询问用户，得到确认后才 `baostock_lock(action="acquire")`，不得自动申请。成功后仅当前 MCP 实例可用，完成后由持有实例显式 `release`。纯 PG 的 `query_daily`（`QSTOCK_PRICE_SOURCE=new`）豁免。
 
 ## 触发与模式
 

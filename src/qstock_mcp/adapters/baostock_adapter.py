@@ -14,7 +14,7 @@ from typing import NoReturn
 
 from ..baostock_api import BaostockApi
 from ..baostock_errors import BaostockTimeout, BaostockUpstreamError
-from ..baostock_lease import BaostockLease
+from ..baostock_lease import BaostockLease, current_lease_context
 from ._num import _int, _num, _wan
 from .base import FetchError, is_bse_code, json_safe
 
@@ -141,7 +141,8 @@ class BaostockAdapter:
     name = "baostock"
 
     def _call_api(self, method: str, *args, **kwargs):
-        BaostockLease().require()
+        context = current_lease_context()
+        BaostockLease().require(auto=context.identity.entry == "cli")
         try:
             return getattr(BaostockApi.get(), method)(*args, **kwargs)
         except BaostockTimeout as exc:

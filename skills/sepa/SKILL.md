@@ -7,7 +7,7 @@ description: SEPA（Specific Entry Point Analysis，Minervini 超级绩效）分
 
 Minervini SEPA 框架的 A 股分析指引。本 skill 为方法论 skill，主体是**判断逻辑**；指标计算一律调用 `indicator-tools`（工具函数 skill，不内嵌实现），数据一律来自 MCP 工具（`query_daily`、`get_fundamentals`），不直接访问数据库。`query_daily` 输出结构为跨仓库稳定契约，见 ADR 0001（`docs/adr/0001-mcp-server-boundary.md`）。
 
-**baostock 显式租约**：可能进入 baostock 路径的 MCP 调用须先 `baostock_lock(action="acquire")`，完成后显式 `release`；无租约返回 `baostock_locked`，不自动申请/释放。
+**MCP 实例显式租约**：baostock 相关数据工具无锁时返回 `baostock_locked`；agent 先询问用户，得到确认后才 `baostock_lock(action="acquire")`，不得自动申请。成功后仅当前 MCP 实例可用，完成后由持有实例显式 `release`。纯 PG 的 `query_daily`（`QSTOCK_PRICE_SOURCE=new`）豁免。
 
 核心哲学：只做 Stage 2（上升阶段）的市场领导者；只在 VCP 突破枢轴点时入场；7-8% 硬止损；拒绝抄底、拒绝弱势股、拒绝无催化剂交易。
 

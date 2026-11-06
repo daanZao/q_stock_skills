@@ -1,23 +1,52 @@
-"""`qstock-scheduler baostock-lock` 契约（issue #170，ADR 0019）。
+"""CLI 实例租约契约（#173，ADR 0019）。
 
-CLI 与 MCP 共用同一组文件；无活动会话时租约操作不发 baostock 请求。
+CLI 数据命令自动 acquire/finally release；公开锁命令仅 status 与 stale force。
 """
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import qstock_mcp.adapters.baostock_adapter as adapter_module
 import qstock_mcp.baostock_api as baostock_api
 from qstock_mcp import scheduler
-from qstock_mcp.baostock_lease import BaostockBudget
+from qstock_mcp.adapters.baostock_adapter import BaostockAdapter
+from qstock_mcp.baostock_lease import BaostockBudget, BaostockLease, LeaseIdentity
 
 
-def _run(capsys, argv):
-    rc = scheduler.main(argv)
+def _run(capsys, argv, **kwargs):
+    rc = scheduler.main(argv, **kwargs)
     return rc, json.loads(capsys.readouterr().out)
 
 
 def _status(capsys):
     return _run(capsys, ["baostock-lock", "status"])
+
+
+class FundamentalsApi:
+    def __init__(self):
+        self.calls = 0
+
+    def fetch_fundamentals(self, code):
+        self.calls += 1
+        return {"profit": [{"code": code}], "growth": []}
+
+
+def _install_fundamentals_api(monkeypatch, tmp_path, api):
+    monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        adapter_module, "BaostockApi", SimpleNamespace(get=lambda: api)
+    )
+
+
+def _run_fundamentals(capsys, codes="600519"):
+    return _run(
+        capsys,
+        ["fundamentals", "--codes", codes],
+        fundamentals_adapters=[BaostockAdapter()],
+    )
 
 
 def test_status_without_lease_exits_zero(tmp_path, monkeypatch, capsys):
@@ -32,63 +61,47 @@ def test_status_without_lease_exits_zero(tmp_path, monkeypatch, capsys):
     assert out["leased"] is False
     assert out["budget"]["total"] == 0
     assert not (tmp_path / "baostock.lock").exists()
+    assert not (tmp_path / "baostock-operation.lock").exists()
 
 
-def test_acquire_status_release_cycle(tmp_path, monkeypatch, capsys):
+def test_cli_status_and_stale_force_sees_instance_metadata(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
-
-    rc, acquired = _run(capsys, [
-        "baostock-lock", "acquire",
-        "--owner", "qstock-agent",
-        "--reason", "adj-backfill 20230101-20261104",
-    ])
-    assert rc == 0
-    assert acquired["leased"] is True
-    assert acquired["acquired"] is True
-    assert acquired["lock"]["owner"] == "qstock-agent"
-    assert acquired["lock"]["reason"] == "adj-backfill 20230101-20261104"
-    assert acquired["lock"]["command"].endswith(
-        "baostock-lock acquire --owner qstock-agent "
-        "--reason adj-backfill 20230101-20261104"
+    holder = BaostockLease(
+        tmp_path, identity=LeaseIdentity("cli", 999, "cli-holder")
+    )
+    holder.acquire(
+        owner="qstock-agent",
+        reason="adj-backfill 20230101-20261104",
+        command="qstock-scheduler adj-backfill",
     )
 
     rc, status = _status(capsys)
     assert rc == 0
     assert status["leased"] is True
     assert status["lock"]["owner"] == "qstock-agent"
-    assert status["lock"]["age_seconds"] is not None
+    assert status["lock"]["entry"] == "cli"
+    assert status["lock"]["pid"] == 999
+    assert status["lock"]["instance_id"] == "cli-holder"
+    assert status["lock"]["reason"] == "adj-backfill 20230101-20261104"
 
-    rc, released = _run(capsys, ["baostock-lock", "release"])
+    rc, released = _run(capsys, ["baostock-lock", "release", "--force"])
     assert rc == 0
     assert released["released"] is True
-    assert released["lock"]["owner"] == "qstock-agent"
     assert not (tmp_path / "baostock.lock").exists()
     assert not (tmp_path / "baostock.token").exists()
 
 
-def test_second_acquire_returns_locked_holder(tmp_path, monkeypatch, capsys):
+def test_release_broken_token_requires_stale_force(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
-    _run(capsys, ["baostock-lock", "acquire", "--owner", "first"])
-
-    rc, out = _run(capsys, ["baostock-lock", "acquire", "--owner", "second"])
-
-    assert rc == 1
-    assert out["status"] == "error"
-    assert out["error_kind"] == "baostock_locked"
-    assert out["lock"]["owner"] == "first"
-    assert "release" in out["note"]
-    assert _status(capsys)[1]["lock"]["owner"] == "first"
-
-
-def test_release_broken_token_needs_force(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
-    _run(capsys, ["baostock-lock", "acquire", "--owner", "first"])
+    holder = BaostockLease(
+        tmp_path, identity=LeaseIdentity("cli", 999, "broken")
+    )
+    holder.acquire(owner="first")
     (tmp_path / "baostock.token").write_text("broken")
 
     rc, out = _run(capsys, ["baostock-lock", "release"])
     assert rc == 1
-    assert out["error_kind"] == "baostock_locked"
-    assert out["token_valid"] is False
+    assert out["error_kind"] == "invalid_argument"
     assert (tmp_path / "baostock.lock").exists()
 
     rc, out = _run(capsys, ["baostock-lock", "release", "--force"])
@@ -97,87 +110,97 @@ def test_release_broken_token_needs_force(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "baostock.lock").exists()
 
 
-def test_acquire_rejected_when_budget_exhausted(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
+def test_auto_acquire_rejected_when_budget_exhausted(tmp_path, monkeypatch, capsys):
+    api = FundamentalsApi()
+    _install_fundamentals_api(monkeypatch, tmp_path, api)
     BaostockBudget(Path(tmp_path) / "baostock-budget.json").record("query", 50_000)
 
-    rc, out = _run(capsys, ["baostock-lock", "acquire"])
+    rc, out = _run_fundamentals(capsys)
 
     assert rc == 1
     assert out["error_kind"] == "baostock_budget_exhausted"
     assert out["budget"]["total"] == 50_000
+    assert api.calls == 0
     assert not (tmp_path / "baostock.lock").exists()
 
 
-def test_status_rejects_acquire_only_options(tmp_path, monkeypatch, capsys):
+def test_removed_acquire_options_are_rejected(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
+    with pytest.raises(SystemExit) as exc:
+        scheduler.main(["baostock-lock", "status", "--owner", "ignored"])
+    assert exc.value.code == 2
+    capsys.readouterr()
 
-    rc, out = _run(capsys, ["baostock-lock", "status", "--owner", "ignored"])
-    assert rc == 1
-    assert out["error_kind"] == "invalid_argument"
-    assert "acquire" in out["error"]
-
+    rc, out = _status(capsys)
+    assert rc == 0
     rc, out = _run(capsys, ["baostock-lock", "status", "--force"])
     assert rc == 1
     assert out["error_kind"] == "invalid_argument"
     assert "release" in out["error"]
 
 
-def test_release_closes_active_api_session(tmp_path, monkeypatch, capsys):
-    from types import SimpleNamespace
+def test_cli_data_command_auto_acquires_and_releases_instance_lease(
+    tmp_path, monkeypatch, capsys
+):
+    api = FundamentalsApi()
+    _install_fundamentals_api(monkeypatch, tmp_path, api)
 
-    from qstock_mcp.baostock_api import BaostockApi
+    rc, out = _run_fundamentals(capsys)
 
-    class Result:
-        error_code = "0"
-        error_msg = ""
-        fields = []
-        cur_page_num = 1
+    assert rc == 0, out
+    assert api.calls == 1
+    assert out["status"] == "ok"
+    assert not (tmp_path / "baostock.lock").exists()
+    assert not (tmp_path / "baostock.token").exists()
 
-        def next(self):
-            return False
 
-    class Client:
-        def __init__(self):
-            self.login_calls = 0
-            self.logout_calls = 0
+def test_cli_command_acquires_once_for_multiple_baostock_calls(
+    tmp_path, monkeypatch, capsys
+):
+    api = FundamentalsApi()
+    _install_fundamentals_api(monkeypatch, tmp_path, api)
+    acquire_calls = 0
+    original = BaostockLease.acquire
 
-        def login(self):
-            self.login_calls += 1
-            return SimpleNamespace(error_code="0", error_msg="")
+    def counted_acquire(self, **kwargs):
+        nonlocal acquire_calls
+        acquire_calls += 1
+        return original(self, **kwargs)
 
-        def logout(self):
-            self.logout_calls += 1
-            return SimpleNamespace(error_code="0", error_msg="")
+    monkeypatch.setattr(BaostockLease, "acquire", counted_acquire)
 
-        def query_stock_basic(self):
-            return Result()
+    rc, out = _run_fundamentals(capsys, "600519,000001")
 
-    monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
-    client = Client()
-    BaostockApi.reset_instance()
-    api = BaostockApi.get(
-        client_factory=lambda: client,
-        budget=BaostockBudget(tmp_path / "baostock-budget.json"),
-        sleep=lambda _seconds: None,
+    assert rc == 0, out
+    assert api.calls == 2
+    assert acquire_calls == 1
+    assert not (tmp_path / "baostock.lock").exists()
+
+
+def test_cli_lock_conflict_stops_before_api_without_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    api = FundamentalsApi()
+    _install_fundamentals_api(monkeypatch, tmp_path, api)
+    holder = BaostockLease(
+        tmp_path, identity=LeaseIdentity("mcp", 999, "mcp-holder")
     )
-    try:
-        assert _run(capsys, ["baostock-lock", "acquire"])[0] == 0
-        api.fetch_stock_list()
+    holder.acquire(owner="mcp-owner")
 
-        rc, released = _run(capsys, ["baostock-lock", "release"])
+    rc, out = _run_fundamentals(capsys)
 
-        assert rc == 0
-        assert released["released"] is True
-        assert client.logout_calls == 1
-        assert _run(capsys, ["baostock-lock", "acquire"])[0] == 0
-        api.fetch_stock_list()
-        assert client.login_calls == 2
-    finally:
-        BaostockApi.reset_instance()
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["lock"]["owner"] == "mcp-owner"
+    assert api.calls == 0
+    assert holder.require()["leased"] is True
+    holder.release()
 
 
-def test_data_command_returns_baostock_locked(pg_test, tmp_path, monkeypatch, capsys):
+def test_data_command_preserves_existing_baostock_locked_error(
+    pg_test, tmp_path, monkeypatch, capsys
+):
     from qstock_mcp.baostock_errors import BaostockLocked
 
     class LockedAdapter:
@@ -187,13 +210,49 @@ def test_data_command_returns_baostock_locked(pg_test, tmp_path, monkeypatch, ca
             raise BaostockLocked("未持有有效的 baostock 租约")
 
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
-    rc = scheduler.main(["stock-list"], list_adapters=[LockedAdapter()])
-    out = json.loads(capsys.readouterr().out)
+    rc, out = _run(capsys, ["stock-list"], list_adapters=[LockedAdapter()])
 
     assert rc == 1
     assert out["status"] == "error"
     assert out["error_kind"] == "baostock_locked"
     assert out["job"] == "stock-list"
+
+
+def test_public_cli_lock_only_exposes_status_and_stale_force(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
+    with pytest.raises(SystemExit) as exc:
+        scheduler.main(["baostock-lock", "acquire"])
+    assert exc.value.code == 2
+    capsys.readouterr()
+
+    rc, out = _run(capsys, ["baostock-lock", "release"])
+    assert rc == 1
+    assert out["error_kind"] == "invalid_argument"
+    assert "stale" in out["error"]
+    assert _status(capsys)[0] == 0
+
+
+def test_cli_cleanup_failure_is_structured_and_still_releases(
+    tmp_path, monkeypatch, capsys
+):
+    api = FundamentalsApi()
+    _install_fundamentals_api(monkeypatch, tmp_path, api)
+    monkeypatch.setattr(
+        scheduler.BaostockApi,
+        "reset_instance",
+        lambda: (_ for _ in ()).throw(RuntimeError("logout failed")),
+    )
+
+    rc, out = _run_fundamentals(capsys)
+
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_cleanup_error"
+    assert out["succeeded"] == 1
+    assert "logout failed" in out["error"]
+    assert not (tmp_path / "baostock.lock").exists()
 
 
 def test_lease_commands_do_not_touch_baostock(tmp_path, monkeypatch, capsys):
@@ -203,7 +262,10 @@ def test_lease_commands_do_not_touch_baostock(tmp_path, monkeypatch, capsys):
         raise AssertionError("租约命令不得创建 baostock 会话")
 
     monkeypatch.setattr(baostock_api, "_load_baostock", explode)
+    holder = BaostockLease(
+        tmp_path, identity=LeaseIdentity("mcp", 999, "control")
+    )
+    holder.acquire()
 
-    assert _run(capsys, ["baostock-lock", "acquire"])[0] == 0
     assert _status(capsys)[0] == 0
-    assert _run(capsys, ["baostock-lock", "release"])[0] == 0
+    assert _run(capsys, ["baostock-lock", "release", "--force"])[0] == 0

@@ -137,9 +137,9 @@ class BaostockApi:
             self._ensure_session_locked()
 
     def close(self) -> None:
-        """显式关闭租约内会话；重复调用幂等。"""
+        """显式关闭并报告 logout 失败；重复调用幂等。"""
         with self._lock:
-            self._reset_locked()
+            self._reset_locked(strict=True)
 
     # --------------------------------------------------------------- requests
     def query(
@@ -446,8 +446,8 @@ class BaostockApi:
         )
 
     # ---------------------------------------------------------------- session
-    def _reset_locked(self) -> None:
-        """关闭会话（logout）并清空；预算已耗尽时不再发 logout。"""
+    def _reset_locked(self, *, strict: bool = False) -> None:
+        """错误恢复保留原异常；显式 close 以 strict 报告 logout 失败。"""
         session, self._session = self._session, None
         if session is None:
             return
@@ -456,12 +456,15 @@ class BaostockApi:
         try:
             self._record_or_raise_locked("logout")
         except BaostockError:
+            if strict:
+                raise
             return
         try:
             with _quiet_stdout(), self._request_deadline():
                 session.logout()
-        except Exception:  # noqa: BLE001 - 清理路径不抛
-            pass
+        except Exception:  # noqa: BLE001 - 非 strict 清理不得覆盖原数据错误
+            if strict:
+                raise
 
     def _discard_locked(self) -> None:
         """丢弃会话但不发 logout（黑名单/登录上限等致命路径）。"""

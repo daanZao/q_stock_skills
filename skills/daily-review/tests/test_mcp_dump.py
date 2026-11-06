@@ -140,3 +140,18 @@ def test_unknown_aggregate_exits_2(monkeypatch, capsys, tmp_path):
         "--out", str(tmp_path / "x.json"), "--server", _server_cmd(),
     )
     assert rc == 2
+
+
+def test_ephemeral_stdio_client_refuses_baostock_acquire(monkeypatch, capsys, tmp_path):
+    rc, captured = _run(
+        monkeypatch,
+        capsys,
+        "--tool", "baostock_lock",
+        "--params", '{"action": "acquire"}',
+        "--out", str(tmp_path / "should-not-exist.json"),
+        "--server", _server_cmd(),
+    )
+
+    assert rc == 1
+    assert "长期驻留" in captured.err
+    assert not (tmp_path / "should-not-exist.json").exists()
