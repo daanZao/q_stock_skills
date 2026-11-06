@@ -65,6 +65,17 @@ def test_single_source_failure_records_and_continues():
     assert "bse_coverage" in out and out["bse_coverage"] == {"baostock": 0}
 
 
+def test_baostock_locked_is_structured_error_not_source_failure():
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    out = compare_stock_list_sources(
+        adapters=[_Fake("baostock", exc=BaostockLocked("未持有有效的 baostock 租约"))]
+    )
+
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+
+
 def test_all_sources_failed_is_error():
     out = compare_stock_list_sources(adapters=[
         _Fake(n, exc=FetchError(f"{n} boom")) for n in ("efinance", "akshare", "baostock")

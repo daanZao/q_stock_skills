@@ -110,6 +110,24 @@ def _ledger(dsn, section=None):
 
 
 class TestStockDailyPart:
+    def test_baostock_locked_returns_structured_error(self, pg_ready):
+        from qstock_mcp.baostock_errors import BaostockLocked
+
+        adapter = FakeMorningAdapter(
+            exc=BaostockLocked("未持有有效的 baostock 租约")
+        )
+        out = fetch_morning_batch(
+            trade_date=TARGET,
+            adapter=adapter,
+            adapters=[FakeInitAdapter("fake")],
+            sw_adapters=_sw(),
+            now=NOW_MONDAY_AM,
+        )
+
+        assert out["status"] == "error"
+        assert out["error_kind"] == "baostock_locked"
+        assert adapter.calls == [TARGET]
+
     def test_full_market_rows_land(self, pg_ready):
         out = fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()),

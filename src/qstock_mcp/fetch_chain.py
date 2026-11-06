@@ -17,6 +17,7 @@ import random
 from time import sleep
 from typing import Callable, Sequence
 
+from .baostock_errors import BaostockError
 from .adapters.base import (
     BoardAdapter,
     DailyAdapter,
@@ -52,6 +53,17 @@ class AllSourcesFailed(RuntimeError):
         self.attempted = attempted
         summary = "; ".join(f"{a['source']}: {a['error']}" for a in attempted)
         super().__init__(f"全部数据源失败（{summary}）")
+
+
+def _from_baostock_api(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, BaostockError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def aggregate_error_kind(attempted: list[dict]) -> str:
@@ -107,11 +119,13 @@ def _with_fallback(adapters, call: Callable, max_retries: int) -> dict:
                     "source": adapter.name,
                     "attempted_sources": attempted,
                 }
+            except BaostockError:
+                raise
             except Exception as e:  # noqa: BLE001 - 适配器任何失败都收敛为"该源失败"
                 error = str(e)
                 kind = fetch_failure_kind(e)
                 source_meta = getattr(e, "source_meta", source_meta)
-                if kind == "unsupported":
+                if kind == "unsupported" or _from_baostock_api(e):
                     break
         attempted.append(
             {

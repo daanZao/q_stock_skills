@@ -11,9 +11,11 @@ import logging
 from typing import Sequence
 
 from .adapters import FundamentalsAdapter, default_fundamentals_adapters
+from .baostock_errors import BaostockError
 from .deprecations import PLANNED_ABSENT_SECTIONS
 from .fetch_chain import AllSourcesFailed, fetch_fundamentals_with_fallback
 from .output import error as _error
+from .tools_baostock import baostock_error
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +36,8 @@ def get_fundamentals(
         adapters = default_fundamentals_adapters()
     try:
         result = fetch_fundamentals_with_fallback(adapters, stock_code)
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
     except AllSourcesFailed as e:
         return _error(
             tool,

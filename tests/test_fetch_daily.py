@@ -100,6 +100,28 @@ def test_fetch_all_sources_failed(pg_test):
     assert _rows_in_db(pg_test) == []  # 不落任何数据，更不伪造
 
 
+def test_fetch_baostock_locked_returns_structured_error(pg_test):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedAdapter:
+        name = "baostock"
+
+        def fetch_daily(self, *args):
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    _init(pg_test)
+    result = fetch_daily(
+        "600519",
+        start="20240101",
+        end="20240110",
+        adapters=[LockedAdapter()],
+    )
+
+    assert result["status"] == "error"
+    assert result["error_kind"] == "baostock_locked"
+    assert _rows_in_db(pg_test) == []
+
+
 def test_fetch_force_refreshes_whole_window_and_preserves_outside(pg_test):
     _init(pg_test)
     conn = psycopg2.connect(pg_test)

@@ -17,7 +17,7 @@
 外部硬超时；长期 TPS/并发上限与全历史完备率仍待验证。本模块固定串行并
 默认 1.5s 间隔，不放量。2026-11-05 正式回填实测：每请求登录/登出跑约 508
 个因子日后，baostock 登录/查询退化到 20s 无响应（TCP 仍可达），故正式回填
-改用 `BaostockAdapter(persistent=True)` 单登录会话串行取数；长会话下全量
+改用进程内 `BaostockApi` 单登录会话串行取数；长会话下全量
 可承载性仍待正式回填验证。
 """
 
@@ -36,6 +36,7 @@ from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from .adapters.base import FetchError, fetch_failure_kind
 from .adjustment import rebuild_stock
+from .baostock_errors import BaostockError
 from .dates import (
     is_trading_time,
     normalize_date,
@@ -47,6 +48,7 @@ from .dates import (
 from .db import connect, ensure_schema
 from .ledger import record_collection
 from .output import error as _error
+from .tools_baostock import baostock_error
 
 log = logging.getLogger(__name__)
 
@@ -876,13 +878,10 @@ def run_adjustment_backfill(
     if not window_days:
         return _error(tool, params, f"窗口内无交易日：{start_d}~{end_d}")
 
-    owns_adapter = adapter is None
     if adapter is None:
         from .adapters.baostock_adapter import BaostockAdapter
 
-        # 回填专用：一次登录会话内串行取数，避免每请求握手触发上游登录
-        # 限速（2026-11-05 实测约 508 次登录后无响应）。
-        adapter = BaostockAdapter(persistent=True)
+        adapter = BaostockAdapter()
     pause = ADJ_BACKFILL_THROTTLE_S if throttle is None else throttle
     conn, err = connect()
     if err:
@@ -911,18 +910,6 @@ def run_adjustment_backfill(
                 "覆盖到最新已有数据，避免回退窗口外 hfq/state",
                 error_kind="window_behind_data",
             )
-
-        # 预登录探测：上游登录不可用时零写入快速失败，避免逐日重试放大限速。
-        ensure_session = getattr(adapter, "ensure_session", None)
-        if ensure_session is not None:
-            try:
-                ensure_session()
-            except FetchError as e:
-                return _error(
-                    tool, params,
-                    f"baostock 登录失败，回填未开始（断点保留）：{e}",
-                    error_kind="upstream_unreachable",
-                )
 
         # ---- 阶段 1：逐日全市场事件集
         checkpoints = _day_checkpoints(conn, start_d, end_d)
@@ -1108,12 +1095,7 @@ def run_adjustment_backfill(
             "repairs_truncated": len(repairs) > 200,
             "artifacts": artifacts,
         }
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
     finally:
         conn.close()
-        if owns_adapter:
-            close = getattr(adapter, "close", None)
-            if close is not None:
-                try:
-                    close()
-                except Exception:  # noqa: BLE001 - 清理路径不掩盖主错误
-                    log.warning("adj-backfill 关闭 baostock 会话失败", exc_info=True)

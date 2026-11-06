@@ -239,6 +239,28 @@ def test_daily_fetch_writes_rows_and_reports_source(pg_ready, capsys):
     conn.close()
 
 
+def test_daily_baostock_locked_stops_batch(pg_ready, capsys):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    locked = FakeAdapter(
+        "baostock",
+        fail_times=99,
+        exc=BaostockLocked("未持有有效的 baostock 租约"),
+    )
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--codes", "600519,000001", "--date", "20261020"],
+        [locked],
+    )
+
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["total"] == 1
+    assert out["results"][0]["error_kind"] == "baostock_locked"
+    assert len(locked.calls) == 1
+
+
 def test_daily_input_conflicts_exit_1(capsys):
     rc, out = _daily_run(capsys, ["daily", "--codes", "600519", "--all"], [])
     assert rc == 1 and "互斥" in out["error"]
@@ -340,6 +362,34 @@ def test_fundamentals_all_fail_exit_1_still_declares_planned_absent(capsys):
     assert r["status"] == "error"
     assert "base_info" in r["planned_absent"]
     assert [a["source"] for a in r["attempted_sources"]] == ["akshare", "baostock"]
+
+
+def test_fundamentals_baostock_locked_stops_batch(capsys):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedAdapter:
+        name = "baostock"
+
+        def __init__(self):
+            self.calls = []
+
+        def fetch_fundamentals(self, stock_code):
+            self.calls.append(stock_code)
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    adapter = LockedAdapter()
+    rc, out = _fund_run(
+        capsys,
+        ["fundamentals", "--codes", "600519,000001"],
+        [adapter],
+    )
+
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["total"] == 1
+    assert out["results"][0]["error_kind"] == "baostock_locked"
+    assert adapter.calls == ["600519"]
 
 
 def test_fundamentals_requires_codes(capsys):

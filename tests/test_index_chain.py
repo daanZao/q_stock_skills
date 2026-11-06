@@ -103,6 +103,28 @@ def test_backfill_kc50_gap_lands_and_is_idempotent(pg_test):
     ]
 
 
+def test_backfill_baostock_locked_returns_structured_error(pg_test):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    conn = _conn(pg_test)
+    conn.close()
+    adapter = FakeIndexDailyAdapter(
+        "baostock", exc=BaostockLocked("未持有有效的 baostock 租约")
+    )
+
+    out = fetch_index_backfill(
+        codes="000001",
+        start="20261013",
+        end="20261022",
+        adapters=[adapter],
+        now=NOW_AFTER_CLOSE,
+    )
+
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert len(adapter.calls) == 1
+
+
 def test_backfill_preserves_rows_outside_requested_window(pg_test):
     conn = _conn(pg_test)
     outside = dict(KC50_ROWS[0], trade_date="20261012", close=999.0)

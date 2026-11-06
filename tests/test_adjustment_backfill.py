@@ -811,22 +811,37 @@ def test_missing_first_event_raw_is_recorded_as_raw_gap(pg_test, tmp_path):
     assert state[1] is True
 
 
-def test_backfill_uses_persistent_adapter_and_closes_it(pg_test, tmp_path, monkeypatch):
+def test_backfill_baostock_locked_returns_structured_error(pg_test, tmp_path):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedAdapter(FakeBackfillAdapter):
+        def fetch_daily_adjust_factor(self, trade_date):
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    out = run_adjustment_backfill(
+        start=START,
+        end=END,
+        adapter=LockedAdapter(),
+        throttle=0,
+        report_dir=str(tmp_path),
+        now=NOW,
+    )
+
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+
+
+def test_backfill_uses_shared_api_without_persistent_lifecycle(pg_test, tmp_path, monkeypatch):
     from qstock_mcp.adapters import baostock_adapter
 
     created = []
 
-    class FakePersistent(FakeBackfillAdapter):
-        def __init__(self, persistent=False):
+    class FakeDefault(FakeBackfillAdapter):
+        def __init__(self):
             super().__init__()
-            self.persistent = persistent
-            self.closed = False
             created.append(self)
 
-        def close(self):
-            self.closed = True
-
-    monkeypatch.setattr(baostock_adapter, "BaostockAdapter", FakePersistent)
+    monkeypatch.setattr(baostock_adapter, "BaostockAdapter", FakeDefault)
     out = run_adjustment_backfill(
         start=START, end=END, adapter=None, throttle=0,
         report_dir=str(tmp_path), now=NOW,
@@ -834,36 +849,3 @@ def test_backfill_uses_persistent_adapter_and_closes_it(pg_test, tmp_path, monke
 
     assert out["status"] == "ok"
     assert len(created) == 1
-    assert created[0].persistent is True
-    assert created[0].closed is True
-
-
-def test_backfill_fails_fast_when_login_unavailable(pg_test, tmp_path, monkeypatch):
-    from qstock_mcp.adapters import baostock_adapter
-
-    created = []
-
-    class LoginFailPersistent(FakeBackfillAdapter):
-        def __init__(self, persistent=False):
-            super().__init__()
-            self.persistent = persistent
-            self.closed = False
-            created.append(self)
-
-        def ensure_session(self):
-            raise FetchError("baostock 登录失败: 网络接收错误")
-
-        def close(self):
-            self.closed = True
-
-    monkeypatch.setattr(baostock_adapter, "BaostockAdapter", LoginFailPersistent)
-    out = run_adjustment_backfill(
-        start=START, end=END, adapter=None, throttle=0,
-        report_dir=str(tmp_path), now=NOW,
-    )
-
-    assert out["status"] == "error"
-    assert out["error_kind"] == "upstream_unreachable"
-    assert created[0].factor_calls == []
-    assert created[0].closed is True
-    assert _ledger(pg_test) == []  # 零写入

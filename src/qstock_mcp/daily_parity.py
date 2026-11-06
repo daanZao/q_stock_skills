@@ -21,8 +21,10 @@
 from typing import Sequence
 
 from .adapters import DailyAdapter, default_daily_adapters, fetch_failure_kind
+from .baostock_errors import BaostockError
 from .dates import normalize_date
 from .output import error as _error
+from .tools_baostock import baostock_error
 
 _PARITY_TOLERANCES: dict[str, tuple[str, float]] = {
     "open": ("abs", 0.011),
@@ -77,6 +79,8 @@ def _compare_code(
     for adapter in adapters:
         try:
             rows = adapter.fetch_daily(code, trade_date, trade_date, adj)
+        except BaostockError:
+            raise
         except Exception as e:  # noqa: BLE001 - 单源失败只记该源，不中断对拍
             kind = fetch_failure_kind(e)
             result["sources"][adapter.name] = {
@@ -148,7 +152,10 @@ def compare_daily_sources(
         return _error(tool, params, "股票代码列表为空")
     if adapters is None:
         adapters = default_daily_adapters()
-    results = [_compare_code(c, trade_date, adj, adapters) for c in codes]
+    try:
+        results = [_compare_code(c, trade_date, adj, adapters) for c in codes]
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
     mismatched = [r for r in results if r["status"] == "mismatch"]
     no_data = [r for r in results if r["status"] == "no_data"]
     params["trade_date"] = trade_date

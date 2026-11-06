@@ -16,7 +16,9 @@ baostock 单源在跑）都如实呈现（退役前链首腿 efinance 恒失败�
 from typing import Sequence
 
 from .adapters import DataAdapter, default_adapters, fetch_failure_kind
+from .baostock_errors import BaostockError
 from .output import error as _error
+from .tools_baostock import baostock_error
 
 _SET_SAMPLE_LIMIT = 20  # 代码集合差集样本上限（全市场差集可能上千，样本供人工核读）
 
@@ -37,6 +39,8 @@ def compare_stock_list_sources(
     for adapter in adapters:
         try:
             rows = adapter.fetch_stock_list()
+        except BaostockError as exc:
+            return baostock_error(tool, params, exc)
         except Exception as e:  # noqa: BLE001 - 单源失败只记该源，不中断对拍
             sources[adapter.name] = {
                 "status": "error",

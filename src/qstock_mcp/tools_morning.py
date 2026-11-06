@@ -26,6 +26,7 @@ from .adapters import (
     default_index_daily_adapters,
 )
 from .adapters.base import FetchError, fetch_failure_kind
+from .baostock_errors import BaostockError
 from .adjustment import event_factor_from_pctchg, factor_relative_error
 from .dates import add_days, is_trading_time, normalize_date, prev_trading_day, today_str
 from .db import connect
@@ -39,6 +40,7 @@ from .repository import (
     upsert_index_daily,
     upsert_sw_board_valuation,
 )
+from .tools_baostock import baostock_error
 from .tools_init import MAJOR_INDICES
 
 log = logging.getLogger(__name__)
@@ -413,6 +415,8 @@ def fetch_morning_batch(
             "index_daily": _index_daily_part(conn, adapters, target),
             "sw_board_valuation": _sw_board_valuation_part(conn, sw_adapters, target),
         }
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
     finally:
         conn.close()
     failed = [k for k, v in parts.items() if v["status"] == "error"]

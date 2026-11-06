@@ -45,8 +45,8 @@ Issue [#163](https://github.com/daanZao/q_stock_skills/issues/163)，spec [#158]
    `baostock-lock acquire` 在已锁住时返回 `baostock_locked` 并给出持有者；请到另一个 terminal/MCP 会话
    `release` 后再 acquire。进程退出**不会**自动释放；崩溃遗留用 `release --force`。
    租约机制详见 [baostock-lease.md](baostock-lease.md)。
-   **注意**：租约 CLI/MCP 已落地（#170），但 `adj-backfill` 数据路径本身在 #171
-   前尚未强制检查租约；此处的 acquire/release 是操作纪律，不是命令门禁。
+   `adj-backfill` 数据路径已强制检查租约（#171）：无有效租约时返回
+   `error_kind="baostock_locked"`，不自动申请或释放。
 
 ## 命令
 
@@ -306,20 +306,15 @@ COMMIT;
 
 ## 数据源纪律与实测记录
 
-- 串行、无并发；相邻上游请求默认 1.5s。当前实现单请求 120s 外部硬超时、
-  会话被踢重登 ≤3 次；ADR 0019 落地后改为 60s/请求、`10001001` 重登一次重试
-  同一请求、瞬时错误最多重试一次。
+- 串行、无并发；相邻上游请求默认 1.5s。单请求 60s 超时、`10001001` 重登一次
+  重试同一请求、瞬时错误最多重试一次，均由 `BaostockApi` 承载（ADR 0019）。
 - 正式回填在**显式租约**（ADR 0019）下运行：一个进程一个 `BaostockApi` 会话，
-  因子日与事件票 raw 复用同一登录，禁止每请求 login/logout；单请求 60s 超时；
-  `10001001` 重登一次重试同一请求；`10001011` 致命零重试。
+  因子日与事件票 raw 复用同一登录，禁止每请求 login/logout；`10001011` 致命零重试。
 - 一个租约只允许一个进程/会话；不同 CLI 命令各登录一次，但租约保证不并发。
 - 日预算按协议动作计，45,000 警告、50,000 停止；大回填不得与 morning/close/daily
-  并发。租约 CLI/MCP（#170）已可 acquire/status/release，但 `adj-backfill` 数据路径
-  仍是 ADR 0019 之前的 `persistent=True` 过渡形态、**尚未强制检查租约**；批量平替
-  （#171）完成前，本文的 acquire/release 是协作约定，不是门禁。
-- 启动前先 `ensure_session()` 预登录；登录失败直接返回
-  `error_kind="upstream_unreachable"`、零写入退出，保留断点，不逐日重试
-  放大登录限速。
+  并发。数据门禁已生效（#171），无有效租约返回 `baostock_locked`，不自动申请/释放。
+- 回填不自动 acquire/release，也不在进程内主动关闭共享会话；会话保留到操作者显式
+  release。首个实际请求失败时保留断点，按结构化错误退出，不逐日放大登录限速。
 - 2026-11-04/05 已验证：单会话串行、相邻 ≥1.5s 的少量样本可承载；长期
   TPS、并发上限、全历史完备率**未验证**，不得据小样本放量。
 - 2026-11-05 正式回填事故记录：每请求登录/登出跑到约 508 个因子日后，

@@ -72,6 +72,19 @@ def test_chain_propagates_adjust_fallback_flag():
 # ---------------------------------------------------------------- 三源对拍
 
 
+def test_compare_baostock_locked_returns_structured_error():
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    locked = FakeAdapter(
+        "baostock", exc=BaostockLocked("未持有有效的 baostock 租约"), fail_times=1
+    )
+    result = compare_daily_sources(["600519"], TRADE_DATE, adapters=[locked])
+
+    assert result["status"] == "error"
+    assert result["error_kind"] == "baostock_locked"
+    assert len(locked.calls) == 1
+
+
 def test_compare_ok():
     result = compare_daily_sources(
         ["600519"], TRADE_DATE,

@@ -177,6 +177,25 @@ def test_release_closes_active_api_session(tmp_path, monkeypatch, capsys):
         BaostockApi.reset_instance()
 
 
+def test_data_command_returns_baostock_locked(pg_test, tmp_path, monkeypatch, capsys):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedAdapter:
+        name = "baostock"
+
+        def fetch_stock_list(self):
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
+    rc = scheduler.main(["stock-list"], list_adapters=[LockedAdapter()])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["job"] == "stock-list"
+
+
 def test_lease_commands_do_not_touch_baostock(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
 

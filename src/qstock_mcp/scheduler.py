@@ -120,6 +120,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import BoardAdapter, SnapshotAdapter
+from .baostock_errors import BaostockError
 from .adjustment_backfill import run_adjustment_backfill
 from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
@@ -138,7 +139,12 @@ from .snapshot_parity import compare_snapshot_sources
 from .stock_list_parity import compare_stock_list_sources
 from .sw_board_parity import compare_sw_board_sources
 from .tools_backfill import fetch_sw_boards_backfill
-from .tools_baostock import baostock_lock
+from .tools_baostock import (
+    BAOSTOCK_BATCH_STOP_ERRORS,
+    BAOSTOCK_ERROR_FIELDS,
+    baostock_error,
+    baostock_lock,
+)
 from .tools_board import fetch_board_snapshot
 from .tools_coverage import verify_history_coverage
 from .tools_daily import fetch_daily
@@ -503,6 +509,7 @@ def cmd_daily(
         return 0 if result.get("status") == "ok" else 1
     pause = throttle if throttle is not None else (1.0 if all_codes else 0.0)
     results: list[dict] = []
+    fatal_error = None
     for i, code in enumerate(codes):
         raw = fetch_daily(
             code, start=start, end=end, adj=adj, adapters=daily_adapters, force=force
@@ -523,15 +530,21 @@ def cmd_daily(
                 entry["note"] = raw["note"]
         else:
             entry["error"] = raw.get("error")
+            for key in BAOSTOCK_ERROR_FIELDS:
+                if key in raw:
+                    entry[key] = raw[key]
             if raw.get("attempted_sources"):
                 entry["attempted_sources"] = raw["attempted_sources"]
         results.append(entry)
+        if raw.get("error_kind") in BAOSTOCK_BATCH_STOP_ERRORS:
+            fatal_error = raw
+            break
         if pause and i < len(codes) - 1:
             time.sleep(pause)
     succeeded = sum(1 for r in results if r["status"] == "ok")
     failed = len(results) - succeeded
     status = aggregate_batch_status(len(results), failed)
-    _emit({
+    out = {
         "status": status,
         "job": tool,
         "mode": "fetch",
@@ -543,7 +556,12 @@ def cmd_daily(
         "succeeded": succeeded,
         "failed": failed,
         "results": results,
-    })
+    }
+    if fatal_error is not None:
+        for key in BAOSTOCK_ERROR_FIELDS:
+            if key in fatal_error:
+                out[key] = fatal_error[key]
+    _emit(out)
     return 0 if status == "ok" else 1
 
 
@@ -566,6 +584,7 @@ def cmd_fundamentals(
     from .tools_fundamentals import get_fundamentals
 
     results: list[dict] = []
+    fatal_error = None
     for code in codes:
         raw = get_fundamentals(code, adapters=fundamentals_adapters)
         entry: dict = {"stock_code": code, "status": raw.get("status")}
@@ -581,20 +600,31 @@ def cmd_fundamentals(
         else:
             entry["error"] = raw.get("error")
             entry["planned_absent"] = raw.get("planned_absent") or {}
+            for key in BAOSTOCK_ERROR_FIELDS:
+                if key in raw:
+                    entry[key] = raw[key]
             if raw.get("attempted_sources"):
                 entry["attempted_sources"] = raw["attempted_sources"]
         results.append(entry)
+        if raw.get("error_kind") in BAOSTOCK_BATCH_STOP_ERRORS:
+            fatal_error = raw
+            break
     succeeded = sum(1 for r in results if r["status"] == "ok")
     failed = len(results) - succeeded
     status = aggregate_batch_status(len(results), failed)
-    _emit({
+    out = {
         "status": status,
         "job": tool,
         "total": len(results),
         "succeeded": succeeded,
         "failed": failed,
         "results": results,
-    })
+    }
+    if fatal_error is not None:
+        for key in BAOSTOCK_ERROR_FIELDS:
+            if key in fatal_error:
+                out[key] = fatal_error[key]
+    _emit(out)
     return 0 if status == "ok" else 1
 
 
@@ -1160,6 +1190,9 @@ def main(argv: list[str] | None = None,
             )
         if args.command == "stock-list":
             return cmd_stock_list(check=args.check, list_adapters=list_adapters)
+    except BaostockError as exc:
+        _emit({"job": args.command, **baostock_error(args.command, {}, exc)})
+        return 1
     except Exception as e:  # 零例外：异常收敛为结构化错误输出
         _emit({"status": "error", "job": args.command,
                "error": f"{type(e).__name__}: {e}"})

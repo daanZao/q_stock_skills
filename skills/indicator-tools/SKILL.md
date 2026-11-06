@@ -15,6 +15,8 @@ description: 证券指标计算与序列数学工具（MA/MACD/BOLL/RSI/窗口�
 
 典型组合：agent 调用 MCP `query_daily` 拿到日线 JSON 后，直接作为本脚本的 stdin（可经临时文件或 heredoc 传递）。
 
+**baostock 显式租约**：可能进入 baostock 路径的 MCP 调用须先 `baostock_lock(action="acquire")`，完成后显式 `release`；无租约时数据工具返回 `baostock_locked`，不会自动申请或释放。本 skill 的指标脚本本身不直连 baostock。
+
 公共参数：`--tail N`（输出末尾 N 个点，默认 60，0=全部）。
 
 **退出码**：

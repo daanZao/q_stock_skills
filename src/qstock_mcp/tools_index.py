@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from .adapters import DataAdapter, default_index_daily_adapters
+from .baostock_errors import BaostockError
 from .dates import add_days, is_trading_time, normalize_date, today_str, trading_days_between
 from .db import connect
 from .fetch_chain import (
@@ -27,6 +28,7 @@ from .fetch_chain import (
 )
 from .ledger import record_collection, summarize_attempted
 from .repository import select_index_daily, upsert_index_daily
+from .tools_baostock import baostock_error
 from .tools_init import MAJOR_INDICES
 
 log = logging.getLogger(__name__)
@@ -149,6 +151,8 @@ def fetch_index_backfill(
             if n == 0:
                 entry["empty_kind"] = "no_data_for_date"
             indices.append(entry)
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
     finally:
         conn.close()
     failed = [i for i in indices if i["status"] == "error"]

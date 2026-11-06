@@ -30,6 +30,7 @@ from ._sw_classify import (
     load_sw_industry_meta_seed,
     parse_sw_classification,
 )
+from .baostock_errors import BaostockError
 from .adapters import (
     DailyAdapter,
     DataAdapter,
@@ -59,6 +60,7 @@ from .repository import (
     upsert_stock_list,
     upsert_sw_industry_meta,
 )
+from .tools_baostock import baostock_error
 from .tools_daily import ensure_coverage
 
 log = logging.getLogger(__name__)
@@ -210,6 +212,8 @@ def _init_backfill(conn, adapters: Sequence[DailyAdapter]) -> dict:
             cover = ensure_coverage(
                 conn, adapters, code, "qfq", FULL_HISTORY_START, today
             )
+        except BaostockError:
+            raise
         except Exception as e:  # noqa: BLE001 - 单股失败不中断全市场回溯
             log.warning("全量回溯失败 %s: %s", code, e)
             failed.append({"stock_code": code, "error": str(e)})
@@ -309,6 +313,8 @@ def init_database(
         }
         if backfill_history:
             parts["backfill"] = _init_backfill(conn, daily_adapters)
+    except BaostockError as exc:
+        return baostock_error(tool, params, exc)
     finally:
         conn.close()
 

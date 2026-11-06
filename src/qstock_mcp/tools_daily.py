@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import NamedTuple, Sequence
 
 from .adapters import DailyAdapter, default_daily_adapters
+from .baostock_errors import BaostockError
 from .dates import is_trading_time, resolve_range, today_str
 from .db import connect
 from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_with_fallback
@@ -25,6 +26,7 @@ from .ledger import record_collection, summarize_attempted
 from .output import error as _error
 from .price_reader import PriceQueryError, get_price_reader
 from .repository import select_daily, select_dates, upsert_daily
+from .tools_baostock import baostock_error
 
 log = logging.getLogger(__name__)
 
@@ -214,6 +216,8 @@ def _run(
                 healed=cover["segments"],
             )
         rows = select_daily(conn, stock_code, adj, start_d, end_d)
+    except BaostockError as exc:
+        return None, baostock_error(tool, params, exc)
     finally:
         conn.close()
     return _Ctx(params, start_d, end_d, cover["segments"], rows, cover["deferred_rows"]), None

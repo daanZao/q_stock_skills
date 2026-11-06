@@ -13,6 +13,21 @@ from .baostock_lease import BaostockLease
 from .output import error as output_error
 
 ACTIONS = ("acquire", "status", "release")
+BAOSTOCK_BATCH_STOP_ERRORS = frozenset({
+    "baostock_locked",
+    "baostock_budget_exhausted",
+    "baostock_blacklisted",
+    "baostock_login_limit",
+})
+BAOSTOCK_ERROR_FIELDS = (
+    "error_kind",
+    "lock",
+    "note",
+    "token_present",
+    "token_valid",
+    "budget",
+    "error_code",
+)
 MCP_COMMAND = "mcp:baostock_lock"
 MCP_DEFAULT_OWNER = "qstock-mcp"
 
@@ -32,6 +47,14 @@ def _params(
     if force:
         params["force"] = True
     return params
+
+
+def baostock_error(tool: str, params: dict, exc: BaostockError) -> dict:
+    payload = exc.to_dict()
+    error_kind = payload.pop("error_kind")
+    message = payload.pop("error")
+    payload.pop("status", None)
+    return output_error(tool, params, message, error_kind=error_kind, **payload)
 
 
 def baostock_lock(
@@ -86,17 +109,7 @@ def baostock_lock(
             state = lease.release(force=force)
             BaostockApi.reset_instance()
     except BaostockError as exc:
-        payload = exc.to_dict()
-        error_kind = payload.pop("error_kind")
-        message = payload.pop("error")
-        payload.pop("status", None)
-        return output_error(
-            "baostock_lock",
-            params,
-            message,
-            error_kind=error_kind,
-            **payload,
-        )
+        return baostock_error("baostock_lock", params, exc)
     except OSError as exc:
         return output_error(
             "baostock_lock",

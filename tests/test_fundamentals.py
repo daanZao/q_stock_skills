@@ -56,6 +56,28 @@ def test_all_sources_failed_returns_error_without_fabricated_data():
     assert "data" not in result  # 不伪造数据
 
 
+def test_baostock_locked_returns_structured_error_without_retry():
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedAdapter:
+        name = "baostock"
+
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_fundamentals(self, stock_code):
+            self.calls += 1
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    adapter = LockedAdapter()
+    result = get_fundamentals("600519", adapters=[adapter])
+
+    assert result["status"] == "error"
+    assert result["error_kind"] == "baostock_locked"
+    assert result["tool"] == "get_fundamentals"
+    assert adapter.calls == 1
+
+
 def test_does_not_touch_database(monkeypatch):
     """proxy 面不落库：任何数据库连接企图都使测试失败（等价保证）。"""
     import psycopg2

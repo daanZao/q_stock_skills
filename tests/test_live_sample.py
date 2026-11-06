@@ -72,6 +72,41 @@ def _run(pg_test, daily, seed=7):
     )
 
 
+def test_live_sample_baostock_locked_returns_structured_error(pg_test):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedListAdapter(FakeInitAdapter):
+        def fetch_stock_list(self):
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    out = run_live_sample(
+        end="20261028",
+        daily_adapters=[SampleDailyAdapter()],
+        list_adapters=[LockedListAdapter("baostock")],
+        sw_adapters=[FakeSwBoardsAdapter()],
+        throttle=0,
+    )
+
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["scope"] == "live_sample"
+
+
+def test_live_sample_daily_baostock_locked_is_top_level_error(pg_test):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedDailyAdapter(SampleDailyAdapter):
+        def fetch_daily(self, stock_code, start, end, adj="qfq"):
+            super().fetch_daily(stock_code, start, end, adj)
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    out = _run(pg_test, LockedDailyAdapter())
+
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["summary"]["errors"] > 0
+
+
 def test_live_sample_is_reproducible_and_scopes_universe(pg_test):
     daily = SampleDailyAdapter()
     first = _run(pg_test, daily)

@@ -13,12 +13,18 @@ from urllib.parse import unquote, urlparse
 
 from ._sw_classify import load_sw_industry_meta_seed
 from .adapters import default_adapters
+from .baostock_errors import BaostockError
 from .dates import trading_day_window, trading_days_between
 from .db import connect, ensure_schema, get_dsn
 from .fetch_chain import AllSourcesFailed, fetch_stock_list_with_fallback
 from .output import error as _error
 from .repository import upsert_stock_list
 from .testdb import TestRunnerConflict, reset_schema, test_runner_lock
+from .tools_baostock import (
+    BAOSTOCK_BATCH_STOP_ERRORS,
+    BAOSTOCK_ERROR_FIELDS,
+    baostock_error,
+)
 from .tools_coverage import verify_history_coverage
 from .tools_daily import query_daily
 from .tools_init import refresh_sw_dict
@@ -93,7 +99,7 @@ def _query_stock(
         "range": {"start": start, "end": end, "trading_days": expected_days},
     }
     if raw.get("status") != "ok":
-        return {
+        result = {
             **base,
             "status": "error",
             "error": raw.get("error"),
@@ -101,6 +107,10 @@ def _query_stock(
             "sources": [],
             "sample_limits": [],
         }
+        for key in BAOSTOCK_ERROR_FIELDS:
+            if key in raw:
+                result[key] = raw[key]
+        return result
 
     rows = raw.get("rows", [])
     calendar = trading_days_between(start, end)
@@ -281,6 +291,8 @@ def _run_live_sample(
         _reset_test_schema()
         listed = fetch_stock_list_with_fallback(list_adapters or default_adapters())
         dictionary = refresh_sw_dict(adapters=sw_adapters)
+    except BaostockError as exc:
+        return {**baostock_error("live_sample", params, exc), "scope": "live_sample"}
     except (ValueError, RuntimeError, AllSourcesFailed) as exc:
         return {
             **_error("live_sample", params, str(exc)),
@@ -354,8 +366,20 @@ def _run_live_sample(
     source_metrics = Counter(
         source for attempt in all_attempts for source in attempt["sources"]
     )
-    status = "error" if errors == len(all_attempts) else "partial_error" if errors else "ok"
-    return {
+    fatal_error = next(
+        (
+            attempt
+            for attempt in all_attempts
+            if attempt.get("error_kind") in BAOSTOCK_BATCH_STOP_ERRORS
+        ),
+        None,
+    )
+    status = (
+        "error"
+        if fatal_error is not None or errors == len(all_attempts)
+        else "partial_error" if errors else "ok"
+    )
+    out = {
         "status": status,
         "tool": "live_sample",
         "scope": "live_sample",
@@ -391,6 +415,11 @@ def _run_live_sample(
             },
         },
     }
+    if fatal_error is not None:
+        for key in BAOSTOCK_ERROR_FIELDS:
+            if key in fatal_error:
+                out[key] = fatal_error[key]
+    return out
 
 
 def run_live_sample(

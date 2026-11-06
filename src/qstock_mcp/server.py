@@ -24,8 +24,9 @@ from . import (
 SERVER_INSTRUCTIONS = (
     "baostock 访问采用显式租约：使用 baostock 相关能力前先调用 "
     "baostock_lock(action='acquire') 申请，完成后 baostock_lock(action='release') 释放；"
-    "租约一次只允许一个会话，不会自动释放；baostock_lock(action='status') 可查看持有者，"
-    "锁住时 acquire 返回 baostock_locked 与持有者信息，请从另一个 CLI/MCP 会话 release。"
+    "租约一次只允许一个会话，不会自动释放；baostock_lock(action='status') 可查看持有者。"
+    "数据工具实际进入 baostock 路径时无租约返回 baostock_locked，不自动申请/释放；"
+    "锁住时 acquire 返回持有者信息，请从另一个 CLI/MCP 会话 release。"
 )
 
 mcp = MCPServer("qstock-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -64,6 +65,7 @@ def init_database(backfill_history: bool = False) -> dict:
 
     backfill_history=True 追加全市场个股历史日线回溯（重操作：数千只 × 全历史，
     显式开启，绝非默认；进度与失败在 parts.backfill 中报告，单股失败不中断）。
+    进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
     """
     return tools_init.init_database(backfill_history)
 
@@ -80,6 +82,7 @@ def fetch_daily(
 
     stock_code: 6 位 A 股代码（如 600519；北交所旧码 43x/83x/87x 自动归一化到 920）；days 与 start/end 二选一；
     日期格式 yyyymmdd 或 yyyy-mm-dd；adj: qfq/hfq/none。
+    进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
     """
     return tools_daily.fetch_daily(stock_code, days=days, start=start, end=end, adj=adj)
 
@@ -95,6 +98,7 @@ def query_daily(
     """查询个股日线，参数同 fetch_daily；行含 price_basis，顶层含 adjust 覆盖状态。
 
     缺省 legacy 路径保留头尾自愈；QSTOCK_PRICE_SOURCE=new 时纯读 raw/hfq 并派生 qfq。
+    legacy 进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
     """
     return tools_daily.query_daily(stock_code, days=days, start=start, end=end, adj=adj)
 
@@ -243,6 +247,7 @@ def get_fundamentals(stock_code: str) -> dict:
     输出自描述 JSON：data 为 {section: 原始记录}（字段名保留上游），source 为实际
     数据源（akshare → baostock fallback，issue #115）；全失败返回 status:"error"
     与各源错误，绝不伪造数据。stock_code: 6 位 A 股代码（如 600519）。
+    进入 baostock 路径前须 baostock_lock(acquire)，完成后 release；无租约返回 baostock_locked。
     """
     return tools_fundamentals.get_fundamentals(stock_code)
 

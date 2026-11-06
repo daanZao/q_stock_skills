@@ -133,6 +133,25 @@ def test_mcp_release_closes_current_api_session(tmp_path, monkeypatch):
         BaostockApi.reset_instance()
 
 
+def test_baostock_data_tools_declare_lease():
+    tools = asyncio.run(server.mcp.list_tools())
+    by_name = {tool.name: tool for tool in tools}
+
+    for name in (
+        "init_database",
+        "fetch_daily",
+        "query_daily",
+        "get_fundamentals",
+    ):
+        description = by_name[name].description or ""
+        assert "baostock_lock" in description
+        assert "baostock_locked" in description
+
+    instructions = server.mcp.instructions or ""
+    assert "无租约" in instructions
+    assert "baostock_locked" in instructions
+
+
 def test_tool_list_and_instructions_declare_lease(tmp_path, monkeypatch):
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
     tools = asyncio.run(server.mcp.list_tools())

@@ -1,10 +1,9 @@
 # baostock 显式租约与请求预算
 
-状态：**设计契约（ADR 0019），expand 部分落地**。CLI `qstock-scheduler baostock-lock`、
-MCP `baostock_lock`、`BaostockLease` 与进程内 `BaostockApi` 已实现（#170）；数据命令/工具
-**尚未强制检查租约**，`baostock_locked` 返回与全部适配器收口归 #171。当前
-`BaostockAdapter` 仍是每调用一次 `login → query → logout` 的旧路径；在 #171 落地前，
-acquire/release 是协作约定，不是数据门禁。
+状态：**设计契约（ADR 0019），expand/migrate 已落地**。CLI `qstock-scheduler baostock-lock`、
+MCP `baostock_lock`、`BaostockLease` 与进程内 `BaostockApi` 已实现（#170）；所有适配器
+数据请求已经收口到代理并强制检查租约（#171）。实际进入 baostock 路径而无有效租约时，
+数据命令/工具返回 `baostock_locked`，不自动 acquire/release；旧每请求登录路径已删除。
 
 官方规则：<https://www.baostock.com/blacklist>；一手证据与配额数学：
 [2026-11-05-baostock-session-and-quota.md](research/2026-11-05-baostock-session-and-quota.md)；
@@ -89,7 +88,7 @@ qstock-scheduler baostock-lock release --force
 - 租约被另一个 owner 占用时，agent 把 `lock` 信息转告用户；用户去另一个 terminal/会话
   `baostock-lock release`（或 `baostock_lock release --force`）后，再 acquire。
 
-### MCP 描述契约（`baostock_lock` 已落入 server.py；数据工具描述随 #171）
+### MCP 描述契约（`baostock_lock` 与数据工具描述均已落入 server.py）
 
 - `baostock_lock` description：
   > 申请/释放/查询 baostock 显式租约。baostock 数据工具必须在本租约下运行；租约不会自动
@@ -172,7 +171,7 @@ qstock-scheduler baostock-lock release
 期间不得与 morning/close/daily 并发；续跑前先用官方统计端点确认
 `今年被限制次数=0`、`待释放时间` 为空。
 
-## 11. 实现验收清单（#170 expand 状态，2026-11-05）
+## 11. 实现验收清单（#170 expand + #171 migrate 已落地）
 
 - [x] `baostock.lock` / `baostock.token` / `baostock-budget.json` 的 acquire/status/release/force
 - [x] 无 TTL、进程退出不自动释放；token 缺失/哈希不匹配视为未租约
@@ -181,12 +180,12 @@ qstock-scheduler baostock-lock release
       `10001001` 重登一次、瞬时错误一次退避
 - [x] 45k/50k 预算计数、45k 警告、50k 拒绝新请求/新租约（`baostock_budget_exhausted`）；
       翻页即时计数，达到 50k 后不再发下一页
-- [ ] 静默翻页截断（baostock 0.9.3 空 recv 不置 error_code）的页级校验（#171）
+- [ ] 静默翻页截断（baostock 0.9.3 空 recv 不置 error_code）的页级校验（后续硬化，非 #171 验收）
 - [x] CLI `baostock-lock` 与 MCP `baostock_lock` 共用文件；无活动会话时零 baostock 请求，
       release 关闭本进程已有会话，重新 acquire 后重新 login
 - [x] MCP `baostock_lock` 描述与 server instructions 已声明租约/不自动释放
-- [ ] 数据命令/工具无租约返回 `baostock_locked`，不自动申请/释放（#171）
-- [ ] 所有 baostock 数据请求经 `BaostockApi`；删除 `persistent` 与每请求 `_with_relogin`（#171）
-- [ ] 数据工具 description / 相关 skill 文档声明租约（#171）
+- [x] 数据命令/工具无租约返回 `baostock_locked`，不自动申请/释放（#171）
+- [x] 所有 baostock 数据请求经 `BaostockApi`；删除 `persistent` 与每请求 `_with_relogin`（#171）
+- [x] 数据工具 description / 相关 skill 文档声明租约（#171）
 - [ ] 小样本真实测试（≤50 请求）验证长会话、锁、预算（#172）
 - [x] 更新 `docs/adj-backfill-cli.md` 的租约状态与 `docs/knowledge-graph.md`

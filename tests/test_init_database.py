@@ -39,6 +39,20 @@ def test_missing_pg_dsn_returns_clear_error(monkeypatch):
     assert "PG_DSN" in result["error"]
 
 
+def test_init_baostock_locked_returns_structured_error(pg_test):
+    from qstock_mcp.baostock_errors import BaostockLocked
+
+    class LockedAdapter(FakeInitAdapter):
+        def fetch_stock_list(self):
+            raise BaostockLocked("未持有有效的 baostock 租约")
+
+    result = init_database(adapters=[LockedAdapter("baostock")])
+
+    assert result["status"] == "error"
+    assert result["error_kind"] == "baostock_locked"
+    assert result["tool"] == "init_database"
+
+
 def test_init_creates_all_tables(pg_test):
     reset_test_schema(pg_test)
     result = init_database(adapters=[FakeInitAdapter("fake")])
