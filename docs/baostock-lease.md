@@ -1,9 +1,11 @@
 # baostock 显式租约与请求预算
 
-状态：**设计契约（ADR 0019），expand/migrate 已落地**。CLI `qstock-scheduler baostock-lock`、
-MCP `baostock_lock`、`BaostockLease` 与进程内 `BaostockApi` 已实现（#170）；所有适配器
-数据请求已经收口到代理并强制检查租约（#171）。实际进入 baostock 路径而无有效租约时，
-数据命令/工具返回 `baostock_locked`，不自动 acquire/release；旧每请求登录路径已删除。
+状态：**设计契约（ADR 0019），expand/migrate 已落地；#172 验收发现互斥语义阻断（#173
+待决策）**。CLI `qstock-scheduler baostock-lock`、MCP `baostock_lock`、`BaostockLease` 与
+进程内 `BaostockApi` 已实现（#170）；所有适配器数据请求已经收口到代理并强制检查租约
+（#171）。实际进入 baostock 路径而无有效租约时，数据命令/工具返回 `baostock_locked`，
+不自动 acquire/release；旧每请求登录路径已删除。验收中发现的阻断项、证据与决策选项见
+[2026-11-06 验收报告](research/2026-11-06-baostock-lease-acceptance.md) 与 #173。
 
 官方规则：<https://www.baostock.com/blacklist>；一手证据与配额数学：
 [2026-11-05-baostock-session-and-quota.md](research/2026-11-05-baostock-session-and-quota.md)；
@@ -87,6 +89,12 @@ qstock-scheduler baostock-lock release --force
 - 数据工具**不会**自动 acquire/release；agent 必须显式 `baostock_lock`。
 - 租约被另一个 owner 占用时，agent 把 `lock` 信息转告用户；用户去另一个 terminal/会话
   `baostock-lock release`（或 `baostock_lock release --force`）后，再 acquire。
+- **验收发现（#172，阻断，待 #173 决策）**：当前实现只拒绝**再次 acquire**
+  （`baostock_lock(acquire)` / `baostock-lock acquire`）；CLI 持锁时另一个入口的数据工具
+  仍通过同一租约的 `require()`，不会返回 `baostock_locked`。这与 ADR 0019「租约保证不同
+  CLI 进程不并发」的表述存在缺口，已拆到 #173 决策「改实现（会话级互斥）」还是「改契约
+  （主机级许可、互斥只在 acquire）」。**在 #173 解决前，操作者必须保证同一租约下不并发
+  启动两个数据进程**；正式回填保持暂停（报告 §7.1）。
 
 ### MCP 描述契约（`baostock_lock` 与数据工具描述均已落入 server.py）
 
@@ -159,8 +167,10 @@ qstock-scheduler baostock-lock acquire --owner ... --reason ...
 
 ## 10. 与 #163 正式回填的关系
 
-正式回填在租约/单会话/预算/错误分类落地并用小样本（≤50 请求）验证前保持暂停
-（当前断点 510/928 因子日、raw 0 行）。续跑流程：
+验收未通过（#172，2026-11-06）：真实小样本 1 login + 3 串行 query + 1 logout（5 个协议
+动作）通过，未触发黑名单/登录上限；但 AC6「CLI acquire 后 MCP 数据工具被拒」未满足，
+#173 决策/修复前**正式回填保持暂停**（断点 510/928 因子日、raw 0 行）。解除后按下述流程
+续跑（正式全窗口回填与回填后检查仍归 #163）：
 
 ```bash
 qstock-scheduler baostock-lock acquire --owner qstock-agent --reason "adj-backfill 20230101-20261104"
@@ -171,7 +181,7 @@ qstock-scheduler baostock-lock release
 期间不得与 morning/close/daily 并发；续跑前先用官方统计端点确认
 `今年被限制次数=0`、`待释放时间` 为空。
 
-## 11. 实现验收清单（#170 expand + #171 migrate 已落地）
+## 11. 实现验收清单（#170 expand + #171 migrate 已落地；#172 验收未通过，AC6 待 #173）
 
 - [x] `baostock.lock` / `baostock.token` / `baostock-budget.json` 的 acquire/status/release/force
 - [x] 无 TTL、进程退出不自动释放；token 缺失/哈希不匹配视为未租约
@@ -187,5 +197,7 @@ qstock-scheduler baostock-lock release
 - [x] 数据命令/工具无租约返回 `baostock_locked`，不自动申请/释放（#171）
 - [x] 所有 baostock 数据请求经 `BaostockApi`；删除 `persistent` 与每请求 `_with_relogin`（#171）
 - [x] 数据工具 description / 相关 skill 文档声明租约（#171）
-- [ ] 小样本真实测试（≤50 请求）验证长会话、锁、预算（#172）
+- [ ] CLI↔MCP 数据路径互斥：CLI acquire 后 MCP 数据工具被拒（#172 AC6 未通过；待 #173 决策）
+- [x] 真实小样本 5 协议动作（1 login + 3 串行 query + 1 logout；#172，[验收报告](research/2026-11-06-baostock-lease-acceptance.md)）
+- [ ] 长会话/正式回填容量验证（5 动作样本不足以证明；#163 正式执行）
 - [x] 更新 `docs/adj-backfill-cli.md` 的租约状态与 `docs/knowledge-graph.md`
