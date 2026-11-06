@@ -159,6 +159,7 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 - 写库命令依赖 `PG_DSN`。日期使用 `YYYYMMDD`；`--trading-days N` 按 A 股交易日历计算，不是 N 个自然日。
 - stdout 输出最终结构化 JSON，进度和日志输出到 stderr。通常退出码 0 表示成功，1 表示执行失败或验收有缺口，2 表示参数解析错误；对拍命令的差异语义见对应专项手册。
 - 写库操作按业务键幂等，可重复执行；采集台账为 append-only 审计记录。幂等不等于可撤销，覆盖旧值前仍需备份。
+- **涉及 baostock 的命令必须先显式申请租约**（ADR 0019）：`qstock-scheduler baostock-lock acquire`，跑完 `release`；锁住时去另一入口 release。租约 CLI/MCP 与单会话代理已落地（#170），但数据命令的租约门禁与 `baostock_locked` 返回在 #171 前仍是协作约定。详见 [baostock 显式租约](baostock-lease.md)。
 - `--check`、`--verify`、`--probe`、`parity` 和 `coverage` 不执行写库抓取，但部分命令会读数据库或直接请求上游。
 
 ### 初始化与历史数据
@@ -242,6 +243,9 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
   「数据可以使用」；`partial_error` 时先看 `summary.failed_days`、
   `summary.repair_counts` 与 `repairs.csv`。断点续跑看
   `summary.upstream_requests.total`（全部命中时应为 0）。
+- **租约**：跑前 `qstock-scheduler baostock-lock acquire`，跑完 `release`；不要并发
+  morning/close/daily。租约命令已可用（#170），但 `adj-backfill` 数据路径在 #171
+  前尚未强制检查租约，acquire/release 是协作约定。详见 [baostock 显式租约](baostock-lease.md)。
 - **详细手册**：[复权回填 A CLI](adj-backfill-cli.md)。
 
 #### `lhb`：龙虎榜单日抓取、历史回溯与对拍

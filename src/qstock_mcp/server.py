@@ -9,6 +9,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from . import (
+    tools_baostock,
     tools_board,
     tools_conclusions,
     tools_daily,
@@ -20,7 +21,41 @@ from . import (
     tools_sw_board,
 )
 
-mcp = MCPServer("qstock-mcp")
+SERVER_INSTRUCTIONS = (
+    "baostock 访问采用显式租约：使用 baostock 相关能力前先调用 "
+    "baostock_lock(action='acquire') 申请，完成后 baostock_lock(action='release') 释放；"
+    "租约一次只允许一个会话，不会自动释放；baostock_lock(action='status') 可查看持有者，"
+    "锁住时 acquire 返回 baostock_locked 与持有者信息，请从另一个 CLI/MCP 会话 release。"
+)
+
+mcp = MCPServer("qstock-mcp", instructions=SERVER_INSTRUCTIONS)
+
+
+@mcp.tool()
+def baostock_lock(
+    action: str = "status",
+    owner: str | None = None,
+    reason: str | None = None,
+    force: bool = False,
+) -> dict:
+    """申请/释放/查询 baostock 显式租约。baostock 数据工具必须在本租约下运行；租约不会自动释放；已锁定时返回持有者信息，需从另一个 CLI/MCP 会话 release。
+
+    action: acquire 申请（无租约且当日预算 < 50,000 时成功）；status 只读查看
+    持有者/命令/时间/age/token_present/token_valid/当日协议动作；release 释放，
+    force=True 清理 token 缺失/哈希不匹配/文件损坏的遗留（owner 仅作展示，不是
+    权限校验）。与 CLI `qstock-scheduler baostock-lock` 共用 ~/.qstock-mcp/
+    下的同一组文件（QSTOCK_BAOSTOCK_LOCK_DIR 可覆盖）。
+    无活动会话时只读写本地文件，不发 baostock 请求；release 会关闭本进程
+    已有的 BaostockApi 会话（可能 logout），release 后再次查询需重新 login。
+    """
+    return tools_baostock.baostock_lock(
+        action,
+        owner=owner,
+        reason=reason,
+        force=force,
+        command=tools_baostock.MCP_COMMAND,
+        default_owner=tools_baostock.MCP_DEFAULT_OWNER,
+    )
 
 
 @mcp.tool()

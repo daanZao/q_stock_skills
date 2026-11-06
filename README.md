@@ -128,6 +128,7 @@ python3 -m venv .venv
 | 涨停池 | 同花顺涨停揭秘，带低频纪律与封禁探测 |
 
 - **不伪造数据**：失败明确报错，空数据与连接故障分开表达。
+- **baostock 显式租约**：baostock 访问必须先 `qstock-scheduler baostock-lock acquire`（MCP `baostock_lock`），一个租约一个会话，用完显式 release；无租约的数据命令/工具返回 `baostock_locked`。租约 CLI/MCP 与 `BaostockApi` 会话代理已落地（#170），数据命令/工具的租约强制收口与 `baostock_locked` 返回在 #171 完成。详见 [baostock-lease.md](docs/baostock-lease.md)（ADR 0019）。
 - **统一数据单位**：库内金额列均为万元，成交量均为股；baostock 成交额在适配层由元除以 10000。
 - **可重复执行**：业务键幂等写入，采集动作进入 append-only 台账。
 - **结果机器可读**：stdout 输出结构化 JSON，日志与进度走 stderr。

@@ -32,6 +32,21 @@ Issue [#163](https://github.com/daanZao/q_stock_skills/issues/163)，spec [#158]
    `max(stock_adjust_factor.ex_date)`）。回填会重建 state/hfq；历史 end 若
    早于已有数据会回退窗口外派生，程序直接拒绝并返回
    `error_kind="window_behind_data"`，零写入。历史窗口请用隔离库。
+7. **先申请 baostock 显式租约**（ADR 0019）。回填本身不会自动申请/释放：
+
+   ```bash
+   qstock-scheduler baostock-lock acquire --owner qstock-agent \
+     --reason "adj-backfill 20230101-20261104"
+   qstock-scheduler baostock-lock status
+   # 跑完后显式释放（从当前或另一个终端）
+   qstock-scheduler baostock-lock release
+   ```
+
+   `baostock-lock acquire` 在已锁住时返回 `baostock_locked` 并给出持有者；请到另一个 terminal/MCP 会话
+   `release` 后再 acquire。进程退出**不会**自动释放；崩溃遗留用 `release --force`。
+   租约机制详见 [baostock-lease.md](baostock-lease.md)。
+   **注意**：租约 CLI/MCP 已落地（#170），但 `adj-backfill` 数据路径本身在 #171
+   前尚未强制检查租约；此处的 acquire/release 是操作纪律，不是命令门禁。
 
 ## 命令
 
@@ -291,10 +306,17 @@ COMMIT;
 
 ## 数据源纪律与实测记录
 
-- 串行、无并发；相邻上游请求默认 1.5s；单请求 120s 外部硬超时；会话被踢
-  由适配器重登 ≤3 次。
-- 正式回填使用 `BaostockAdapter(persistent=True)`：整轮回填共用一次登录
-  会话（因子日与事件票 raw），避免每请求登录/登出。
+- 串行、无并发；相邻上游请求默认 1.5s。当前实现单请求 120s 外部硬超时、
+  会话被踢重登 ≤3 次；ADR 0019 落地后改为 60s/请求、`10001001` 重登一次重试
+  同一请求、瞬时错误最多重试一次。
+- 正式回填在**显式租约**（ADR 0019）下运行：一个进程一个 `BaostockApi` 会话，
+  因子日与事件票 raw 复用同一登录，禁止每请求 login/logout；单请求 60s 超时；
+  `10001001` 重登一次重试同一请求；`10001011` 致命零重试。
+- 一个租约只允许一个进程/会话；不同 CLI 命令各登录一次，但租约保证不并发。
+- 日预算按协议动作计，45,000 警告、50,000 停止；大回填不得与 morning/close/daily
+  并发。租约 CLI/MCP（#170）已可 acquire/status/release，但 `adj-backfill` 数据路径
+  仍是 ADR 0019 之前的 `persistent=True` 过渡形态、**尚未强制检查租约**；批量平替
+  （#171）完成前，本文的 acquire/release 是协作约定，不是门禁。
 - 启动前先 `ensure_session()` 预登录；登录失败直接返回
   `error_kind="upstream_unreachable"`、零写入退出，保留断点，不逐日重试
   放大登录限速。
