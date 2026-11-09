@@ -309,6 +309,50 @@ def test_no_event_stock_uses_market_raw_and_unit_baseline(pg_test, tmp_path):
     assert "600004" in [row["stock_code"] for row in results]
 
 
+def test_legacy_none_rows_are_audited_without_merging_into_raw(pg_test, tmp_path):
+    raw = {"600004": [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]}
+    conn = psycopg2.connect(pg_test)
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO stock_daily (stock_code, trade_date, close, amount, adj, source)"
+                " VALUES (%s, %s, %s, 100.0, 'none', %s)",
+                [
+                    ("600004", START, 7.0, "baostock"),
+                    ("600005", START, 8.0, "baostock"),
+                    ("600006", START, None, "baostock"),
+                    ("600007", "20221230", 9.0, "tencent"),
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = _run(
+        pg_test,
+        FakeBackfillAdapter(events={}, raw=raw),
+        report_dir=str(tmp_path),
+    )
+
+    audit = out["summary"]["legacy_none"]
+    assert audit == {
+        "rows": 4,
+        "stocks": 4,
+        "first_trade_date": "20221230",
+        "last_trade_date": START,
+        "covered_by_raw": 1,
+        "invalid_close": 1,
+        "raw_recheck_required": 2,
+        "isolated_rows": 4,
+        "merged_into_raw": 0,
+        "by_source": {"baostock": 3, "tencent": 1},
+    }
+    assert _fetch(pg_test, "SELECT count(*) FROM stock_daily WHERE adj='none'")[0][0] == 4
+    assert _fetch(pg_test, "SELECT count(*) FROM stock_daily_raw")[0][0] == 5
+    with (tmp_path / "legacy_none_audit.json").open(encoding="utf-8") as handle:
+        assert json.load(handle) == audit
+
+
 def test_failed_raw_day_at_window_edge_marks_no_event_stock_pending(pg_test, tmp_path):
     raw = _raw_series()
     raw["600004"] = [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]
@@ -386,6 +430,37 @@ def test_factor_day_failure_is_error_not_empty_and_keeps_old_events(pg_test, tmp
     assert out["messages"] == ["数据处理完成"]
 
 
+def test_incomplete_event_set_leaves_no_event_candidates_unclassified(pg_test, tmp_path):
+    raw = {"600004": [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]}
+    adapter = FakeBackfillAdapter(
+        events={}, raw=raw, factor_failures={"20261014": 99},
+    )
+    out = _run(pg_test, adapter, report_dir=str(tmp_path))
+
+    assert out["status"] == "error"
+    assert out["summary"]["raw"]["rows"] == 5
+    assert out["summary"]["classification"] == {
+        "event_set_complete": False,
+        "factor_days_expected": 5,
+        "factor_days_succeeded": 4,
+        "factor_days_failed": 1,
+        "event_stocks": 0,
+        "no_event_stocks": 0,
+        "retracted_stocks": 0,
+        "unclassified_stocks": 1,
+        "skip_reasons": {"incomplete_event_set": 1},
+    }
+    assert _fetch(
+        pg_test, "SELECT count(*) FROM stock_factor_state WHERE stock_code='600004'"
+    )[0][0] == 0
+    rows = list(csv.DictReader((tmp_path / "stock_classification.csv").open(encoding="utf-8")))
+    assert rows == [{
+        "stock_code": "600004",
+        "classification": "unclassified",
+        "reason": "incomplete_event_set",
+    }]
+
+
 def test_resume_skips_completed_factor_and_raw_days(pg_test, tmp_path):
     failed_day = "20261014"
     first = FakeBackfillAdapter(raw_failures={failed_day: 99})
@@ -414,6 +489,114 @@ def test_resume_skips_completed_factor_and_raw_days(pg_test, tmp_path):
     assert float(state[0]) == pytest.approx(1.5)
     assert float(state[1]) == pytest.approx(2.0)
     assert state[2] is False
+
+
+def test_set_audit_hashes_and_raw_sample_are_deterministic_on_resume(pg_test, tmp_path):
+    raw = _raw_series()
+    raw["600004"] = [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]
+    first = _run(
+        pg_test, FakeBackfillAdapter(raw=raw), report_dir=str(tmp_path / "first")
+    )
+
+    expected_validation = {
+        "event_set_complete": True,
+        "event_rows": 4,
+        "event_stocks": 3,
+        "no_event_stocks": 1,
+        "raw_rows": 20,
+        "raw_stocks": 4,
+        "quarantined_rows": 0,
+        "hfq_rows": 20,
+        "state_rows": 4,
+        "pending_states": 0,
+        "hfq_without_valid_raw": 0,
+        "valid_raw_without_hfq": 0,
+        "state_without_raw": 0,
+        "classification_mismatches": 0,
+    }
+    assert first["summary"]["validation"] == expected_validation
+    hashes = list(csv.DictReader((tmp_path / "first" / "stock_hashes.csv").open()))
+    assert len(hashes) == 4
+    by_code = {row["stock_code"]: row for row in hashes}
+    assert by_code["600004"]["raw_rows"] == "5"
+    assert by_code["600004"]["event_rows"] == "0"
+    assert by_code["600004"]["hfq_rows"] == "5"
+    assert by_code["600004"]["state_rows"] == "1"
+    assert all(len(row["raw_hash"]) == 32 for row in hashes)
+    sample = list(csv.DictReader((tmp_path / "first" / "raw_sample.csv").open()))
+    assert len(sample) == 20
+    assert {row["classification"] for row in sample} == {"event", "no_event"}
+    assert {row["price_bucket"] for row in sample} == {"lt10", "10_100"}
+    assert all(
+        sum(row["stock_code"] == code for row in sample) == 5 for code in by_code
+    )
+    assert first["summary"]["ordinary_raw_sample"] == {
+        "seed": "164", "strategy": "100_per_class_5_per_stock_stratified",
+        "rows": 20, "stocks": 4, "event_stocks": 3, "no_event_stocks": 1,
+    }
+
+    second = _run(
+        pg_test, FakeBackfillAdapter(raw=raw), report_dir=str(tmp_path / "second")
+    )
+    assert second["summary"]["upstream_requests"]["total"] == 0
+    assert second["summary"]["validation"] == expected_validation
+    assert second["summary"]["skip_reasons"] == {
+        "factor_day_checkpoint": 5, "raw_day_checkpoint": 6,
+    }
+    assert (tmp_path / "second" / "stock_hashes.csv").read_bytes() == (
+        tmp_path / "first" / "stock_hashes.csv"
+    ).read_bytes()
+    assert (tmp_path / "second" / "raw_sample.csv").read_bytes() == (
+        tmp_path / "first" / "raw_sample.csv"
+    ).read_bytes()
+
+
+def test_raw_sample_stock_cap_preserves_exchange_strata(pg_test, tmp_path):
+    rows = [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]
+    raw = {
+        f"{code:06d}": [dict(row) for row in rows]
+        for code in range(600000, 600101)
+    }
+    raw["009517"] = rows
+
+    out = _run(
+        pg_test, FakeBackfillAdapter(events={}, raw=raw), report_dir=str(tmp_path)
+    )
+
+    assert out["status"] == "ok", out["summary"]
+    assert out["summary"]["ordinary_raw_sample"]["stocks"] == 100
+    sample = list(csv.DictReader((tmp_path / "raw_sample.csv").open()))
+    assert {row["exchange"] for row in sample} == {"sh", "sz"}
+    assert any(row["stock_code"] == "009517" for row in sample)
+
+
+def test_state_only_row_is_in_hash_and_blocks_verified(pg_test, tmp_path):
+    conn = psycopg2.connect(pg_test)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO stock_factor_state (stock_code, baseline_factor,"
+                " factor_latest, latest_trade_date, rebuild_pending)"
+                " VALUES ('600099', 1, 1, '20261016', false)"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    raw = {"600004": [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]}
+    out = _run(
+        pg_test, FakeBackfillAdapter(events={}, raw=raw), report_dir=str(tmp_path)
+    )
+
+    assert out["status"] == "partial_error"
+    assert out["stage"] == "rebuilt"
+    assert out["summary"]["validation"]["state_rows"] == 2
+    assert out["summary"]["validation"]["state_without_raw"] == 1
+    hashes = list(csv.DictReader((tmp_path / "stock_hashes.csv").open()))
+    assert len(hashes) == 2
+    by_code = {row["stock_code"]: row for row in hashes}
+    assert by_code["600099"]["state_rows"] == "1"
+    assert by_code["600099"]["state_hash"]
 
 
 def _events_for(stock_code, ex_date, factor_cum):
@@ -542,6 +725,45 @@ def test_invalid_close_kept_in_raw_quarantined_and_repaired(pg_test, tmp_path):
     assert out["summary"]["event_stock_processing"]["pending"] == 1
 
 
+def test_no_event_invalid_closes_are_quarantined_and_exported(pg_test, tmp_path):
+    rows = [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]
+    rows[1] = _bar("20261013", 0.0, 7.0, 0.0)
+    rows[2] = _bar("20261014", None, 7.0, 0.0)
+    out = _run(
+        pg_test,
+        FakeBackfillAdapter(events={}, raw={"600004": rows}),
+        report_dir=str(tmp_path),
+    )
+
+    assert out["status"] == "partial_error"
+    assert out["summary"]["isolation"] == {
+        "rows": 2, "stocks": 1, "reasons": {"invalid_close": 2},
+    }
+    assert _fetch(
+        pg_test,
+        "SELECT trade_date FROM stock_daily_raw WHERE stock_code='600004'"
+        " ORDER BY trade_date",
+    ) == [(day,) for day in WINDOW_DAYS]
+    assert _fetch(
+        pg_test,
+        "SELECT trade_date FROM stock_daily_hfq WHERE stock_code='600004'"
+        " ORDER BY trade_date",
+    ) == [("20261012",), ("20261015",), ("20261016",)]
+    state = _fetch(
+        pg_test,
+        "SELECT baseline_factor, factor_latest, latest_trade_date, rebuild_pending"
+        " FROM stock_factor_state WHERE stock_code='600004'",
+    )[0]
+    assert float(state[0]) == 1.0
+    assert float(state[1]) == 1.0
+    assert state[2:] == (END, True)
+    quarantined = list(csv.DictReader((tmp_path / "quarantined.csv").open(encoding="utf-8")))
+    assert quarantined == [
+        {"stock_code": "600004", "trade_date": "20261013", "reason": "invalid_close"},
+        {"stock_code": "600004", "trade_date": "20261014", "reason": "invalid_close"},
+    ]
+
+
 def test_authoritative_revision_rebuilds_affected_window(pg_test, tmp_path):
     _run(pg_test, FakeBackfillAdapter(), report_dir=str(tmp_path / "first"))
 
@@ -571,6 +793,45 @@ def test_authoritative_revision_rebuilds_affected_window(pg_test, tmp_path):
         " WHERE stock_code='600001' ORDER BY trade_date",
     )
     assert [float(row[1]) for row in hfq] == pytest.approx([1.0, 2.0, 2.0, 5.0, 5.0])
+
+
+def test_authoritative_event_reclassifies_previously_no_event_stock(pg_test, tmp_path):
+    raw = {"600004": [
+        _bar("20261012", 10.0, 10.0, 0.0),
+        _bar("20261013", 10.0, 10.0, 0.0),
+        _bar("20261014", 8.0, 5.0, 60.0),
+        _bar("20261015", 8.0, 8.0, 0.0),
+        _bar("20261016", 8.0, 8.0, 0.0),
+    ]}
+    first = _run(
+        pg_test, FakeBackfillAdapter(events={}, raw=raw),
+        report_dir=str(tmp_path / "first"),
+    )
+    assert first["summary"]["classification"]["no_event_stocks"] == 1
+
+    events = _events_for("600004", "20261014", 2.0)
+    second = _run(
+        pg_test, FakeBackfillAdapter(events=events, raw=raw), force=True,
+        report_dir=str(tmp_path / "second"),
+    )
+
+    assert second["status"] == "ok", second["summary"]
+    assert second["summary"]["classification"]["event_stocks"] == 1
+    assert second["summary"]["classification"]["no_event_stocks"] == 0
+    state = _fetch(
+        pg_test,
+        "SELECT baseline_factor, factor_latest, rebuild_pending"
+        " FROM stock_factor_state WHERE stock_code='600004'",
+    )[0]
+    assert float(state[0]) == 1.0
+    assert float(state[1]) == 2.0
+    assert state[2] is False
+    factors = _fetch(
+        pg_test,
+        "SELECT factor_cum FROM stock_daily_hfq WHERE stock_code='600004'"
+        " ORDER BY trade_date",
+    )
+    assert [float(row[0]) for row in factors] == [1.0, 1.0, 2.0, 2.0, 2.0]
 
 
 def test_authoritative_retraction_deletes_stale_event_and_rebuilds_as_no_event(pg_test, tmp_path):

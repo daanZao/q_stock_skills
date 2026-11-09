@@ -1,4 +1,4 @@
-"""复权回填（issue #163）：逐日全市场事件集 + 逐日全市场 raw + 本地重建。
+"""复权回填（issue #163/#164）：逐日全市场事件集 + raw + 本地重建与迁移审计。
 
 范围与边界（spec #158 §6.1/§6.2）：
 - 窗口内每个历史交易日调用一次 baostock `query_daily_adjust_factor(date)`；
@@ -32,6 +32,7 @@ from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from .adapters.base import FetchError, fetch_failure_kind
 from .adjustment import rebuild_stock
+from .adjustment_audit import audit_adjustment_migration
 from .baostock_errors import BaostockError
 from .dates import (
     is_trading_time,
@@ -227,6 +228,58 @@ def _raw_window_stats(conn, start: str, end: str) -> dict[str, dict]:
             row[0]: {"rows": row[1], "first": row[2], "last": row[3]}
             for row in cur.fetchall()
         }
+
+
+def _legacy_none_audit(conn, start: str, end: str) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*), count(DISTINCT l.stock_code), min(l.trade_date),
+                   max(l.trade_date),
+                   count(*) FILTER (WHERE r.stock_code IS NOT NULL),
+                   count(*) FILTER (WHERE l.close IS NULL OR l.close <= 0),
+                   count(*) FILTER (
+                       WHERE r.stock_code IS NULL AND l.trade_date BETWEEN %s AND %s
+                   )
+            FROM stock_daily l
+            LEFT JOIN stock_daily_raw r
+              ON r.stock_code=l.stock_code AND r.trade_date=l.trade_date
+            WHERE l.adj='none'
+            """,
+            (start, end),
+        )
+        row = cur.fetchone()
+        cur.execute(
+            "SELECT coalesce(source, 'unknown'), count(*) FROM stock_daily"
+            " WHERE adj='none' GROUP BY coalesce(source, 'unknown') ORDER BY 1"
+        )
+        by_source = dict(cur.fetchall())
+    return {
+        "rows": row[0],
+        "stocks": row[1],
+        "first_trade_date": row[2],
+        "last_trade_date": row[3],
+        "covered_by_raw": row[4],
+        "invalid_close": row[5],
+        "raw_recheck_required": row[6],
+        "isolated_rows": row[0],
+        "merged_into_raw": 0,
+        "by_source": by_source,
+    }
+
+
+def _load_quarantined(conn, start: str, end: str) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT stock_code, trade_date FROM stock_daily_raw"
+            " WHERE trade_date BETWEEN %s AND %s AND (close IS NULL OR close <= 0)"
+            " ORDER BY stock_code, trade_date",
+            (start, end),
+        )
+        return [
+            {"stock_code": row[0], "trade_date": row[1], "reason": "invalid_close"}
+            for row in cur.fetchall()
+        ]
 
 
 def _raw_dates(conn, stock_code: str, start: str, end: str) -> list[str]:
@@ -725,7 +778,8 @@ def _write_csv(path: str, fieldnames: list[str], rows: list[dict]) -> None:
 def _write_artifacts(report_dir: str, *, days: list[dict], raw_days: list[dict],
                      events: list[dict], event_stocks: list[dict],
                      raw_results: list[dict], repairs: list[dict],
-                     summary: dict) -> dict:
+                     quarantined: list[dict], classification: list[dict],
+                     audit: dict, legacy_none: dict, summary: dict) -> dict:
     os.makedirs(report_dir, exist_ok=True)
     paths = {
         "factor_days": os.path.join(report_dir, "factor_days.csv"),
@@ -734,6 +788,11 @@ def _write_artifacts(report_dir: str, *, days: list[dict], raw_days: list[dict],
         "event_stocks": os.path.join(report_dir, "event_stocks.csv"),
         "raw_results": os.path.join(report_dir, "raw_results.csv"),
         "repairs": os.path.join(report_dir, "repairs.csv"),
+        "quarantined": os.path.join(report_dir, "quarantined.csv"),
+        "classification": os.path.join(report_dir, "stock_classification.csv"),
+        "stock_hashes": os.path.join(report_dir, "stock_hashes.csv"),
+        "raw_sample": os.path.join(report_dir, "raw_sample.csv"),
+        "legacy_none": os.path.join(report_dir, "legacy_none_audit.json"),
         "summary": os.path.join(report_dir, "summary.json"),
     }
     for key, rows in (("factor_days", days), ("raw_days", raw_days)):
@@ -763,8 +822,31 @@ def _write_artifacts(report_dir: str, *, days: list[dict], raw_days: list[dict],
         ["stock_code", "trade_date", "reason", "label", "detail"],
         repairs,
     )
-    with open(paths["summary"], "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, ensure_ascii=False, indent=2, default=str)
+    _write_csv(
+        paths["quarantined"],
+        ["stock_code", "trade_date", "reason"],
+        quarantined,
+    )
+    _write_csv(
+        paths["classification"],
+        ["stock_code", "classification", "reason"],
+        classification,
+    )
+    _write_csv(
+        paths["stock_hashes"],
+        ["stock_code", "raw_rows", "raw_hash", "event_rows", "event_hash",
+         "hfq_rows", "hfq_hash", "state_rows", "state_hash"],
+        audit["stock_hashes"],
+    )
+    _write_csv(
+        paths["raw_sample"],
+        ["stock_code", "trade_date", "classification", "close", "amount", "source",
+         "exchange", "price_year", "price_bucket"],
+        audit["raw_sample"],
+    )
+    for key, value in (("legacy_none", legacy_none), ("summary", summary)):
+        with open(paths[key], "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, default=str)
     return paths
 
 
@@ -1003,9 +1085,9 @@ def run_adjustment_backfill(
                     sum(1 for r in raw_results if r.get("pending")),
                 )
 
+        raw_stats = _raw_window_stats(conn, window_days[0], window_days[-1])
         no_event_results: list[dict] = []
         if event_set_complete and limit is None:
-            raw_stats = _raw_window_stats(conn, window_days[0], window_days[-1])
             no_event_codes = sorted(
                 set(raw_stats) - event_codes - retracted_codes
             )
@@ -1036,15 +1118,48 @@ def run_adjustment_backfill(
             result for result in retracted_results if result["status"] == "error"
         ]
 
+        selected_event_codes = {stock["stock_code"] for stock in selected}
+        classification_rows: list[dict] = []
+        skip_reasons: dict[str, int] = {}
+        for code in sorted(set(raw_stats) | event_codes | retracted_codes):
+            if code in selected_event_codes:
+                classification, reason = "event", ""
+            elif code in event_codes:
+                classification, reason = "skipped", "event_stock_limit"
+            elif code in retracted_codes:
+                classification, reason = "retracted", ""
+            elif event_set_complete and limit is None:
+                classification, reason = "no_event", ""
+            else:
+                classification = "unclassified"
+                reason = (
+                    "incomplete_event_set" if not event_set_complete
+                    else "event_stock_limit"
+                )
+            if reason:
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            classification_rows.append({
+                "stock_code": code, "classification": classification, "reason": reason,
+            })
+
         limited = limit is not None and len(event_stocks) > len(selected)
         failed_raw_days = [
-            result for result in raw_day_results if result["status"] in ("error", "empty")
+            result for result in raw_day_results
+            if result["status"] in ("error", "empty")
+            and window_days[0] <= result["trade_date"] <= window_days[-1]
         ]
+        audit = audit_adjustment_migration(conn, start_d, end_d, event_set_complete)
+        audit_failed = any(
+            audit["validation"][key] for key in (
+                "pending_states", "hfq_without_valid_raw", "valid_raw_without_hfq",
+                "state_without_raw", "classification_mismatches",
+            )
+        )
         if failed_days and not event_codes:
             status = "error"
         elif (
             failed_days or failed_raw_days or failed_stocks or repairs or limited
-            or retracted_failures
+            or retracted_failures or audit_failed
         ):
             status = "partial_error"
         else:
@@ -1057,10 +1172,9 @@ def run_adjustment_backfill(
         repair_counts: dict[str, int] = {}
         for repair in repairs:
             repair_counts[repair["reason"]] = repair_counts.get(repair["reason"], 0) + 1
-        raw_rows = sum(
-            result.get("rows", 0)
-            for result in raw_results + no_event_results + retracted_results
-        )
+        raw_rows = sum(stock["rows"] for stock in raw_stats.values())
+        quarantined = _load_quarantined(conn, start_d, end_d)
+        legacy_none = _legacy_none_audit(conn, start_d, end_d)
         summary = {
             "status": status,
             "stage": stage,
@@ -1103,6 +1217,22 @@ def run_adjustment_backfill(
                 ),
                 "pending": sum(1 for r in no_event_results if r.get("pending")),
             },
+            "classification": {
+                "event_set_complete": event_set_complete,
+                "factor_days_expected": len(window_days),
+                "factor_days_succeeded": len(window_days) - len(failed_days),
+                "factor_days_failed": len(failed_days),
+                "event_stocks": sum(
+                    1 for row in classification_rows if row["classification"] == "event"
+                ),
+                "no_event_stocks": len(no_event_results),
+                "retracted_stocks": len(retracted_results),
+                "unclassified_stocks": sum(
+                    1 for row in classification_rows
+                    if row["classification"] == "unclassified"
+                ),
+                "skip_reasons": skip_reasons,
+            },
             "raw": {
                 "rows": raw_rows,
                 "staging_d1_stocks": staging_d1,
@@ -1117,6 +1247,22 @@ def run_adjustment_backfill(
             "repair_counts": repair_counts,
             "retracted_rebuilt": len(retracted_results),
             "retracted_failed": len(retracted_failures),
+            "isolation": {
+                "rows": len(quarantined),
+                "stocks": len({row["stock_code"] for row in quarantined}),
+                "reasons": {"invalid_close": len(quarantined)} if quarantined else {},
+            },
+            "validation": audit["validation"],
+            "ordinary_raw_sample": audit["sample_summary"],
+            "skip_reasons": {
+                "factor_day_checkpoint": sum(
+                    1 for row in day_results if row["status"] == "skipped"
+                ),
+                "raw_day_checkpoint": sum(
+                    1 for row in raw_day_results if row["status"] == "skipped"
+                ),
+            },
+            "legacy_none": legacy_none,
             "duration_s": round(monotonic() - began, 3),
         }
         out_report = report_dir or os.path.join(
@@ -1126,7 +1272,9 @@ def run_adjustment_backfill(
             out_report, days=day_results, raw_days=raw_day_results,
             events=events_export, event_stocks=event_stocks,
             raw_results=raw_results + no_event_results + retracted_results,
-            repairs=repairs, summary=summary,
+            repairs=repairs, quarantined=quarantined,
+            classification=classification_rows, audit=audit,
+            legacy_none=legacy_none, summary=summary,
         )
         messages = ["数据处理完成"] + (["数据可以使用"] if complete else [])
         return {

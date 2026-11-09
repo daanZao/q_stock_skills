@@ -12,7 +12,8 @@ Issue [#163](https://github.com/daanZao/q_stock_skills/issues/163)，spec [#158]
 
 **不适用**：
 
-- 无事件票的分类、B0=1 与非正价隔离验收归 #164；其 raw 已由本命令采集，不再逐票重抓。
+- #164 已在同一入口接入无事件分类、B0=1、非正价隔离、legacy `adj=none`
+  只读盘点与迁移审计；raw 仍由本命令采集，不再逐票重抓。
 - 北交所批量（默认排除；`query_daily_adjust_factor` 只处理 sh/sz 个股前缀）。
 - 2023 年以前 legacy 数据的重算（旧 qfq 只读留档，不从 legacy 反推 raw/hfq）。
 - 全市场替代源回填：baostock 整体不可用时保留缺口与 error 台账，不自动改走
@@ -91,15 +92,21 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
 3. **raw**：对 D-1 与窗口内每个交易日调用 `fetch_astock_daily(date)`，即
    `query_daily_history_k_AStock(date)` 全市场 `adjustflag=3` raw。响应通过代码唯一、
    日期一致、raw 口径校验后整日替换 `stock_daily_raw`；失败保留旧事实并落 error。
-   D-1 只作窗口首日事件的基线输入，不进入 hfq、事件集或窗口查询交付。amount
+   D-1 只作窗口首日事件的基线输入，不进入 hfq、事件集或窗口查询交付；没有首日
+   事件需要它时，空 D-1 不单独构成窗口失败，需要但缺失时由基线校验置 pending。amount
    元→万元由适配层完成，`tradestatus`/`turn`/`pctChg` 原样入库。
 4. **重建**：本地逐票调用 `rebuild_stock(window_start, window_end)`，不再发逐票
    上游请求。事件票反推 `B0=B1×f1`，无事件票仅在事件集完整时以 B0=1 重建；
    逐事件做 B 路径 vs 权威 pctChg 价格路径对账（相对误差 ≤0.1% 为一致）。
-   窗口外已有 hfq/事件时拒绝重建，绝不回退窗口外派生。
+   窗口外已有 hfq/事件时拒绝重建，绝不回退窗口外派生。权威事件补录或撤销会触发
+   重新分类与重建。
 5. **待修复台账**：见下节；存在任何未决项时 `stage=rebuilt`，不输出
    「数据可以使用」。
-6. **导出**：因子日、raw 日、事件集、事件票清单、逐票重建结果、待修复明细、summary。
+6. **迁移审计（#164）**：以集合 SQL 汇总 raw/hfq/state 覆盖与无事件分类不变量，
+   导出每股四表业务摘要哈希（排除运行时间戳）和固定种子 `164` 的分层普通 raw
+   样本；同时只读盘点 legacy `adj=none`，所有旧行保持隔离，窗口内未被 raw 覆盖的
+   行列为重抓候选，默认合并数恒为 0。
+7. **导出**：因子日、raw 日、分类、逐票重建、隔离、旧数据盘点、哈希、样本与 summary。
 
 ## 断点续跑判据
 
@@ -162,7 +169,12 @@ WHERE rebuild_pending;
 | `event_stocks.csv` | 事件票清单：事件数、首/末事件日 |
 | `raw_results.csv` | 每票本地重建结果：成功/失败、窗口 raw 行数、pending、修复原因 |
 | `repairs.csv` | 待修复明细（股票、日期、原因、详情） |
-| `summary.json` | 窗口、逐日计数、事件/票数、上游请求数、耗时、status/stage |
+| `stock_classification.csv` | 窗口内事件/无事件/撤销/未分类/因 limit 跳过的股票及原因 |
+| `quarantined.csv` | close NULL/≤0 的 raw 隔离明细；原行仍保留在 raw |
+| `legacy_none_audit.json` | 旧 `adj=none` 的来源、日期、非正价、raw 覆盖、隔离与重抓候选聚合计数 |
+| `stock_hashes.csv` | 每股 raw/事件/hfq/state 行数与业务列摘要哈希，不含运行时间戳 |
+| `raw_sample.csv` | 固定种子 `164`，每类最多 100 股、每股最多 5 行，优先覆盖交易所/年份/价格区间/来源 strata；不做全量逐值对拍 |
+| `summary.json` | 窗口、完整性证明、分类/隔离/跳过分布、集合校验、抽样与上游计数、耗时、status/stage |
 
 CLI stdout 的最终 JSON 含相同 `summary` 与 `artifacts` 路径。存在失败、待修复
 或 `--limit` 时退出码为 1；只有 `status=ok` 且无未决项才输出「数据可以使用」。
@@ -260,9 +272,10 @@ WHERE section='stock_factor_repair'
 GROUP BY error_kind;
 ```
 
-上述 SQL 覆盖结构、首事件 B0、事件不变量、hfq 派生与覆盖关系的主要门禁；
-Golden 逐值、哈希幂等/续跑/修订撤销由 issue #165 的测试套件承担。正式回填后
-应先跑本组只读检查，再按 #166 切读。
+上述 SQL 与随回填生成的 `summary.validation`、`stock_hashes.csv` 覆盖结构、首事件
+B0、事件不变量、hfq 派生、覆盖关系和幂等证据；Golden 逐值、100+100 分层样本及
+完整八项硬验收由 issue #165 的测试套件承担。正式回填后应先跑本组只读检查，再按
+#166 切读。
 
 ## 回滚
 
