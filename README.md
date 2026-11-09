@@ -106,7 +106,7 @@ python3 -m venv .venv
 | 最近 90 日个股整窗刷新 | `qstock-scheduler daily --all --trading-days 90 --force --throttle 1` |
 | 指数日线回补 | `qstock-scheduler index --trading-days 90` |
 | 申万板块历史回补 | `qstock-scheduler backfill --source sw --trading-days 90 --force` |
-| 复权回填 A：事件集 + 有事件票 raw | `qstock-scheduler adj-backfill --trading-days 3 --limit 20` |
+| 复权回填：事件集 + 全市场 raw + 本地重建 | `qstock-scheduler adj-backfill --trading-days 3 --limit 20` |
 | 龙虎榜历史回补 | `qstock-scheduler lhb --trading-days 90` |
 | 历史覆盖核验 | `qstock-scheduler coverage --trading-days 90` |
 

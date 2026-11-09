@@ -1,4 +1,4 @@
-"""复权回填 A（issue #163）：逐日事件集 + 有事件票 raw/派生/续跑。
+"""复权回填（issue #163）：逐日事件集 + 全市场 raw/派生/续跑。
 
 测试打 `adjustment_backfill.run_adjustment_backfill` 核心层（CLI 专用、不经
 MCP），注入 fake baostock 适配器 + 真实 PG 测试库；覆盖成功空日、失败重试、
@@ -95,7 +95,7 @@ def _raw_series():
 
 
 class FakeBackfillAdapter:
-    """baostock 两接口 fake：按日事件、按票 raw，可注入失败次数。"""
+    """baostock 两接口 fake：按日事件、按日全市场 raw，可注入失败次数。"""
 
     name = "baostock"
 
@@ -107,6 +107,7 @@ class FakeBackfillAdapter:
         self.raw_failures = dict(raw_failures or {})
         self.factor_calls: list[str] = []
         self.raw_calls: list[dict] = []
+        self.raw_day_calls: list[str] = []
 
     def fetch_daily_adjust_factor(self, trade_date):
         self.factor_calls.append(trade_date)
@@ -115,6 +116,18 @@ class FakeBackfillAdapter:
             self.factor_failures[trade_date] = remaining - 1
             raise FetchError(f"factor {trade_date} unavailable")
         return [dict(event) for event in self.events.get(trade_date, [])]
+
+    def fetch_astock_daily(self, trade_date):
+        self.raw_day_calls.append(trade_date)
+        remaining = self.raw_failures.get(trade_date, 0)
+        if remaining > 0:
+            self.raw_failures[trade_date] = remaining - 1
+            raise FetchError(f"raw {trade_date} unavailable")
+        return [
+            {**row, "stock_code": stock_code, "adj": "none"}
+            for stock_code, rows in self.raw.items() for row in rows
+            if row["trade_date"] == trade_date
+        ]
 
     def fetch_daily(self, stock_code, start, end, adj="qfq"):
         self.raw_calls.append(
@@ -169,11 +182,12 @@ def _ledger(dsn, *, section=None, error_kind=None):
     return _fetch(dsn, sql + " ORDER BY id", tuple(args))
 
 
-def test_happy_path_ingests_events_fetches_only_event_stocks_and_exports(pg_test, tmp_path):
+def test_happy_path_ingests_events_fetches_market_raw_by_day_and_exports(pg_test, tmp_path):
     adapter = FakeBackfillAdapter()
     out = _run(pg_test, adapter, report_dir=str(tmp_path))
 
-    assert out["status"] == "ok"
+    assert _fetch(pg_test, "SELECT count(*) FROM stock_daily_raw")[0][0] == 16
+    assert out["status"] == "ok", out["summary"]
     assert out["stage"] == "verified"
     assert out["messages"] == ["数据处理完成", "数据可以使用"]
     assert out["summary"]["days"] == {"ok": 4, "empty": 1, "error": 0, "skipped": 0}
@@ -181,21 +195,14 @@ def test_happy_path_ingests_events_fetches_only_event_stocks_and_exports(pg_test
     assert out["summary"]["events"] == 4
     assert out["summary"]["event_stocks"] == 3
     assert out["summary"]["upstream_requests"] == {
-        "factor_attempts": 5, "raw_attempts": 3, "total": 8,
+        "factor_attempts": 5, "raw_attempts": 6, "total": 11,
     }
     assert out["summary"]["raw"]["staging_d1_stocks"] == 1
 
-    # 每个历史交易日各调用一次；非事件票不进入 raw 阶段
+    # 因子与 raw 都按日获取；额外 D-1 只用于窗口首日事件的基线输入
     assert adapter.factor_calls == WINDOW_DAYS
-    assert [call["stock_code"] for call in adapter.raw_calls] == [
-        "600001", "600002", "600003",
-    ]
-    assert all(call["adj"] == "none" for call in adapter.raw_calls)
-    assert all(call["end"] == END for call in adapter.raw_calls)
-    starts = {call["stock_code"]: call["start"] for call in adapter.raw_calls}
-    assert starts["600003"] == D1  # 窗口首日事件需要窗口外 D-1
-    assert starts["600001"] == START
-    assert starts["600002"] == START
+    assert adapter.raw_day_calls == [D1] + WINDOW_DAYS
+    assert adapter.raw_calls == []
 
     # 事件表只写实际事件；非事件票无占位因子
     events = _fetch(
@@ -254,18 +261,18 @@ def test_happy_path_ingests_events_fetches_only_event_stocks_and_exports(pg_test
     assert [float(row[2]) for row in hfq_a] == pytest.approx([1.0, 2.0, 2.0, 4.0, 4.0])
     assert [float(row[1]) for row in hfq_a] == pytest.approx([10.0, 16.0, 18.0, 36.0, 36.0])
 
-    # 台账：逐日事件状态 + 逐票 raw 成功 + 无待修复
+    # 台账：逐日事件 + D-1/窗口内逐日 raw + 无待修复
     event_ledger = _ledger(pg_test, section="stock_adjust_factor")
     assert len(event_ledger) == len(WINDOW_DAYS)
     assert sorted(row[1] for row in event_ledger) == ["empty", "ok", "ok", "ok", "ok"]
     raw_ledger = _ledger(pg_test, section="stock_daily_raw")
-    assert len(raw_ledger) == 3
+    assert len(raw_ledger) == 6
     assert all(row[1] == "ok" for row in raw_ledger)
     assert _ledger(pg_test, section="stock_factor_repair") == []
 
     # 导出产物：事件集、事件票、逐日状态、汇总
     for name in (
-        "factor_days.csv", "events.csv", "event_stocks.csv",
+        "factor_days.csv", "raw_days.csv", "events.csv", "event_stocks.csv",
         "raw_results.csv", "repairs.csv", "summary.json",
     ):
         assert (tmp_path / name).exists(), name
@@ -275,6 +282,55 @@ def test_happy_path_ingests_events_fetches_only_event_stocks_and_exports(pg_test
         summary = json.load(handle)
     assert summary["status"] == "ok"
     assert summary["window"] == {"start": START, "end": END}
+
+
+def test_no_event_stock_uses_market_raw_and_unit_baseline(pg_test, tmp_path):
+    raw = _raw_series()
+    raw["600004"] = [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]
+    out = _run(pg_test, FakeBackfillAdapter(raw=raw), report_dir=str(tmp_path))
+
+    assert out["status"] == "ok", out["summary"]
+    state = _fetch(
+        pg_test,
+        "SELECT baseline_factor, factor_latest, latest_trade_date, rebuild_pending"
+        " FROM stock_factor_state WHERE stock_code='600004'",
+    )[0]
+    assert float(state[0]) == pytest.approx(1.0)
+    assert float(state[1]) == pytest.approx(1.0)
+    assert state[2:] == (END, False)
+    factors = _fetch(
+        pg_test,
+        "SELECT factor_cum FROM stock_daily_hfq WHERE stock_code='600004'"
+        " ORDER BY trade_date",
+    )
+    assert [float(row[0]) for row in factors] == pytest.approx([1.0] * 5)
+    assert out["summary"]["no_event_stock_processing"]["ok"] == 1
+    results = list(csv.DictReader((tmp_path / "raw_results.csv").open(encoding="utf-8")))
+    assert "600004" in [row["stock_code"] for row in results]
+
+
+def test_failed_raw_day_at_window_edge_marks_no_event_stock_pending(pg_test, tmp_path):
+    raw = _raw_series()
+    raw["600004"] = [_bar(day, 7.0, 7.0, 0.0) for day in WINDOW_DAYS]
+    first = FakeBackfillAdapter(raw=raw, raw_failures={START: 99})
+    out = _run(pg_test, first, report_dir=str(tmp_path / "first"))
+
+    assert out["status"] == "partial_error"
+    state = _fetch(
+        pg_test,
+        "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='600004'",
+    )[0]
+    assert state[0] is True
+
+    resumed = _run(
+        pg_test, FakeBackfillAdapter(raw=raw), report_dir=str(tmp_path / "resumed")
+    )
+    assert resumed["status"] == "ok", resumed["summary"]
+    state = _fetch(
+        pg_test,
+        "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code='600004'",
+    )[0]
+    assert state[0] is False
 
 
 def _seed_event(dsn, stock_code, ex_date, factor_cum):
@@ -330,21 +386,24 @@ def test_factor_day_failure_is_error_not_empty_and_keeps_old_events(pg_test, tmp
     assert out["messages"] == ["数据处理完成"]
 
 
-def test_resume_skips_completed_factor_days_and_valid_raw_stocks(pg_test, tmp_path):
-    first = FakeBackfillAdapter(raw_failures={"600002": 99})
+def test_resume_skips_completed_factor_and_raw_days(pg_test, tmp_path):
+    failed_day = "20261014"
+    first = FakeBackfillAdapter(raw_failures={failed_day: 99})
     out_first = _run(pg_test, first, report_dir=str(tmp_path / "first"))
     assert out_first["status"] == "partial_error"
-    assert out_first["summary"]["raw"]["failed_stocks"] == 1
-    assert [call["stock_code"] for call in first.raw_calls].count("600002") == 3
+    assert out_first["summary"]["raw_day_processing"]["error"] == 1
+    assert first.raw_day_calls.count(failed_day) == 3
+    assert first.raw_calls == []
     repairs = _ledger(pg_test, section="stock_factor_repair")
-    assert any(row[4] == "raw_unavailable" for row in repairs)
+    assert any(row[4] == "raw_gap" for row in repairs)
 
-    # 断点续跑：已完成因子日零请求，已验证 raw 票零请求；只补失败票
+    # 已完成因子日/raw 日零请求，只补失败日
     second = FakeBackfillAdapter()
     out_second = _run(pg_test, second, report_dir=str(tmp_path / "second"))
-    assert out_second["status"] == "ok"
+    assert out_second["status"] == "ok", out_second["summary"]
     assert second.factor_calls == []
-    assert [call["stock_code"] for call in second.raw_calls] == ["600002"]
+    assert second.raw_day_calls == [failed_day]
+    assert second.raw_calls == []
     assert out_second["summary"]["upstream_requests"]["total"] == 1
 
     state = _fetch(
@@ -370,6 +429,7 @@ def test_new_listing_without_d1_is_pending_not_provisional(pg_test, tmp_path):
         _bar("20261015", 8.0, 8.0, 0.0),
         _bar("20261016", 8.0, 8.0, 0.0),
     ]}
+    raw["600004"] = [_bar(day, 7.0, 7.0, 0.0) for day in [D1] + WINDOW_DAYS]
     adapter = FakeBackfillAdapter(events=events, raw=raw)
     out = _run(pg_test, adapter, report_dir=str(tmp_path))
 
@@ -453,7 +513,7 @@ def test_invalid_close_kept_in_raw_quarantined_and_repaired(pg_test, tmp_path):
     adapter = FakeBackfillAdapter(
         events={
             "20261012": [], "20261013": [{"stock_code": "600001", "factor_cum": 2.0}],
-            "20261014": [], "20261015": [{"stock_code": "600001", "factor_cum": 4.0}],
+            "20261014": [], "20261015": [],
             "20261016": [],
         },
         raw=raw,
@@ -477,6 +537,9 @@ def test_invalid_close_kept_in_raw_quarantined_and_repaired(pg_test, tmp_path):
                   if row[4] == "invalid_close"]
     assert len(quarantine) == 1
     assert "600001:20261014" in quarantine[0][5]
+    results = list(csv.DictReader((tmp_path / "raw_results.csv").open(encoding="utf-8")))
+    assert results[0]["pending"] == "True"
+    assert out["summary"]["event_stock_processing"]["pending"] == 1
 
 
 def test_authoritative_revision_rebuilds_affected_window(pg_test, tmp_path):
@@ -557,7 +620,8 @@ def test_limit_marks_limited_and_does_not_claim_complete(pg_test, tmp_path):
     assert out["messages"] == ["数据处理完成"]
     assert out["summary"]["event_stock_processing"]["limited"] is True
     assert out["summary"]["event_stock_processing"]["selected"] == 1
-    assert [call["stock_code"] for call in adapter.raw_calls] == ["600001"]
+    assert adapter.raw_calls == []
+    assert adapter.raw_day_calls == [D1] + WINDOW_DAYS  # limit 只限本地重建
     stocks = list(csv.DictReader((tmp_path / "event_stocks.csv").open(encoding="utf-8")))
     assert len(stocks) == 3  # 导出仍是完整事件票清单
 
@@ -657,7 +721,7 @@ def test_resume_skips_do_not_consume_request_throttle(pg_test, tmp_path, monkeyp
 
 
 class CrashingRawAdapter(FakeBackfillAdapter):
-    def fetch_daily(self, stock_code, start, end, adj="qfq"):
+    def fetch_astock_daily(self, trade_date):
         raise RuntimeError("simulated crash during raw phase")
 
 

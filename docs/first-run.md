@@ -222,11 +222,11 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 - **结果判断**：关注 `status`、逐板块结果和是否出现熔断；完成后用 `coverage` 验收窗口。
 - **详细手册**：[申万板块 CLI](sw-boards-cli.md)。
 
-#### `adj-backfill`：复权回填 A（逐日事件集 + 有事件票 raw）
+#### `adj-backfill`：复权回填（逐日事件集 + 全市场 raw）
 
 - **写库**：写 `stock_adjust_factor`、`stock_daily_raw`、`stock_daily_hfq`、
   `stock_factor_state`，并落 `stock_adjust_factor`/`stock_daily_raw`/
-  `stock_factor_repair` 三类审计台账。
+  `stock_factor_repair` 三类审计台账。raw 按日全市场采集，随后本地按票重建。
 - **常用命令**：
 
   ```bash
@@ -236,17 +236,17 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 
 - **关键参数**：`--start` 缺省 `QSTOCK_ADJ_WINDOW_START`/`20230101`；
   `--trading-days` 与 `--start` 互斥；`--end` 必须覆盖库内最新复权事实
-  （否则 `window_behind_data` 拒绝，历史窗口请用隔离库）；`--limit` 仅冒烟
-  并标记 `limited`；`--force` 忽略台账断点整窗重抓；`--report-dir` 指定
-  CSV/summary 产物目录。
+  （否则 `window_behind_data` 拒绝，历史窗口请用隔离库）；`--limit` 只限制事件票
+  本地重建，不减少按日 raw 请求，并标记 `limited`；`--force` 忽略台账断点整窗重抓；
+  `--report-dir` 指定 CSV/summary 产物目录。
 - **结果判断**：只有 `status="ok"` 且无 `stock_factor_repair` 未决项才输出
   「数据可以使用」；`partial_error` 时先看 `summary.failed_days`、
-  `summary.repair_counts` 与 `repairs.csv`。断点续跑看
-  `summary.upstream_requests.total`（全部命中时应为 0）。
+  `summary.raw_day_processing.failed_days`、`summary.repair_counts` 与 `repairs.csv`。
+  断点续跑看 `summary.upstream_requests.total`（全部命中时应为 0）。
 - **租约**：直接运行 `adj-backfill`，首次实际抓取自动 acquire，命令结束 finally release；
   不要并发 morning/close/daily。锁冲突返回 `baostock_locked`；确认持有进程终止后才用
   `release --force` 清理 stale。详见 [baostock 实例租约](baostock-lease.md)。
-- **详细手册**：[复权回填 A CLI](adj-backfill-cli.md)。
+- **详细手册**：[复权回填 CLI](adj-backfill-cli.md)。
 
 #### `lhb`：龙虎榜单日抓取、历史回溯与对拍
 

@@ -1,24 +1,20 @@
-"""复权回填 A（issue #163）：逐日全市场事件集 + 只对有事件票重抓 raw。
+"""复权回填（issue #163）：逐日全市场事件集 + 逐日全市场 raw + 本地重建。
 
 范围与边界（spec #158 §6.1/§6.2）：
 - 窗口内每个历史交易日调用一次 baostock `query_daily_adjust_factor(date)`；
   成功空结果记 empty，失败重试后仍失败记 error，绝不当作“当日无事件”。
 - 事件集写入 `stock_adjust_factor`（B 只取 backAdjustFactor）；成功重查整日
   替换该日事件集以支持修订/撤销，受影响票重建，非事件票不写占位因子。
-- 只对窗口内有事件的股票逐只重抓 `adjustflag=3` raw（含 tradestatus/turn/
-  pctChg），amount 元→万元由适配层完成；失败重试并落台账。
-- 首个事件用 `B0=B1×f1` 反推窗口基线；窗口首日即事件时额外取窗口外最后
-  一个交易日作 D-1 计算输入，但不写入 hfq。B0/raw/pctChg 不可验证时
-  `rebuild_stock` 置 NULL/NULL+pending，本模块再落待修复台账。
-- 断点续跑读 `collection_log`：因子按日、raw 按票校验台账与库内事实仍有效
-  才跳过；`--force` 忽略台账整窗重抓。全程串行，不接替代源。
+- D-1 与窗口内每个交易日调用一次 `query_daily_history_k_AStock(date)`，整日
+  替换全市场 `adjustflag=3` raw；amount 元→万元由适配层完成，失败重试并落台账。
+- 本地按股票读取库内 raw：事件票以 `B0=B1×f1` 反推基线，无事件票 B0=1；
+  D-1 不写入 hfq。B0/raw/pctChg 不可验证时置 pending 并落待修复台账。
+- 断点续跑读 `collection_log`：因子日/raw 日校验台账与库内行数一致才跳过；
+  `--force` 忽略台账整窗重抓。全程串行，不接替代源。
 
-数据源纪律：2026-11-04/05 已验证单会话串行、相邻请求 ≥1.5s、单请求 120s
-外部硬超时；长期 TPS/并发上限与全历史完备率仍待验证。本模块固定串行并
-默认 1.5s 间隔，不放量。2026-11-05 正式回填实测：每请求登录/登出跑约 508
-个因子日后，baostock 登录/查询退化到 20s 无响应（TCP 仍可达），故正式回填
-改用进程内 `BaostockApi` 单登录会话串行取数；长会话下全量
-可承载性仍待正式回填验证。
+数据源纪律：固定单会话串行、相邻请求 ≥1.5s、单请求 60s 外部硬超时。
+2026-11-08 全市场 raw 只读样本（20230103–05、20261103）单日 4906/5224 行、
+约 6–10 秒，全部 adj=none 且含停牌行；长期容量与全历史完备率仍待全窗口验证。
 """
 
 import csv
@@ -60,7 +56,6 @@ ADJ_BACKFILL_RETRIES = 3
 ADJ_BACKFILL_BACKOFF_S = (0.5, 1.0)
 PROGRESS_LOG_EVERY = 20
 PROGRESS_LOG_INTERVAL_S = 60
-RAW_DETAIL_PREFIX = "adj-backfill raw"
 EVENT_SECTION = "stock_adjust_factor"
 RAW_SECTION = "stock_daily_raw"
 REPAIR_SECTION = "stock_factor_repair"
@@ -71,8 +66,9 @@ REPAIR_REASON_LABELS = {
     "price_path_unverified": "事件日缺少 D-1 raw 或权威 pctChg，价格路径不可验证",
     "raw_gap": "窗口内 raw 缺少交易日",
     "invalid_close": "close 为 NULL 或 ≤0，已隔离不派生",
-    "raw_unavailable": "事件票 raw 抓取失败或上游无数据",
-    "raw_refresh_failed": "raw 重抓失败，沿用库内已有 raw 重建",
+    "raw_unavailable": "库内无有效 raw（通常由全市场 raw 日失败导致）",
+    "raw_refresh_failed": "历史逐票 raw 重抓失败，沿用库内已有 raw 重建",
+    "rebuild_failed": "本地复权重建失败",
 }
 
 sleep = time.sleep
@@ -123,10 +119,6 @@ def _event_detail_prefix(start: str, end: str) -> str:
     return f"adj-backfill event {start}~{end}"
 
 
-def _raw_detail_prefix(stock_code: str, start: str, end: str) -> str:
-    return f"{RAW_DETAIL_PREFIX} {stock_code} {start}~{end}"
-
-
 def _failure_kind(error) -> str:
     kind = fetch_failure_kind(error) if error is not None else "fetch_failed"
     if kind == "connection":
@@ -169,6 +161,33 @@ def _day_checkpoints(conn, start: str, end: str) -> dict[str, dict]:
         }
 
 
+def _raw_day_checkpoints(conn, start: str, end: str) -> dict[str, dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (trade_date) trade_date, status, rows
+            FROM collection_log
+            WHERE section=%s AND detail LIKE %s
+            ORDER BY trade_date, id DESC
+            """,
+            (RAW_SECTION, f"adj-backfill raw-day {start}~{end}%"),
+        )
+        return {
+            row[0]: {"status": row[1], "rows": row[2] or 0}
+            for row in cur.fetchall()
+        }
+
+
+def _raw_day_counts(conn, start: str, end: str) -> dict[str, int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT trade_date, count(*) FROM stock_daily_raw"
+            " WHERE trade_date BETWEEN %s AND %s GROUP BY trade_date",
+            (start, end),
+        )
+        return dict(cur.fetchall())
+
+
 def _load_retracted_codes(conn, start: str, end: str) -> set[str]:
     """读窗口内已落库的事件撤销标记（崩溃后续跑仍能重建被撤销票）。"""
     with conn.cursor() as cur:
@@ -194,26 +213,6 @@ def _event_counts(conn, start: str, end: str) -> dict[str, int]:
             (start, end),
         )
         return {row[0]: row[1] for row in cur.fetchall()}
-
-
-def _raw_checkpoints(conn, start: str, end: str) -> dict[str, dict]:
-    """raw 逐票最近一次回填台账（只认本模块 detail 前缀且窗口一致的行）。"""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT detail, status FROM collection_log"
-            " WHERE section = %s AND detail LIKE %s ORDER BY id DESC",
-            (RAW_SECTION, RAW_DETAIL_PREFIX + " %"),
-        )
-        rows = cur.fetchall()
-    result: dict[str, dict] = {}
-    for detail, status in rows:
-        tokens = (detail or "").split(" ")
-        if len(tokens) < 4 or tokens[3] != f"{start}~{end}":
-            continue
-        stock_code = tokens[2]
-        if stock_code not in result:
-            result[stock_code] = {"status": status, "detail": detail}
-    return result
 
 
 def _raw_window_stats(conn, start: str, end: str) -> dict[str, dict]:
@@ -447,27 +446,6 @@ def _event_stock_rows(conn, start: str, end: str) -> list[dict]:
 # ---------------------------------------------------------------- raw + 派生
 
 
-def _fetch_raw_stock(adapter, stock_code: str, start: str, end: str,
-                     retries: int, pacer: _Pacer) -> dict:
-    rows, attempts, error = _fetch_with_retries(
-        lambda: adapter.fetch_daily(stock_code, start, end, adj="none"),
-        retries, pacer,
-    )
-    return {"rows": rows, "attempts": attempts, "error": error}
-
-
-def _has_valid_close(row: dict) -> bool:
-    close = row.get("close")
-    return close is not None and close > 0
-
-
-def _window_rows(rows: list[dict], start: str, end: str) -> list[dict]:
-    return [
-        row for row in rows
-        if start <= str(row.get("trade_date") or "") <= end
-    ]
-
-
 def _missing_trading_days(dates: list[str]) -> list[str]:
     if len(dates) < 2:
         return []
@@ -476,12 +454,15 @@ def _missing_trading_days(dates: list[str]) -> list[str]:
     return [day for day in expected if day not in actual]
 
 
-def _raw_gap_dates(raw_rows: list[dict], start: str, end: str) -> list[str]:
+def _raw_gap_dates(raw_rows: list[dict], start: str, end: str,
+                   known_missing: list[str] | None = None) -> list[str]:
     dates = sorted(
         row["trade_date"] for row in raw_rows
         if start <= row["trade_date"] <= end
     )
-    return _missing_trading_days(dates)
+    # 首尾之外的股票生命周期边界不凭空推断；本轮明确失败的 raw 日则始终
+    # 是未知缺口，即使它位于窗口首尾，也不能让本地重建误判 complete。
+    return sorted(set(_missing_trading_days(dates)) | set(known_missing or []))
 
 
 def _reasons_for_snapshot(snapshot: dict, gap_details: list[str],
@@ -539,149 +520,124 @@ def _record_repairs(conn, stock_code: str, trade_date: str,
     return repairs
 
 
-def _record_raw_ledger(conn, stock_code: str, start: str, end: str, *,
-                       status: str, rows: int, attempts: int,
-                       source: str = "baostock",
-                       error_kind: str | None = None,
-                       detail: str | None = None, started=None) -> None:
+def _ingest_raw_day(conn, adapter, trade_date: str, start: str, end: str,
+                    retries: int, pacer: _Pacer) -> dict:
+    started = _utcnow()
+    rows, attempts, error = _fetch_with_retries(
+        lambda: adapter.fetch_astock_daily(trade_date), retries, pacer
+    )
+    if rows is None:
+        kind = _failure_kind(error)
+        record_collection(
+            conn, trade_date=trade_date, section=RAW_SECTION, status="error",
+            error_kind=kind,
+            detail=f"adj-backfill raw-day {start}~{end} attempts={attempts}: {error}",
+            started_at=started,
+        )
+        return {
+            "trade_date": trade_date, "status": "error", "rows": 0,
+            "attempts": attempts, "error_kind": kind, "detail": str(error),
+        }
+
+    by_code = {row.get("stock_code"): row for row in rows}
+    invalid = [
+        row for row in rows
+        if not row.get("stock_code")
+        or str(row.get("trade_date")) != trade_date
+        or row.get("adj") not in (None, "none")
+    ]
+    if len(by_code) != len(rows) or invalid:
+        record_collection(
+            conn, trade_date=trade_date, section=RAW_SECTION, status="error",
+            error_kind="fetch_failed",
+            detail=(
+                f"adj-backfill raw-day {start}~{end} attempts={attempts}; "
+                f"rows={len(rows)}; unique_codes={len(by_code)}; invalid={len(invalid)}"
+            ),
+            started_at=started,
+        )
+        return {
+            "trade_date": trade_date, "status": "error", "rows": 0,
+            "attempts": attempts, "error_kind": "fetch_failed",
+            "detail": "全市场 raw 日响应存在重复代码、错日期或非 raw 口径",
+        }
+
+    values = [
+        [
+            row["stock_code"], trade_date, row.get("open"), row.get("high"),
+            row.get("low"), row.get("close"), row.get("preclose"),
+            row.get("volume"), row.get("amount"), row.get("amplitude"),
+            row.get("change_percent"), row.get("change_amount"),
+            row.get("turnover_rate"), row.get("tradestatus"),
+            row.get("source", adapter.name),
+        ]
+        for row in sorted(by_code.values(), key=lambda item: item["stock_code"])
+    ]
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM stock_daily_raw WHERE trade_date=%s", (trade_date,))
+        if values:
+            execute_values(
+                cur,
+                """
+                INSERT INTO stock_daily_raw (stock_code, trade_date,
+                    open, high, low, close, preclose, volume, amount, amplitude,
+                    change_percent, change_amount, turnover_rate, tradestatus, source)
+                VALUES %s
+                """,
+                values,
+            )
+        conn.commit()
+    status = "ok" if values else "empty"
     record_collection(
-        conn, trade_date=end, section=RAW_SECTION, status=status,
-        source=source, rows=rows, error_kind=error_kind,
-        detail=(
-            f"{_raw_detail_prefix(stock_code, start, end)} attempts={attempts}"
-            + (f": {detail}" if detail else "")
-        ),
+        conn, trade_date=trade_date, section=RAW_SECTION, status=status,
+        source=adapter.name, rows=len(values),
+        error_kind=None if values else "no_data_for_date",
+        detail=f"adj-backfill raw-day {start}~{end} attempts={attempts}",
         started_at=started,
     )
+    return {
+        "trade_date": trade_date, "status": status, "rows": len(values),
+        "attempts": attempts, "error_kind": None if values else "no_data_for_date",
+        "detail": None,
+    }
 
 
-def _process_event_stock(conn, adapter, stock: dict, start: str, end: str,
-                         window_days: list[str], *, force: bool,
-                         retries: int, checkpoints: dict[str, dict],
-                         raw_stats: dict[str, dict], pacer: _Pacer) -> dict:
-    """抓 raw（或复用断点）并重建单票；返回结果与待修复原因。"""
+def _rebuild_event_stock(conn, stock: dict, window_days: list[str],
+                         known_missing: list[str]) -> dict:
+    """复用逐日落库的全市场 raw 重建事件票，不再发起逐票请求。"""
     stock_code = stock["stock_code"]
     first_event = stock["first"]
-    needs_d1 = first_event == window_days[0]
-    fetch_start = prev_trading_day(window_days[0]) if needs_d1 else window_days[0]
-    checkpoint = checkpoints.get(stock_code)
-    stats = raw_stats.get(stock_code) or {}
-    raw_dates = (
-        _raw_dates(conn, stock_code, window_days[0], window_days[-1])
-        if checkpoint is not None else []
-    )
-    d1 = prev_trading_day(first_event)
-    d1_present = (
-        _has_row(conn, stock_code, d1)
-        if d1 < window_days[0] else d1 in set(raw_dates)
-    )
-    # 上市日晚于 D-1 时没有 D-1 是事实边界（新股/次新），重抓也补不出；
-    # 其余缺 D-1 或窗口内断档都算“仍无效”，必须重抓。
-    d1_unavailable_by_listing = bool(raw_dates) and raw_dates[0] > d1
-    gaps = set(_missing_trading_days(raw_dates))
-    reusable = (
-        not force
-        and checkpoint is not None
-        and checkpoint["status"] == "ok"
-        and bool(raw_dates)
-        and first_event in set(raw_dates)
-        and raw_dates[-1] >= stock["last"]
-        and (d1_present or d1_unavailable_by_listing)
-        and not gaps
-    )
-
-    started = _utcnow()
-    attempts = 0
-    fetch_failed = False
-    skipped = False
-    rows: list[dict] = []
-    if reusable:
-        skipped = True
-    else:
-        fetched = _fetch_raw_stock(
-            adapter, stock_code, fetch_start, end, retries, pacer
-        )
-        attempts = fetched["attempts"]
-        if fetched["rows"] is None:
-            fetch_failed = True
-            error = fetched["error"]
-            kind = _failure_kind(error)
-            _record_raw_ledger(
-                conn, stock_code, start, end, status="error", rows=0,
-                attempts=attempts, source=adapter.name, error_kind=kind,
-                detail=str(error), started=started,
-            )
-            if stats.get("rows", 0) == 0:
-                reasons = {"raw_unavailable": [str(error)]}
-                repairs = _record_repairs(conn, stock_code, first_event, reasons)
-                return {
-                    "stock_code": stock_code, "status": "error", "rows": 0,
-                    "attempts": attempts, "error_kind": kind,
-                    "repairs": repairs,
-                }
-            rows = []
-        else:
-            rows = fetched["rows"]
-            in_window = [
-                row for row in _window_rows(rows, window_days[0], window_days[-1])
-                if _has_valid_close(row)
-            ]
-            if not in_window and stats.get("rows", 0) == 0:
-                _record_raw_ledger(
-                    conn, stock_code, start, end, status="empty", rows=0,
-                    attempts=attempts, source=adapter.name,
-                    error_kind="no_data_for_date", detail="上游返回空",
-                    started=started,
-                )
-                reasons = {"raw_unavailable": ["上游返回空"]}
-                repairs = _record_repairs(conn, stock_code, first_event, reasons)
-                return {
-                    "stock_code": stock_code, "status": "empty", "rows": 0,
-                    "attempts": attempts, "error_kind": "no_data_for_date",
-                    "repairs": repairs,
-                }
-
     try:
         snapshot = rebuild_stock(
-            conn, stock_code, rows, [],
+            conn, stock_code, [], [],
             window_start=window_days[0], window_end=window_days[-1],
         )
     except Exception as e:  # noqa: BLE001 - 单票失败不终止回填
         log.warning("adj-backfill 重建失败 %s: %s", stock_code, e)
-        _record_raw_ledger(
-            conn, stock_code, start, end, status="error", rows=len(rows),
-            attempts=attempts, source=adapter.name,
-            error_kind="rebuild_failed", detail=str(e), started=started,
+        record_collection(
+            conn, trade_date=stock["last"], section=REPAIR_SECTION, status="error",
+            source="adj-backfill", error_kind="rebuild_failed",
+            detail=f"adj-backfill rebuild {stock_code}: {e}",
         )
         return {
-            "stock_code": stock_code, "status": "error", "rows": len(rows),
-            "attempts": attempts, "error_kind": "rebuild_failed",
-            "repairs": [],
+            "stock_code": stock_code, "status": "error", "rows": 0,
+            "attempts": 0, "error_kind": "rebuild_failed", "repairs": [],
         }
-
-    if not skipped and not fetch_failed:
-        window_count = len(_window_rows(rows, window_days[0], window_days[-1]))
-        _record_raw_ledger(
-            conn, stock_code, start, end,
-            status="ok" if window_count else "empty", rows=window_count,
-            attempts=attempts, source=adapter.name, started=started,
-            error_kind=None if window_count else "no_data_for_date",
-        )
 
     snapshot_raw = snapshot.get("raw_rows") or []
     raw_dates = sorted(
         row["trade_date"] for row in snapshot_raw
         if window_days[0] <= row["trade_date"] <= window_days[-1]
     )
-    gap_details = _raw_gap_dates(snapshot_raw, window_days[0], window_days[-1])
+    gap_details = _raw_gap_dates(
+        snapshot_raw, window_days[0], window_days[-1], known_missing
+    )
     if raw_dates and first_event not in set(raw_dates):
         gap_details.append(f"first_event={first_event}")
     if raw_dates and raw_dates[-1] < stock["last"]:
         gap_details.append(f"last_event={stock['last']}")
-    reasons = _reasons_for_snapshot(
-        snapshot, gap_details, refresh_failed=fetch_failed
-    )
-    if reasons or fetch_failed:
+    reasons = _reasons_for_snapshot(snapshot, gap_details, refresh_failed=False)
+    if reasons:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE stock_factor_state SET rebuild_pending=true"
@@ -693,30 +649,36 @@ def _process_event_stock(conn, adapter, stock: dict, start: str, end: str,
     state = snapshot.get("state") or {}
     return {
         "stock_code": stock_code,
-        "status": "skipped" if skipped else ("error" if fetch_failed else "ok"),
-        "rows": len([
-            row for row in (snapshot.get("raw_rows") or [])
-            if window_days[0] <= row["trade_date"] <= window_days[-1]
-        ]),
-        "attempts": attempts,
-        "skipped": skipped,
-        "fetched": not skipped,
-        "pending": bool(state.get("rebuild_pending")),
+        "status": "ok" if state else "error",
+        "rows": len(raw_dates),
+        "attempts": 0,
+        "skipped": False,
+        "pending": bool(state.get("rebuild_pending") or reasons),
         "repairs": repairs,
     }
 
 
-def _rebuild_retracted(conn, stock_code: str, start: str, end: str) -> dict:
-    """事件被撤销的票：复用库内 raw 重建为无事件基线（不重抓）。"""
+def _rebuild_without_events(conn, stock_code: str, start: str, end: str,
+                            known_missing: list[str]) -> dict:
+    """复用库内 raw 重建无事件票或事件已撤销票，不再发起上游请求。"""
     try:
         snapshot = rebuild_stock(
             conn, stock_code, [], [], window_start=start, window_end=end,
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("adj-backfill 撤销重建失败 %s: %s", stock_code, e)
-        return {"stock_code": stock_code, "status": "error", "error": str(e),
-                "repairs": []}
-    gap_dates = _raw_gap_dates(snapshot.get("raw_rows") or [], start, end)
+        log.warning("adj-backfill 无事件重建失败 %s: %s", stock_code, e)
+        record_collection(
+            conn, trade_date=end, section=REPAIR_SECTION, status="error",
+            source="adj-backfill", error_kind="rebuild_failed",
+            detail=f"adj-backfill rebuild {stock_code}: {e}",
+        )
+        return {
+            "stock_code": stock_code, "status": "error", "error": str(e),
+            "error_kind": "rebuild_failed", "repairs": [],
+        }
+    gap_dates = _raw_gap_dates(
+        snapshot.get("raw_rows") or [], start, end, known_missing
+    )
     reasons: dict[str, list[str]] = {}
     if gap_dates:
         reasons["raw_gap"] = [",".join(gap_dates[:20])]
@@ -760,23 +722,26 @@ def _write_csv(path: str, fieldnames: list[str], rows: list[dict]) -> None:
             writer.writerow(row)
 
 
-def _write_artifacts(report_dir: str, *, days: list[dict], events: list[dict],
-                     event_stocks: list[dict], raw_results: list[dict],
-                     repairs: list[dict], summary: dict) -> dict:
+def _write_artifacts(report_dir: str, *, days: list[dict], raw_days: list[dict],
+                     events: list[dict], event_stocks: list[dict],
+                     raw_results: list[dict], repairs: list[dict],
+                     summary: dict) -> dict:
     os.makedirs(report_dir, exist_ok=True)
     paths = {
         "factor_days": os.path.join(report_dir, "factor_days.csv"),
+        "raw_days": os.path.join(report_dir, "raw_days.csv"),
         "events": os.path.join(report_dir, "events.csv"),
         "event_stocks": os.path.join(report_dir, "event_stocks.csv"),
         "raw_results": os.path.join(report_dir, "raw_results.csv"),
         "repairs": os.path.join(report_dir, "repairs.csv"),
         "summary": os.path.join(report_dir, "summary.json"),
     }
-    _write_csv(
-        paths["factor_days"],
-        ["trade_date", "status", "rows", "attempts", "error_kind", "detail"],
-        days,
-    )
+    for key, rows in (("factor_days", days), ("raw_days", raw_days)):
+        _write_csv(
+            paths[key],
+            ["trade_date", "status", "rows", "attempts", "error_kind", "detail"],
+            rows,
+        )
     _write_csv(
         paths["events"],
         ["stock_code", "ex_date", "factor_cum", "source"],
@@ -848,10 +813,10 @@ def run_adjustment_backfill(
     throttle: float | None = None,
     now=None,
 ) -> dict:
-    """回填 A：逐日事件集 + 有事件票 raw/派生重建，可断点续跑。
+    """逐日全市场事件/raw 回填与本地派生重建，可断点续跑。
 
     `start` 缺省 `QSTOCK_ADJ_WINDOW_START`（20230101），`end` 缺省最近已收盘
-    交易日；`limit` 只用于小样本冒烟（显式标记 limited，不宣称完整）。
+    交易日；`limit` 只限制事件票本地重建，不减少按日 raw 请求。
     """
     tool = "adj-backfill"
     params: dict = {
@@ -962,30 +927,58 @@ def run_adjustment_backfill(
         event_set_complete = not failed_days
         events_export, event_stocks = _load_event_exports(conn, start_d, end_d)
         event_codes = {stock["stock_code"] for stock in event_stocks}
+
+        # ---- 阶段 2：逐日全市场 raw + 本地单票重建
+        raw_day_results: list[dict] = []
+        raw_attempts = 0
+        raw_days = [prev_trading_day(window_days[0])] + window_days
+        raw_checkpoints = _raw_day_checkpoints(conn, start_d, end_d)
+        raw_day_counts = _raw_day_counts(conn, raw_days[0], raw_days[-1])
+        for index, day in enumerate(raw_days, 1):
+            checkpoint = raw_checkpoints.get(day)
+            if (
+                not force and checkpoint is not None
+                and checkpoint["status"] == "ok"
+                and raw_day_counts.get(day, 0) == checkpoint["rows"]
+            ):
+                result = {
+                    "trade_date": day, "status": "skipped",
+                    "rows": raw_day_counts[day], "attempts": 0,
+                    "error_kind": None, "detail": "台账已成功且库内 raw 行数一致",
+                }
+            else:
+                result = _ingest_raw_day(
+                    conn, adapter, day, start_d, end_d,
+                    ADJ_BACKFILL_RETRIES, pacer,
+                )
+            raw_day_results.append(result)
+            raw_attempts += result["attempts"]
+            log.info(
+                "adj-backfill raw 日 %d/%d：%s rows=%d error=%s",
+                index, len(raw_days), day, result["rows"], result["error_kind"],
+            )
+
         retracted_with_raw = sorted(
             code for code in retracted_codes if code not in event_codes
             and _raw_dates(conn, code, start_d, end_d)
         )
-
-        # ---- 阶段 2：只对有事件票重抓 raw + 重建
-        raw_checkpoints = _raw_checkpoints(conn, start_d, end_d)
-        raw_stats = _raw_window_stats(conn, start_d, end_d)
+        known_missing = [
+            result["trade_date"] for result in raw_day_results
+            if result["status"] in ("error", "empty")
+            and window_days[0] <= result["trade_date"] <= window_days[-1]
+        ]
         selected = event_stocks[:limit] if limit is not None else event_stocks
         raw_results: list[dict] = []
         repairs: list[dict] = []
         failed_stocks: list[dict] = []
         staging_d1 = 0
-        raw_attempts = 0
         last_logged = monotonic()
         total_stocks = len(selected)
         for index, stock in enumerate(selected, 1):
-            result = _process_event_stock(
-                conn, adapter, stock, start_d, end_d, window_days,
-                force=force, retries=ADJ_BACKFILL_RETRIES,
-                checkpoints=raw_checkpoints, raw_stats=raw_stats, pacer=pacer,
+            result = _rebuild_event_stock(
+                conn, stock, window_days, known_missing
             )
             raw_results.append(result)
-            raw_attempts += result.get("attempts", 0)
             repairs.extend(result.get("repairs", []))
             if result["status"] in ("error", "empty"):
                 failed_stocks.append(result)
@@ -1010,9 +1003,33 @@ def run_adjustment_backfill(
                     sum(1 for r in raw_results if r.get("pending")),
                 )
 
+        no_event_results: list[dict] = []
+        if event_set_complete and limit is None:
+            raw_stats = _raw_window_stats(conn, window_days[0], window_days[-1])
+            no_event_codes = sorted(
+                set(raw_stats) - event_codes - retracted_codes
+            )
+            for code in no_event_codes:
+                result = _rebuild_without_events(
+                    conn, code, window_days[0], window_days[-1], known_missing
+                )
+                result.update({
+                    "rows": raw_stats[code]["rows"], "attempts": 0,
+                    "pending": bool(
+                        (result.get("state") or {}).get("rebuild_pending")
+                        or result.get("repairs")
+                    ),
+                })
+                no_event_results.append(result)
+                repairs.extend(result.get("repairs", []))
+                if result["status"] in ("error", "empty"):
+                    failed_stocks.append(result)
+
         retracted_results = []
         for code in retracted_with_raw:
-            result = _rebuild_retracted(conn, code, window_days[0], window_days[-1])
+            result = _rebuild_without_events(
+                conn, code, window_days[0], window_days[-1], known_missing
+            )
             retracted_results.append(result)
             repairs.extend(result.get("repairs", []))
         retracted_failures = [
@@ -1020,19 +1037,30 @@ def run_adjustment_backfill(
         ]
 
         limited = limit is not None and len(event_stocks) > len(selected)
+        failed_raw_days = [
+            result for result in raw_day_results if result["status"] in ("error", "empty")
+        ]
         if failed_days and not event_codes:
             status = "error"
-        elif failed_days or failed_stocks or repairs or limited or retracted_failures:
+        elif (
+            failed_days or failed_raw_days or failed_stocks or repairs or limited
+            or retracted_failures
+        ):
             status = "partial_error"
         else:
             status = "ok"
         complete = status == "ok" and event_set_complete and not limited
-        stage = "verified" if complete else ("rebuilt" if selected or retracted_results else "ingested")
+        stage = "verified" if complete else (
+            "rebuilt" if selected or no_event_results or retracted_results else "ingested"
+        )
 
         repair_counts: dict[str, int] = {}
         for repair in repairs:
             repair_counts[repair["reason"]] = repair_counts.get(repair["reason"], 0) + 1
-        raw_rows = sum(result.get("rows", 0) for result in raw_results)
+        raw_rows = sum(
+            result.get("rows", 0)
+            for result in raw_results + no_event_results + retracted_results
+        )
         summary = {
             "status": status,
             "stage": stage,
@@ -1047,15 +1075,33 @@ def run_adjustment_backfill(
             },
             "event_set_complete": event_set_complete,
             "failed_days": failed_days,
+            "raw_day_processing": {
+                "selected": len(raw_day_results),
+                "ok": sum(1 for r in raw_day_results if r["status"] == "ok"),
+                "empty": sum(1 for r in raw_day_results if r["status"] == "empty"),
+                "error": sum(1 for r in raw_day_results if r["status"] == "error"),
+                "skipped": sum(1 for r in raw_day_results if r["status"] == "skipped"),
+                "failed_days": failed_raw_days,
+            },
             "events": len(events_export),
             "event_stocks": len(event_stocks),
             "event_stock_processing": {
                 "selected": len(selected),
                 "ok": sum(1 for r in raw_results if r["status"] == "ok"),
                 "skipped": sum(1 for r in raw_results if r["status"] == "skipped"),
-                "error": len(failed_stocks),
+                "error": sum(
+                    1 for r in raw_results if r["status"] in ("error", "empty")
+                ),
                 "pending": sum(1 for r in raw_results if r.get("pending")),
                 "limited": limited,
+            },
+            "no_event_stock_processing": {
+                "selected": len(no_event_results),
+                "ok": sum(1 for r in no_event_results if r["status"] == "ok"),
+                "error": sum(
+                    1 for r in no_event_results if r["status"] in ("error", "empty")
+                ),
+                "pending": sum(1 for r in no_event_results if r.get("pending")),
             },
             "raw": {
                 "rows": raw_rows,
@@ -1077,8 +1123,9 @@ def run_adjustment_backfill(
             "files", f"adj-backfill_{start_d}_{end_d}"
         )
         artifacts = _write_artifacts(
-            out_report, days=day_results, events=events_export,
-            event_stocks=event_stocks, raw_results=raw_results,
+            out_report, days=day_results, raw_days=raw_day_results,
+            events=events_export, event_stocks=event_stocks,
+            raw_results=raw_results + no_event_results + retracted_results,
             repairs=repairs, summary=summary,
         )
         messages = ["数据处理完成"] + (["数据可以使用"] if complete else [])

@@ -1,18 +1,18 @@
-# 复权回填 A：`qstock-scheduler adj-backfill`
+# 复权回填：`qstock-scheduler adj-backfill`
 
 Issue [#163](https://github.com/daanZao/q_stock_skills/issues/163)，spec [#158](https://github.com/daanZao/q_stock_skills/issues/158) §6.1/§6.2。实现：
-`src/qstock_mcp/adjustment_backfill.py`；单票竖切仍由 `adjustment.rebuild_stock` 承担。
+`src/qstock_mcp/adjustment_backfill.py`；本地单票竖切由 `adjustment.rebuild_stock` 承担。
 
 ## 适用场景
 
 - 建立 2023-01-01 以来（`QSTOCK_ADJ_WINDOW_START`）的全市场累计因子**事件集**。
-- 只对窗口内**有事件**的股票重抓 baostock 不复权 raw，反推窗口基线 B0，重建
-  `stock_daily_hfq` 与 `stock_factor_state`。
+- D-1 与窗口内每个交易日通过 `query_daily_history_k_AStock(date)` 获取全市场
+  baostock 不复权 raw；本地按票重建，事件票反推窗口基线 B0，无事件票 B0=1。
 - 断点续跑、失败重试、失败/空日审计、待修复台账与事件票清单导出。
 
 **不适用**：
 
-- 无事件票 raw 回补（归 issue #164，`adj-backfill` 不会抓无事件票）。
+- 无事件票的分类、B0=1 与非正价隔离验收归 #164；其 raw 已由本命令采集，不再逐票重抓。
 - 北交所批量（默认排除；`query_daily_adjust_factor` 只处理 sh/sz 个股前缀）。
 - 2023 年以前 legacy 数据的重算（旧 qfq 只读留档，不从 legacy 反推 raw/hfq）。
 - 全市场替代源回填：baostock 整体不可用时保留缺口与 error 台账，不自动改走
@@ -50,14 +50,13 @@ PG_DSN=postgresql://user:pass@host:5432/qstock \
   --start 20230101 --end 20261104 \
   --report-dir files/adj-backfill_20230101_20261104
 
-# 小样本开发验收（最近 3 个交易日、最多 20 只有事件票）
+# 小样本开发验收（D-1 + 最近 3 个交易日全市场 raw，最多本地重建 20 只事件票）
 PG_DSN=postgresql://localhost/qstock_test \
   .venv/bin/qstock-scheduler adj-backfill --trading-days 3 --limit 20 \
   --report-dir files/adj-backfill_smoke
 
 # 断点续跑：与上次完全相同的窗口参数再执行即可；已完成且仍有效的因子日/raw
-# 票零上游请求。summary.upstream_requests.total 应接近 0（待修复票会重建，
-# 但已成功抓取的 raw 不重抓）。
+# 日零上游请求。summary.upstream_requests.total 应为 0；本地重建仍会执行。
 
 # 整窗重抓：显式 --force（忽略台账断点；只在确认需要重新取权威事实时使用）
 PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
@@ -71,7 +70,7 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
 | `--start` | 窗口起点 `yyyymmdd`；缺省 `QSTOCK_ADJ_WINDOW_START` 或 `20230101` |
 | `--end` | 窗口终点；缺省最近已收盘交易日；必须覆盖库内最新复权事实；盘中显式指定当日会被拒（零落库） |
 | `--trading-days N` | 最近 N 个交易日；与 `--start` 互斥，可用 `--end` 指定截止日 |
-| `--limit N` | 只处理前 N 只有事件票（冒烟）；结果标记 `limited`，不宣称完整 |
+| `--limit N` | 只本地重建前 N 只事件票；不减少按日 raw 请求；结果标记 `limited`，不宣称完整 |
 | `--force` | 忽略台账断点，整窗重抓事件与 raw |
 | `--report-dir` | 审计产物目录；缺省 `files/adj-backfill_<start>_<end>` |
 | `--throttle` | 相邻上游请求间隔秒；缺省 1.5 |
@@ -89,28 +88,28 @@ PG_DSN=... .venv/bin/qstock-scheduler adj-backfill \
    - 失败 → 最多 3 次尝试，重试前 0.5s/1.0s 退避；仍失败记 `error`，保留旧
      事件，**绝不**当“当日无事件”，并进入 `failed_days`。
 2. **事件票清单**：按 `stock_adjust_factor` 窗口内行导出；非事件票不写占位因子。
-3. **raw**：只对事件票逐只 `fetch_daily(..., adj="none")`（`adjustflag=3`），区间
-   `[窗口首交易日, end]`；首事件恰在窗口首日时起点提前到窗口外最后一个交易日
-   作为 D-1 计算输入。该 D-1 行作为「窗口基线 D-1 输入」保留在 raw 供审计/
-   续跑，但不进入 hfq、事件集、`events.csv` 或窗口查询交付。amount 元→万元由
-   适配层完成，`tradestatus`/`turn`/`pctChg` 原样入库。
-4. **重建**：`rebuild_stock(window_start, window_end)` 反推窗口基线
-   `B0=B1×f1`，写事件 B、hfq F/F_latest 与 state；逐事件做 B 路径 vs 权威
-   pctChg 价格路径对账（相对误差 ≤0.1% 为一致）。窗口外已有 hfq/事件时拒绝
-   重建，绝不回退窗口外派生。
+3. **raw**：对 D-1 与窗口内每个交易日调用 `fetch_astock_daily(date)`，即
+   `query_daily_history_k_AStock(date)` 全市场 `adjustflag=3` raw。响应通过代码唯一、
+   日期一致、raw 口径校验后整日替换 `stock_daily_raw`；失败保留旧事实并落 error。
+   D-1 只作窗口首日事件的基线输入，不进入 hfq、事件集或窗口查询交付。amount
+   元→万元由适配层完成，`tradestatus`/`turn`/`pctChg` 原样入库。
+4. **重建**：本地逐票调用 `rebuild_stock(window_start, window_end)`，不再发逐票
+   上游请求。事件票反推 `B0=B1×f1`，无事件票仅在事件集完整时以 B0=1 重建；
+   逐事件做 B 路径 vs 权威 pctChg 价格路径对账（相对误差 ≤0.1% 为一致）。
+   窗口外已有 hfq/事件时拒绝重建，绝不回退窗口外派生。
 5. **待修复台账**：见下节；存在任何未决项时 `stage=rebuilt`，不输出
    「数据可以使用」。
-6. **导出**：逐日状态、事件集、事件票清单、raw 结果、待修复明细、summary。
+6. **导出**：因子日、raw 日、事件集、事件票清单、逐票重建结果、待修复明细、summary。
 
 ## 断点续跑判据
 
 | 对象 | 复用条件 |
 | --- | --- |
 | 因子日 | 该日**本回填** `adj-backfill event <start>~<end>` 台账最近一条为 `ok/empty`，且事件表该日行数与台账 `rows` 一致；morning 的 pctChg 降级 ok 行不算已调权威接口 |
-| raw 票 | 该票本窗口最近一条 `adj-backfill raw` 台账为 `ok`，窗口内 raw 行数 > 0，首事件日与其 D-1（或上市日晚于 D-1 的事实）成立，且首/末事件都在 raw 覆盖内 |
-| 重建 | 每次运行都会重建入选事件票（幂等）；但不会重抓已有效 raw |
+| raw 日 | 该日**本回填** `adj-backfill raw-day <start>~<end>` 台账最近一条为 `ok`，且 raw 表该日行数与台账 `rows` 一致；`empty/error` 均重新请求 |
+| 重建 | 每次运行都对入选股票做本地幂等重建；不会重抓已有效 raw 日 |
 
-失败/空日会重新请求；失败票会重新请求。`--force` 跳过全部复用。
+失败日/空日均重新请求。`--force` 跳过全部复用。2026-11-08 前的逐票 raw 台账只作历史审计，不能充当逐日全市场断点。
 
 ## 待修复台账与 state 语义
 
@@ -129,10 +128,11 @@ retracted <code> <ex_date>')`，并把受影响 `stock_factor_state.rebuild_pend
 | `baseline_unverified` | 首个窗口事件缺 D-1/pctChg，或 B0 非正/非有限 | `baseline_factor=NULL`、`factor_latest=NULL`、`rebuild_pending=true`、coverage=partial；不猜 B0 |
 | `factor_mismatch` | 后续事件 B 路径与价格路径相对误差 >0.1% | 保留已建立基线，`rebuild_pending=true` |
 | `price_path_unverified` | 后续事件缺 D-1 raw 或权威 pctChg，价格路径不可验证 | 保留已建立基线，`rebuild_pending=true` |
-| `raw_gap` | 窗口内 raw 缺少交易日（含停牌占位行缺失），或首/末事件日不在 raw（detail 带 `first_event=` / `last_event=`） | `rebuild_pending=true` |
+| `raw_gap` | 生命周期内 raw 断档、本轮明确失败的 raw 日（含窗口首尾），或首/末事件日不在 raw（detail 带 `first_event=` / `last_event=`） | `rebuild_pending=true` |
 | `invalid_close` | close 为 NULL 或 ≤0；行保留在 raw、不进入 hfq | `rebuild_pending=true` |
-| `raw_unavailable` | 事件票 raw 抓取失败或上游空返回 | 无 raw 时不造 state；已有 raw 时沿用重建 |
-| `raw_refresh_failed` | 本次 raw 重抓失败，沿用库内已有 raw | 沿用重建结果并标记 pending |
+| `raw_unavailable` | 事件票在库内没有有效 raw（通常由 raw 日失败导致） | 无 raw 时不造 state |
+| `raw_refresh_failed` | 2026-11-08 前逐票方案的历史审计原因；新按日方案不再产生 | 仅供历史审计 |
+| `rebuild_failed` | 本地复权重建异常 | 本次重建失败，保留审计并返回 partial_error |
 
 §2.4 允许 pending 时保留上一组有效值；只有**基线本身**不可验证时才强制
 NULL/NULL。待修复记录是 append-only 审计；重跑成功不会删除旧记录，但当前
@@ -156,10 +156,11 @@ WHERE rebuild_pending;
 
 | 文件 | 内容 |
 | --- | --- |
-| `factor_days.csv` | 每个交易日 `ok/empty/error/skipped`、行数、尝试次数、失败明细 |
+| `factor_days.csv` | 每个交易日因子 `ok/empty/error/skipped`、行数、尝试次数、失败明细 |
+| `raw_days.csv` | D-1 与每个窗口交易日 raw `ok/empty/error/skipped`、行数、尝试次数、失败明细 |
 | `events.csv` | 权威事件集：`stock_code, ex_date, factor_cum, source` |
 | `event_stocks.csv` | 事件票清单：事件数、首/末事件日 |
-| `raw_results.csv` | 每票 raw 结果：成功/跳过/失败、行数、尝试次数、pending、修复原因 |
+| `raw_results.csv` | 每票本地重建结果：成功/失败、窗口 raw 行数、pending、修复原因 |
 | `repairs.csv` | 待修复明细（股票、日期、原因、详情） |
 | `summary.json` | 窗口、逐日计数、事件/票数、上游请求数、耗时、status/stage |
 
@@ -265,17 +266,22 @@ Golden 逐值、哈希幂等/续跑/修订撤销由 issue #165 的测试套件�
 
 ## 回滚
 
-**首选**：回填前对四张影子表做备份（`pg_dump -t stock_daily_raw -t
-stock_adjust_factor -t stock_daily_hfq -t stock_factor_state`），回滚时恢复。
+**首选**：回填前对四张影子表及断点台账做备份（`pg_dump -t stock_daily_raw -t
+stock_adjust_factor -t stock_daily_hfq -t stock_factor_state -t collection_log`），回滚时恢复；
+生产回滚只用备份，不执行下面的删除 SQL。
 
-**仅在隔离/测试库**中可用的事务回滚（会删除本轮事件票在窗口内的 raw；若
-窗口内已有 morning 写入，先确认这些行可重建）：
+**仅在隔离/测试库**中可用的事务回滚（会删除本轮全部事件/无事件票在 `d1~end`
+的 raw 与派生；若窗口内已有 morning 写入，先确认这些行可重建。`d1` 为窗口首日前一
+交易日）：
 
 ```sql
 BEGIN;
 CREATE TEMP TABLE _adj_codes AS
   SELECT DISTINCT stock_code FROM stock_adjust_factor
-  WHERE ex_date BETWEEN :start AND :end;
+  WHERE ex_date BETWEEN :start AND :end
+  UNION
+  SELECT DISTINCT stock_code FROM stock_daily_raw
+  WHERE trade_date BETWEEN :d1 AND :end;
 DELETE FROM stock_daily_hfq
   WHERE stock_code IN (SELECT stock_code FROM _adj_codes)
     AND trade_date BETWEEN :start AND :end;
@@ -285,12 +291,12 @@ DELETE FROM stock_adjust_factor
   WHERE ex_date BETWEEN :start AND :end;
 DELETE FROM stock_daily_raw
   WHERE stock_code IN (SELECT stock_code FROM _adj_codes)
-    AND trade_date BETWEEN :start AND :end;  -- D-1 行在 :start 之前，天然保留
+    AND trade_date BETWEEN :d1 AND :end;
 DELETE FROM collection_log
   WHERE section IN ('stock_adjust_factor','stock_daily_raw',
                     'stock_factor_repair','stock_factor_retracted')
     AND detail LIKE 'adj-backfill %'
-    AND trade_date BETWEEN :start AND :end;
+    AND trade_date BETWEEN :d1 AND :end;
 COMMIT;
 ```
 
@@ -310,8 +316,7 @@ COMMIT;
   崩溃不自动删除文件租约；确认持有进程终止后才可 `release --force`。
 - 数据成功但会话关闭或 release 失败返回 `baostock_cleanup_error`；数据失败时保留原错误并附
   cleanup 警告。首个实际请求失败保留断点，不逐日放大登录限速。
-- #172 原验收的共享租约结论已被 #173 新契约取代；新契约的定向、双进程、stdio 与全量回归
-  证据已记录。#172 正式关闭前回填继续暂停，历史证据见
+- #172/#173 已按进程实例租约新契约验收关闭；定向、双进程、stdio 与全量回归证据见
   [验收报告](research/2026-11-06-baostock-lease-acceptance.md)。
 - 2026-11-04/05 已验证：单会话串行、相邻 ≥1.5s 的少量样本可承载；长期
   TPS、并发上限、全历史完备率**未验证**，不得据小样本放量。
@@ -326,3 +331,22 @@ COMMIT;
   `baseline_unverified`，未猜 B0。首跑 25.9s（17 次真实请求、1.5s 间隔）；
   原样重跑 0 次上游请求、3 日/14 票全部命中台账，耗时约 0.04s，四表业务
   哈希一致。该结果只代表当次样本，不构成全窗口成功率或耗时结论。
+- 2026-11-08 策略修订：旧逐票 raw 进程在完整 928 日因子事件集后仅处理 822/4,443
+  事件票，按当时速度仍需约一天，经用户确认停止；已写入的 738,662 行 raw 保留，进程
+  终止后的 stale 租约已 force 清理。新策略改为 D-1 + 窗口内逐日全市场 raw。
+- 2026-11-08 全市场 raw 只读样本（CLI 实例租约、单会话串行、未写业务库）：
+  20230103/04/05 各 4,906 行，20261103 为 5,224 行；全部 `adj=none`，分别含 6/4/4/8
+  个停牌行，停牌行 pctChg 为空；001381 在 20261103 返回完整新股 raw。单日耗时约
+  9.5/9.5/9.6/6.1 秒，4 日合计约 35 秒。该结果只代表当次样本，不构成全窗口完备率或
+  长期容量结论；正式结果仍以全量结构、事件、B0 与覆盖检查为准。
+- 2026-11-08 新实现真实 CLI 验收（`qstock_test`，20261102–20261104 + D-1）：
+  3 次因子 + 4 次全市场 raw 请求，40.14s；raw 日 4/4 成功，14 只事件票本地重建，
+  001381 仍按新股无 D-1 规则 pending。原样续跑 0 上游请求、0.033s；不加 limit 的
+  本地全量重建另含 5,210 只无事件票，全部 B0=1 且无 pending，3.40s、0 上游请求。
+  产物含 `raw_days.csv`。该样本不构成全窗口成功率承诺。
+- 2026-11-08 生产全窗口结果（`qstock`，20230101–20261104）：928 因子日全部命中
+  断点，D-1 + 928 日全市场 raw 最终 929/929 成功；930 次 raw 尝试含 1 次重试。
+  17,538 事件、4,443 事件票 + 931 无事件票，窗口 raw 4,746,054 行。首轮存在真实
+  待修复项，故 `partial_error`/exit 1，并非采集中断。原样续跑 0 上游请求、342.60s
+  （本地全量重建），报告与库内 pending 均为 454。全量只读检查中事件/B0/F/hfq 公式
+  和事件不变量均 0 异常；pending 分类与后续处置记录于 #163/#164/#165。

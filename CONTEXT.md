@@ -75,7 +75,7 @@ strong_stocks 的库内派生产出口径（issue #120，ADR 0012）：stock_dai
 _Avoid_: 强势股回补、强势股抓取
 
 **采集台账**:
-一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。低频纪律的"每日一次"守卫也读台账（当日已 ok/empty 即跳过上游，issue #120）。复权回填另用 section `stock_adjust_factor`（逐日权威因子）/`stock_daily_raw`（逐票 raw）/`stock_factor_repair`（待修复原因）/`stock_factor_retracted`（事件撤销事实标记）承载审计；repair 的 error_kind 是复权审计原因词表，不复用抓取三态（ADR 0007 补记、issue #163）。
+一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。低频纪律的"每日一次"守卫也读台账（当日已 ok/empty 即跳过上游，issue #120）。复权回填另用 section `stock_adjust_factor`（逐日权威因子）/`stock_daily_raw`（逐日全市场 raw）/`stock_factor_repair`（待修复原因）/`stock_factor_retracted`（事件撤销事实标记）承载审计；repair 的 error_kind 是复权审计原因词表，不复用抓取三态（ADR 0007 补记、issue #163）。
 _Avoid_: 采集日志、抓取记录
 
 **计划缺席（planned_absent）**:
@@ -127,7 +127,7 @@ _Avoid_: 早盘补抓
 `qstock-scheduler backfill` 执行的板块历史补数入 `market_boards`，申万官网 trend 指数全历史回补申万双级口径行（issue #118，spec #111；issue #121 定稿单源——东财 push2his 回补与概念板块回补已整体摘除，BoardHistoryAdapter 协议随之退役）：默认窗口 = 19990101 起、历史深至 1999，解除 5/10 日涨跌"自落库日起积累"限制。回补行带 source 标注（'swsresearch'）与实时采集行（NULL）区分，业务键幂等可重跑；CLI 专用路径，不经 fetch 工具的历史日期防线。存量 'push2his' 回补行为东财退役前产物，保留只读。概念维度已永久退役（issue #119：THS 概念成分端点准入闸未过，#106 弃用方案）——收盘后批的概念成分积累（'em' 体系）已摘除，存量 'em' 行保留只读，无任何采集路径再写概念板块。
 
 **复权事件回填**:
-`qstock-scheduler adj-backfill` 执行的复权回填 A（issue #163，spec #158 §6.1/§6.2）：窗口内逐日全市场累计因子事件集（成功空日/失败日可审计，失败不当作无事件）+ 只对窗口内有事件的票重抓不复权 raw、反推窗口基线 B0 并重建 hfq/state；断点续跑读采集台账，失败重试，未决项落 `stock_factor_repair` 待修复台账，事件撤销落 `stock_factor_retracted` 标记（与整日替换同事务并标记受影响 state 为 pending）；同 B 非阶跃行不写事件表。`--end` 必须覆盖库内最新复权事实，历史窗口不回退窗口外派生。无事件票 raw 回补归 #164；北交所与替代源全市场回填不在本入口。
+`qstock-scheduler adj-backfill` 执行的复权回填（issue #163，spec #158 §6.1/§6.2）：窗口内逐日全市场累计因子事件集（成功空日/失败日可审计，失败不当作无事件）+ D-1 与窗口内逐日全市场不复权 raw；随后本地按票重建，事件票反推窗口基线 B0、无事件票 B0=1，并重建 hfq/state。断点续跑按因子日/raw 日读采集台账，失败重试，未决项落 `stock_factor_repair` 待修复台账，事件撤销落 `stock_factor_retracted` 标记（与整日替换同事务并标记受影响 state 为 pending）；同 B 非阶跃行不写事件表。`--end` 必须覆盖库内最新复权事实，历史窗口不回退窗口外派生。#164 复用本入口的无事件票 raw 并验收分类/隔离；北交所与替代源全市场回填不在本入口。
 _Avoid_: 全量回溯（那是 legacy 个股日线全历史）、板块回补
 
 **个股日线入口**:

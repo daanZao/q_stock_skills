@@ -27,11 +27,11 @@
                              已随 issue #121 摘除。CLI 专用路径，不经历史
                              日期防线。
   adj-backfill [--start D] [--end D | --trading-days N] [--limit N] [--force]
-                             复权回填 A（issue #163，spec #158 §6.1/§6.2）：
-                             逐日全市场累计因子事件集（失败重试、成功空日可
-                             审计）+ 只对有事件票重抓 baostock 不复权 raw、
-                             反推窗口基线 B0 并重建 hfq/state。断点续跑读采集
-                             台账；--force 整窗重抓；--limit 仅供小样本冒烟。
+                             复权回填（issue #163，spec #158 §6.1/§6.2）：
+                             逐日全市场累计因子事件 + 全市场 baostock raw，
+                             本地反推事件票 B0、无事件票 B0=1 并重建 hfq/state。
+                             断点续跑读采集台账；--force 整窗重抓；--limit 仅
+                             限制事件票本地重建，供小样本冒烟。
                              官方手册见 docs/adj-backfill-cli.md。
   sw-boards [--date D] [--check] [--level 1|2|all] [--limit N]
                              申万板块固定入口（issue #118）：默认抓申万
@@ -271,7 +271,7 @@ def cmd_adj_backfill(
     report_dir: str | None = None,
     throttle: float | None = None,
 ) -> int:
-    """复权回填 A（issue #163）：N 交易日窗口与显式起止日二选一。"""
+    """复权回填（issue #163）：N 交易日窗口与显式起止日二选一。"""
     tool = "adj-backfill"
     if trading_days is not None:
         if start:
@@ -990,7 +990,7 @@ def _main(argv: list[str] | None = None,
                             help="忽略同窗口成功台账，整窗重抓并覆盖同键记录")
     p_adj = sub.add_parser(
         "adj-backfill",
-        help="复权回填 A（issue #163）：逐日事件集 + 有事件票重抓 raw")
+        help="复权回填（issue #163）：逐日事件集 + 全市场 raw + 本地重建")
     p_adj.add_argument("--start", default=None,
                        help="回填起点 yyyymmdd；缺省 QSTOCK_ADJ_WINDOW_START 或 20230101")
     p_adj.add_argument("--end", default=None,
@@ -998,7 +998,7 @@ def _main(argv: list[str] | None = None,
     p_adj.add_argument("--trading-days", type=int, default=None,
                        help="最近 N 个交易日；与 --start 互斥，可用 --end 指定截止日")
     p_adj.add_argument("--limit", type=int, default=None,
-                       help="只处理前 N 只有事件票（冒烟用；结果标记 limited）")
+                       help="只重建前 N 只事件票（不减少按日 raw 请求；结果标记 limited）")
     p_adj.add_argument("--force", action="store_true",
                        help="忽略台账断点，整窗重抓事件与 raw")
     p_adj.add_argument("--report-dir", default=None,

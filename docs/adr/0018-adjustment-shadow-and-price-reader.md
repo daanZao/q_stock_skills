@@ -13,7 +13,8 @@ legacy `stock_daily` 同时承担多口径价格存储与所有消费方读取�
 - `stock_daily_raw`、`stock_adjust_factor`、`stock_daily_hfq`、`stock_factor_state` 为四张影子表；raw/事件支持同键修订，权威整日响应替换该日事件集以支持改期和撤销。qfq 只标量派生，不物化。
 - `price_reader.py` 是所有个股价格读取的唯一接缝，覆盖区间行、日期、横截面 adj、强势股窗口与板块聚合。`QSTOCK_PRICE_SOURCE` 缺省为 `legacy`；#162 注册 `new` 区间派生读取，测试可注册替代实现，未注册值显式失败。
 - #159/#160 是 expand 与 walking skeleton；#161 接入 morning，#162 接入 `query_daily` 纯读派生与覆盖门控，#163 接入 CLI 回填 A。生产缺省仍读 legacy，正式切流、daily/T+0 自愈与完整迁移验收由后续票据承接。
-- #163 回填 A：整日事件替换与受影响 `stock_factor_state.rebuild_pending` 标记同事务，撤销票另落 `stock_factor_retracted` 标记；hfq/state 由随后单票重建更新，崩溃续跑可据标记与 pending 补齐。每日响应中与上一个事件 B 相等的行不写事件表（无价格阶跃，不造 `f=1` 占位）。回填 `--end` 必须覆盖库内最新复权事实；历史窗口在有更新数据时直接拒绝，避免回退窗口外派生。
+- #163 回填：整日事件替换与受影响 `stock_factor_state.rebuild_pending` 标记同事务，撤销票另落 `stock_factor_retracted` 标记；hfq/state 由随后本地单票重建更新，崩溃续跑可据标记与 pending 补齐。每日响应中与上一个事件 B 相等的行不写事件表（无价格阶跃，不造 `f=1` 占位）。回填 `--end` 必须覆盖库内最新复权事实；历史窗口在有更新数据时直接拒绝，避免回退窗口外派生。
+- 2026-11-08 raw 采集改为 D-1 与窗口内逐日调用 `query_daily_history_k_AStock(date)`，整日替换全市场 raw，再本地逐票重建；取代逐票历史请求。原因是生产续跑实测逐票策略耗时不可接受，而按日接口与 morning 同源，样本证明包含 raw、停牌和权威 pctChg。全窗口覆盖仍由 #163/#165 验收，不能由样本外推。
 
 ## Consequences
 
