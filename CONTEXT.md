@@ -130,6 +130,10 @@ _Avoid_: 早盘补抓
 `qstock-scheduler adj-backfill` 执行的复权回填（issue #163，spec #158 §6.1/§6.2）：窗口内逐日全市场累计因子事件集（成功空日/失败日可审计，失败不当作无事件）+ D-1 与窗口内逐日全市场不复权 raw；随后本地按票重建，事件票反推窗口基线 B0、无事件票 B0=1，并重建 hfq/state。断点续跑按因子日/raw 日读采集台账，失败重试，未决项落 `stock_factor_repair` 待修复台账，事件撤销落 `stock_factor_retracted` 标记（与整日替换同事务并标记受影响 state 为 pending）；同 B 非阶跃行不写事件表。`--end` 必须覆盖库内最新复权事实，历史窗口不回退窗口外派生。#164 复用本入口的无事件票 raw 并验收分类/隔离；北交所与替代源全市场回填不在本入口。
 _Avoid_: 全量回溯（那是 legacy 个股日线全历史）、板块回补
 
+**复权迁移硬验收**:
+`qstock-scheduler adj-acceptance` 执行的切换前验收（issue #165，spec #158 §7）：复用迁移产物和库内快照，以全量结构/事件 SQL、小样本逐值定值、100+100 分层样本和每股四表摘要哈希覆盖八项判据；Golden 边界票不占普通样本名额。默认零上游、只读业务表；真实上游 smoke 仅限显式 3–5 个连续交易日。八项全绿才可判 verified，pending、未解释显著差异或未运行 smoke 均不得宣称可切换。
+_Avoid_: 全市场新旧逐值对拍、为验收重抓全历史
+
 **个股日线入口**:
 `qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
 _Avoid_: 日线脚本、补数脚本

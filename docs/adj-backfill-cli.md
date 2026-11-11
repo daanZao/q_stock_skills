@@ -273,9 +273,10 @@ GROUP BY error_kind;
 ```
 
 上述 SQL 与随回填生成的 `summary.validation`、`stock_hashes.csv` 覆盖结构、首事件
-B0、事件不变量、hfq 派生、覆盖关系和幂等证据；Golden 逐值、100+100 分层样本及
-完整八项硬验收由 issue #165 的测试套件承担。正式回填后应先跑本组只读检查，再按
-#166 切读。
+B0、事件不变量、hfq 派生、覆盖关系和幂等证据。正式回填后用 issue #165 的固定入口
+`qstock-scheduler adj-acceptance --migration-dir <本回填产物目录>` 执行 Golden、100+100
+分层样本、指标回归和完整八项硬验收（手册：[复权迁移硬验收](adj-acceptance-cli.md)），
+八项全绿后再按 #166 切读。
 
 ## 回滚
 

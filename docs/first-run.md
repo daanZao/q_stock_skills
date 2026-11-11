@@ -248,6 +248,20 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
   `release --force` 清理 stale。详见 [baostock 实例租约](baostock-lease.md)。
 - **详细手册**：[复权回填 CLI](adj-backfill-cli.md)。
 
+#### `adj-acceptance`：复权迁移八项硬验收
+
+- **写库**：不写业务表；读取迁移产物与库内快照，仅写本地验收报告。
+- **常用命令**：
+
+  ```bash
+  .venv/bin/qstock-scheduler adj-acceptance --migration-dir files/adj-backfill_20230101_20261104
+  .venv/bin/qstock-scheduler adj-acceptance --migration-dir files/adj-backfill_20230101_20261104 --smoke-days 3
+  ```
+
+- **结果判断**：八项全部 `ok` 才是 `verified`；默认 smoke 为 `not_run`，不能判成功。
+  显式 `--smoke-days 3|4|5` 才进行真实上游小窗口只读 smoke，并由 CLI 自动管理实例租约。
+- **详细手册**：[复权迁移硬验收 CLI](adj-acceptance-cli.md)。
+
 #### `lhb`：龙虎榜单日抓取、历史回溯与对拍
 
 - **写库**：单日写 basic、沪深席位详情、两个营业部榜与滚动统计；历史模式写 basic、沪深详情与滚动统计，不写两个营业部累计榜；北交所不存详情且不计缺失。`--check` 不写库。

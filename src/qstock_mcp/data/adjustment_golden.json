@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "sources": [
+    "docs/research/2026-11-04-adjustment-core-backfill.md",
+    "tests/fixtures/adjustment/600094_20111011.json",
+    "production read-only migration facts 2026-11-11"
+  ],
+  "cases": [
+    {
+      "stock_code": "688300", "boundary": "share_event", "type": "database_event", "date": "20261016",
+      "expected": {"factor_cum": 3.855379, "raw_close": 102.70, "preclose": 104.62, "change_percent": -1.8352, "tradestatus": 1, "factor_f": 2.5943786394, "hfq_close": 266.44268626240853, "baseline_factor": 1.4860510110, "factor_latest": 2.5943786394, "pending": false},
+      "previous": {"date": "20261015", "raw_close": 136.01}, "next": {"date": "20261019", "raw_close": 100.43},
+      "recorded_normalized": {"previous_b": 2.965589, "current_b": 3.855379, "event_factor": 0.7692081634516347, "baseline_factor": 1.0, "normalized_b": 1.300038204889484, "previous_raw": 136.01, "raw_close": 102.70, "previous_hfq": 136.01, "hfq_close": 133.51392364215, "previous_qfq": 104.6200023110568, "qfq_close": 102.70},
+      "indicators": {"date": "20261016", "qfq_close": 102.69999999846921, "high_60": 148.45717554395267, "high_52w": 209.63999286398374, "low_52w": 40.53900369786482, "is_60d_high": false}
+    },
+    {
+      "stock_code": "600381", "boundary": "suspended_reverse_event", "type": "recorded_event", "date": "20140627",
+      "recorded": {"previous_date": "20140626", "previous_b": 7.192060, "current_b": 0.893104, "baseline_factor": 7.192060, "previous_raw": 2.08, "raw_close": 16.75, "tradestatus": 0, "event_factor": 8.052880739533134, "factor_f": 0.12417916424501464, "previous_hfq": 2.08, "hfq_close": 2.080001001103995, "previous_qfq": 16.749991938228918, "qfq_close": 16.75}
+    },
+    {
+      "stock_code": "600094", "boundary": "long_suspension_resume", "type": "recorded_event", "date": "20111011",
+      "recorded": {"previous_date": "20111010", "previous_b": 2.646807, "current_b": 1.983970, "baseline_factor": 2.646807, "previous_raw": 4.37, "raw_close": 7.67, "previous_tradestatus": 0, "tradestatus": 1, "event_factor": 1.3340962816978079, "factor_f": 0.7495710869738519, "previous_hfq": 4.37, "hfq_close": 5.749210237089444, "previous_qfq": 5.830000751019421, "qfq_close": 7.67}
+    },
+    {
+      "stock_code": "600519", "boundary": "dirty_adjust_facto_and_equal_b", "type": "database_event", "date": "20230630",
+      "audit_only_adjust_facto": 0.988591,
+      "expected": {"factor_cum": 6.889798, "raw_close": 1691.0, "preclose": 1687.8, "change_percent": 0.1896, "tradestatus": 1, "factor_f": 1.0153513863, "hfq_close": 1716.95919416, "baseline_factor": 6.7856291854, "factor_latest": 1.1302204689, "pending": false},
+      "previous": {"date": "20230629", "raw_close": 1713.71}, "next": {"date": "20230703", "raw_close": 1724.1},
+      "equal_b_non_event": {"date": "20230703", "raw_close": 1724.1, "factor_f": 1.0153513863, "hfq_close": 1750.5673250450952}
+    },
+    {
+      "stock_code": "301569", "boundary": "listing_day_no_d1", "type": "database_event", "date": "20261015",
+      "expected": {"factor_cum": 1.0, "raw_close": 35.12, "preclose": 7.0, "change_percent": 401.7143, "tradestatus": 1, "factor_f": null, "hfq_close": null, "baseline_factor": null, "factor_latest": null, "pending": true},
+      "previous": null, "next": {"date": "20261016", "raw_close": 25.17}
+    },
+    {
+      "stock_code": "603786", "boundary": "dirty_adjust_facto", "type": "database_event", "date": "20240604", "audit_only_adjust_facto": 1.008751,
+      "expected": {"factor_cum": 1.039163, "raw_close": 69.04, "preclose": 68.56, "change_percent": 0.7001, "tradestatus": 1, "factor_f": 1.0173596479, "hfq_close": 70.23851009222106, "baseline_factor": 1.0214313121, "factor_latest": 1.0429864323, "pending": false},
+      "previous": {"date": "20240603", "raw_close": 69.16}, "next": {"date": "20240605", "raw_close": 69.08}
+    },
+    {
+      "stock_code": "603336", "boundary": "dirty_adjust_facto_and_equal_b", "type": "database_event", "date": "20230620", "audit_only_adjust_facto": 1.0,
+      "expected": {"factor_cum": 4.298803, "raw_close": 5.04, "preclose": 5.13, "change_percent": -1.7544, "tradestatus": 1, "factor_f": 1.3079920159, "hfq_close": 6.59227976, "baseline_factor": 3.2865666975, "factor_latest": 1.3096435874, "pending": false},
+      "previous": {"date": "20230619", "raw_close": 6.71}, "next": {"date": "20230621", "raw_close": 4.9},
+      "equal_b_non_event": {"date": "20251125", "raw_close": 9.36, "factor_f": 1.3079920159, "hfq_close": 12.242805268571429}
+    },
+    {
+      "stock_code": "600200", "boundary": "delisted", "type": "database_boundary", "date": "20251230",
+      "expected": {"raw_close": 0.29, "factor_f": 1.0, "hfq_close": 0.29, "baseline_factor": 1.0, "factor_latest": 1.0, "pending": false, "latest_trade_date": "20251230"}
+    },
+    {
+      "stock_code": "920001", "boundary": "bse_default_excluded", "type": "excluded", "date": null, "expected": {}
+    },
+    {
+      "stock_code": "300114", "boundary": "invalid_close_quarantine", "type": "database_event", "date": "20230606",
+      "expected": {"factor_cum": 5.975678, "raw_close": 46.75, "preclose": 47.17, "change_percent": -0.8904, "tradestatus": 1, "factor_f": 1.0006359615, "hfq_close": 46.7797312, "baseline_factor": 5.9718801142, "factor_latest": 1.0006359615, "pending": true},
+      "previous": {"date": "20230605", "raw_close": 47.2}, "next": {"date": "20230607", "raw_close": 46.73},
+      "invalid_close": {"date": "20250217", "raw_close": null, "tradestatus": 0, "hfq_absent": true, "latest_trade_date": "20250214"}
+    },
+    {
+      "stock_code": "001381", "boundary": "listing_day_no_d1", "type": "database_event", "date": "20261103",
+      "expected": {"factor_cum": 1.0, "raw_close": 84.55, "preclose": 16.98, "change_percent": 397.9388, "tradestatus": 1, "factor_f": null, "hfq_close": null, "baseline_factor": null, "factor_latest": null, "pending": true},
+      "previous": null, "next": {"date": "20261104", "raw_close": 66.91}
+    },
+    {
+      "stock_code": "000002", "boundary": "factor_mismatch", "type": "database_event", "date": "20250109",
+      "expected": {"factor_cum": 134.284605, "raw_close": 6.95, "factor_f": 1.0389859585, "hfq_close": 7.220952411901053, "baseline_factor": 129.2458323381, "factor_latest": 1.0389859585, "pending": true},
+      "previous": {"date": "20250108", "raw_close": 6.96}, "next": {"date": "20250110", "raw_close": 6.69}
+    },
+    {
+      "stock_code": "302132", "boundary": "factor_mismatch", "type": "database_event", "date": "20250218",
+      "expected": {"factor_cum": 5.975678, "raw_close": 64.02, "factor_f": 5.9756794972, "hfq_close": 382.5630014116676, "baseline_factor": 0.9999997494, "factor_latest": 6.0588985181, "pending": true},
+      "previous": {"date": "20250217", "raw_close": 68.01}, "next": {"date": "20250219", "raw_close": 65.9}
+    },
+    {
+      "stock_code": "001331", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20260626",
+      "expected": {"factor_cum": 3.484213, "raw_close": 48.08, "change_percent": null, "tradestatus": 0, "factor_f": 3.4842141576, "hfq_close": 167.52101669704723, "baseline_factor": 0.9999996678, "factor_latest": 3.4842141576, "pending": true},
+      "previous": {"date": "20260625", "raw_close": 69.78}, "next": {"date": "20260629", "raw_close": 51.25}
+    },
+    {
+      "stock_code": "002762", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20250611",
+      "expected": {"factor_cum": 5.672477, "raw_close": 6.16, "change_percent": null, "tradestatus": 0, "factor_f": 1.0214464088, "hfq_close": 6.292109878019555, "baseline_factor": 5.5533770067, "factor_latest": 1.0272698924, "pending": true},
+      "previous": {"date": "20250610", "raw_close": 6.21}, "next": {"date": "20250612", "raw_close": 6.47}
+    },
+    {
+      "stock_code": "300691", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20250521",
+      "expected": {"factor_cum": 2.723830, "raw_close": 17.91, "change_percent": null, "tradestatus": 0, "factor_f": 1.0204382721, "hfq_close": 18.276049453588673, "baseline_factor": 2.6692746386, "factor_latest": 1.0204382721, "pending": true},
+      "previous": {"date": "20250520", "raw_close": 17.99}, "next": {"date": "20250522", "raw_close": 17.91}
+    },
+    {
+      "stock_code": "301033", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20250530",
+      "expected": {"factor_cum": 1.027275, "raw_close": 63.53, "change_percent": null, "tradestatus": 0, "factor_f": 1.0243198819, "hfq_close": 65.07504210016234, "baseline_factor": 1.0028849563, "factor_latest": 1.0389377102, "pending": true},
+      "previous": {"date": "20250529", "raw_close": 64.13}, "next": {"date": "20250603", "raw_close": 63.53}
+    },
+    {
+      "stock_code": "600027", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20240725",
+      "expected": {"factor_cum": 1.669516, "raw_close": 5.93, "change_percent": null, "tradestatus": 0, "factor_f": 1.0591894604, "hfq_close": 6.280993500458901, "baseline_factor": 1.5762203669, "factor_latest": 1.1535677613, "pending": true},
+      "previous": {"date": "20240724", "raw_close": 6.08}, "next": {"date": "20240726", "raw_close": 5.93}
+    },
+    {
+      "stock_code": "600717", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20260618",
+      "expected": {"factor_cum": 26.259608, "raw_close": 4.21, "change_percent": null, "tradestatus": 0, "factor_f": 1.0910806007, "hfq_close": 4.593449328747144, "baseline_factor": 24.0675235031, "factor_latest": 1.0910806007, "pending": true},
+      "previous": {"date": "20260617", "raw_close": 4.31}, "next": {"date": "20260622", "raw_close": 4.21}
+    },
+    {
+      "stock_code": "603221", "boundary": "suspended_pctchg_unverified", "type": "database_event", "date": "20260812",
+      "expected": {"factor_cum": 1.053029, "raw_close": 27.27, "change_percent": null, "tradestatus": 0, "factor_f": 1.0269128554, "hfq_close": 28.003913566231986, "baseline_factor": 1.0254317048, "factor_latest": 1.0269128554, "pending": true},
+      "previous": {"date": "20260811", "raw_close": 27.3}, "next": {"date": "20260813", "raw_close": 27.27}
+    }
+  ]
+}

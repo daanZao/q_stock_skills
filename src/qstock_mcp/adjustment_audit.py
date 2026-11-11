@@ -1,4 +1,11 @@
 import hashlib
+import json
+from importlib import resources
+
+
+def _golden_stock_codes() -> list[str]:
+    path = resources.files("qstock_mcp").joinpath("data/adjustment_golden.json")
+    return [row["stock_code"] for row in json.loads(path.read_text(encoding="utf-8"))["cases"]]
 
 
 def _validation(conn, start: str, end: str, event_set_complete: bool) -> dict:
@@ -204,6 +211,7 @@ def _raw_sample(conn, start: str, end: str, event_set_complete: bool) -> list[di
                 LEFT JOIN event_codes e USING (stock_code)
                 WHERE r.trade_date BETWEEN %s AND %s
                   AND r.close IS NOT NULL AND r.close > 0
+                  AND NOT r.stock_code=ANY(%s)
             ), stock_codes AS (
                 SELECT DISTINCT stock_code, classification, exchange FROM classified
             ), exchange_ranked AS (
@@ -243,7 +251,7 @@ def _raw_sample(conn, start: str, end: str, event_set_complete: bool) -> list[di
             FROM sample_ranked WHERE sample_position <= 5
             ORDER BY stock_code, trade_date
             """,
-            (start, end, event_set_complete, start, end),
+            (start, end, event_set_complete, start, end, _golden_stock_codes()),
         )
         return [
             {

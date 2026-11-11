@@ -33,6 +33,11 @@
                              断点续跑读采集台账；--force 整窗重抓；--limit 仅
                              限制事件票本地重建，供小样本冒烟。
                              官方手册见 docs/adj-backfill-cli.md。
+  adj-acceptance --migration-dir DIR [--smoke-days 3|4|5]
+                             复权迁移八项硬验收（issue #165，spec #158 §7）：
+                             本地全量结构/事件 + Golden/样本 + 四表哈希；默认
+                             零上游只读，显式 smoke 才请求 3–5 个连续交易日。
+                             官方手册见 docs/adj-acceptance-cli.md。
   sw-boards [--date D] [--check] [--level 1|2|all] [--limit N]
                              申万板块固定入口（issue #118）：默认抓申万
                              双级实时快照落 market_boards（收盘后调用即当日
@@ -120,6 +125,7 @@ from .adapters import BoardAdapter, SnapshotAdapter
 from .baostock_api import BaostockApi
 from .baostock_errors import BaostockError
 from .baostock_lease import BaostockLease, LeaseContext, use_lease_context
+from .adjustment_acceptance import run_adjustment_acceptance
 from .adjustment_backfill import run_adjustment_backfill
 from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
@@ -289,6 +295,21 @@ def cmd_adj_backfill(
     )
     out = {"job": tool, "trading_days": trading_days, **result}
     _emit(out)
+    return 0 if result.get("status") == "ok" else 1
+
+
+def cmd_adj_acceptance(
+    migration_dir: str,
+    smoke_days: int | None = None,
+    smoke_end: str | None = None,
+    report_dir: str | None = None,
+    throttle: float | None = None,
+) -> int:
+    result = run_adjustment_acceptance(
+        migration_dir=migration_dir, smoke_days=smoke_days, smoke_end=smoke_end,
+        report_dir=report_dir, throttle=throttle,
+    )
+    _emit({"job": "adj-acceptance", **result})
     return 0 if result.get("status") == "ok" else 1
 
 
@@ -1005,6 +1026,18 @@ def _main(argv: list[str] | None = None,
                        help="审计产物目录，缺省 files/adj-backfill_<start>_<end>")
     p_adj.add_argument("--throttle", type=float, default=None,
                        help="相邻上游请求间隔秒，缺省 1.5（2026-11-04/05 串行实测）")
+    p_adj_acceptance = sub.add_parser(
+        "adj-acceptance", help="复权迁移八项硬验收（issue #165）：本地全检 + 可选上游 smoke")
+    p_adj_acceptance.add_argument("--migration-dir", required=True,
+                                  help="adj-backfill 审计产物目录（读取 summary/事件/哈希/样本）")
+    p_adj_acceptance.add_argument("--smoke-days", type=int, choices=(3, 4, 5), default=None,
+                                  help="启用 3–5 个连续交易日真实上游只读 smoke；缺省不触网")
+    p_adj_acceptance.add_argument("--smoke-end", default=None,
+                                  help="smoke 截止交易日 yyyymmdd；缺省最近已收盘交易日")
+    p_adj_acceptance.add_argument("--report-dir", default=None,
+                                  help="验收报告目录；缺省 <migration-dir>/acceptance")
+    p_adj_acceptance.add_argument("--throttle", type=float, default=None,
+                                  help="smoke 相邻上游请求间隔秒，缺省 1.5")
     p_sw_boards = sub.add_parser(
         "sw-boards", help="申万板块：双级实时快照落库 / 三方位对拍（--check）")
     p_sw_boards.add_argument("--date", default=None,
@@ -1199,6 +1232,12 @@ def _main(argv: list[str] | None = None,
                 start=args.start, end=args.end,
                 trading_days=args.trading_days, limit=args.limit,
                 force=args.force, report_dir=args.report_dir,
+                throttle=args.throttle,
+            )
+        if args.command == "adj-acceptance":
+            return cmd_adj_acceptance(
+                migration_dir=args.migration_dir, smoke_days=args.smoke_days,
+                smoke_end=args.smoke_end, report_dir=args.report_dir,
                 throttle=args.throttle,
             )
         if args.command == "sw-boards":

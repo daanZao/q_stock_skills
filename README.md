@@ -107,10 +107,11 @@ python3 -m venv .venv
 | 指数日线回补 | `qstock-scheduler index --trading-days 90` |
 | 申万板块历史回补 | `qstock-scheduler backfill --source sw --trading-days 90 --force` |
 | 复权回填：事件集 + 全市场 raw + 本地重建 | `qstock-scheduler adj-backfill --trading-days 3 --limit 20` |
+| 复权迁移八项硬验收 | `qstock-scheduler adj-acceptance --migration-dir files/adj-backfill_20230101_20261104` |
 | 龙虎榜历史回补 | `qstock-scheduler lhb --trading-days 90` |
 | 历史覆盖核验 | `qstock-scheduler coverage --trading-days 90` |
 
-**[查看全部 16 个子命令及参数说明](docs/first-run.md#第二章调度-cli-命令手册)** · **[launchd 定时采集配置](docs/scheduler-launchd.md)**
+**[查看全部 17 个子命令及参数说明](docs/first-run.md#第二章调度-cli-命令手册)** · **[launchd 定时采集配置](docs/scheduler-launchd.md)**
 
 建议交易日 **19:30 之后**执行每日复盘：此时涨停池、龙虎榜与当日日线通常已经就绪。全市场 `daily --all` 通常需要约 1.5–2 小时，请保留节流。
 

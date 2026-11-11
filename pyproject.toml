@@ -29,4 +29,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-qstock_mcp = ["sql/*.sql", "data/*.csv"]
+qstock_mcp = ["sql/*.sql", "data/*.csv", "data/*.json"]
