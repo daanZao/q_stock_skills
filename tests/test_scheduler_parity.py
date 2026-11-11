@@ -84,6 +84,13 @@ def _main_kwargs():
 
 class TestParityCommand:
     def test_parity_all_faces_exit_0(self, pg_ready, capsys, monkeypatch):
+        """五面 parity CLI 合约：全 fake、零业务写入、不得触真实网络。
+
+        boards/snapshot/indices 使用注入适配器，lhb/THS probe 使用 monkeypatch；
+        空 PG 库只提供 schema 和连续性缺口。五面必须齐全，zt_pool=infeasible
+        不算失败，continuity=gap 只表示空库断档，整体仍应 exit 0。
+        若出现网络等待，说明注入遗漏或实现偏离本测试边界，不是预期耗时。
+        """
         monkeypatch.setattr(
             "qstock_mcp.adapters.ths_adapter.probe",
             lambda: {"reachable": True, "banned": False, "detail": "fake"},
