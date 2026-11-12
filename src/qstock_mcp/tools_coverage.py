@@ -4,6 +4,7 @@ from ._sw_classify import load_sw_industry_meta_seed
 from .dates import normalize_date, trading_days_between
 from .db import connect
 from .output import error as _error
+from .price_reader import get_price_reader
 from .price_reader import select_dates as select_price_dates
 from .repository import select_stock_codes
 from .tools_init import MAJOR_INDICES
@@ -55,9 +56,19 @@ def verify_history_coverage(start: str, end: str, adj: str = "qfq") -> dict:
         return _error(tool, params, db_error)
     try:
         stocks = []
+        reader = get_price_reader()
+        coverage_method = getattr(reader, "select_coverage", None)
         for code in select_stock_codes(conn):
             present = select_price_dates(conn, code, adj, start_d, end_d)
-            stocks.append(_entry(code, None, present, calendar))
+            entry = _entry(code, None, present, calendar)
+            if coverage_method is not None:
+                coverage = coverage_method(conn, code, adj, start_d, end_d)
+                entry["coverage"] = coverage["coverage"]
+                if coverage.get("note"):
+                    entry["note"] = coverage["note"]
+                if coverage["coverage"] != "complete":
+                    entry["status"] = "gap"
+            stocks.append(entry)
         if not stocks:
             stocks = [{
                 "code": "stock_list", "name": None, "rows": 0,

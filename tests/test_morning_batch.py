@@ -149,6 +149,40 @@ class TestStockDailyPart:
         suspended = _stock_daily_rows(pg_ready, "002813")[0]
         assert suspended["tradestatus"] == 0  # 停牌权威标注落库
 
+    def test_new_mode_keeps_fact_ingestion_without_legacy_double_write(
+        self, pg_ready, monkeypatch, tmp_path
+    ):
+        from qstock_mcp.adjustment_switch import run_adjustment_switch
+
+        assert run_adjustment_switch(
+            "cutover", report_dir=str(tmp_path / "cutover")
+        )["status"] == "ok"
+        monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
+        try:
+            out = fetch_morning_batch(
+                trade_date=TARGET,
+                adapter=FakeMorningAdapter(rows=_morning_rows()),
+                adapters=[FakeInitAdapter("fake")],
+                sw_adapters=_sw(),
+                now=NOW_MONDAY_AM,
+            )
+
+            assert out["status"] == "ok"
+            part = out["parts"]["stock_daily"]
+            assert part["rows"] == 2
+            assert part["legacy_rows"] == 0
+            conn = psycopg2.connect(pg_ready)
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM stock_daily_legacy")
+                assert cur.fetchone()[0] == 0
+                cur.execute("SELECT COUNT(*) FROM stock_daily_raw")
+                assert cur.fetchone()[0] == 2
+                cur.execute("SELECT COUNT(*) FROM stock_factor_state")
+                assert cur.fetchone()[0] == 2
+            conn.close()
+        finally:
+            run_adjustment_switch("rollback", report_dir=str(tmp_path / "rollback"))
+
     def test_ledger_recorded(self, pg_ready):
         fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()),

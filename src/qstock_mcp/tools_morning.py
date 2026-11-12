@@ -2,7 +2,8 @@
 
 各部分独立成败、独立落采集台账：
 1. stock_daily：baostock `query_daily_history_k_AStock` 一把抓全市场 raw，
-   amount 元→万元，单源不走全市场 fallback；切换前保留 legacy 同键写入。
+   amount 元→万元，单源不走全市场 fallback；legacy 模式保留同键写入，
+   `QSTOCK_PRICE_SOURCE=new` 时停止 legacy 双写，raw/因子采集继续。
 2. stock_adjust_factor：逐日全市场累计 B 事件与 raw 经 `rebuild_stock` 写入
    影子表。成功空结果整日替换事件；失败时用权威 raw+pctChg 降级，双路径
    按 0.1% 对账。无事件票只写当日 hfq，事件票从 ex_date 重建并推进 anchor。
@@ -15,6 +16,7 @@
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
@@ -61,17 +63,20 @@ def _stock_daily_part(conn, adapter, target: str) -> tuple[dict, list[dict]]:
             error_kind=kind, detail=f"morning_batch: {e}", started_at=started,
         )
         return {"status": "error", "error": str(e), "error_kind": kind}, []
-    n = upsert_daily_rows(conn, rows, adapter.name)
+    new_mode = os.environ.get("QSTOCK_PRICE_SOURCE", "legacy") == "new"
+    legacy_rows = 0 if new_mode else upsert_daily_rows(conn, rows, adapter.name)
+    n = len(rows)
     record_collection(
         conn, trade_date=target, section="stock_daily",
         status="ok" if n > 0 else "empty", source=adapter.name, rows=n,
         error_kind=None if n > 0 else "no_data_for_date",
-        detail="morning_batch",
+        detail=f"morning_batch;legacy_write={'disabled' if new_mode else 'enabled'}",
         started_at=started,
     )
     return {
         "status": "ok" if n > 0 else "empty",
         "rows": n,
+        "legacy_rows": legacy_rows,
         "source": adapter.name,
         **({"empty_kind": "no_data_for_date"} if n == 0 else {}),
     }, rows

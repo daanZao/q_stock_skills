@@ -31,8 +31,10 @@
   恢复 `turnover_rate`（个股与指数接口共用字段，`index_daily.turnover_rate`
   同步恢复为 baostock 实测值）。
 - **链成员切换**：`default_daily_adapters()` = 腾讯 → 新浪 → baostock；
-  `fetch_daily`/`query_daily` 自愈与 `init_database(backfill_history=True)`
-  全量回溯均走该链。`AkshareAdapter.fetch_daily`（东财 `stock_zh_a_hist`）
+  当前 legacy `fetch_daily`/`query_daily` 自愈与 `init_database(backfill_history=True)`
+  全量回溯均走该链。ADR 0018/#166 只交付全局切读与回滚能力，daily/T+0/init 的
+  raw + 累计因子改造由 #167 承担，本 ADR 的 qfq 落库结论在该任务完成前仍适用于
+  legacy 写路径。`AkshareAdapter.fetch_daily`（东财 `stock_zh_a_hist`）
   显式抛 `FetchError(kind="unsupported")` 退役，避免误接线后静默走回东财。
   其他能力面（盘面/快照/清单）仍用 `default_adapters()`，由 #111 后续 ticket
   逐个迁移——本 ADR 只约束个股日线。

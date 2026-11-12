@@ -6,14 +6,14 @@
 
 - **60 日新高**：当日收盘价 = 最近 60 个交易日（含当日，adj 取当日横截面
   口径 select_dominant_adj，issue #92 同规则）收盘价窗口最大值。
-- **近期多次涨停**：最近 10 个交易日（含当日，以 stock_daily 库内交易日历
+- **近期多次涨停**：最近 10 个交易日（含当日，以统一价格读取接缝的交易日历
   为准）zt_pool 涨停（pool_type='zt'）次数 ≥ 2。
 - 两集合取并集入选；reason 为规则文本（"60日新高" / "多次涨停（近10日 N 次）"
   及组合），对齐东财口径"入选理由"列的退化承载（调研结论）。
 
-stock_daily 当日无数据（自算输入缺失，如收盘后批跑在日线入口之前）→
+统一价格读取接缝当日无数据（自算输入缺失，如收盘后批跑在日线入口之前）→
 compute_strong_rows 返回 None，工具层按 no_data_for_date 正常语义跳过
-（非故障不中止），先经 daily 入口补当日日线后重跑本段即可。
+（非故障不中止），先经当日价格事实管线补齐后重跑本段即可。
 """
 
 import logging
@@ -27,7 +27,7 @@ from .price_reader import (
 
 log = logging.getLogger(__name__)
 
-# 窗口口径（ADR 0012）：60 日新高窗口 / 多次涨停窗口（交易日历来自 stock_daily）
+# 窗口口径（ADR 0012）：60 日新高窗口 / 多次涨停窗口（交易日历来自 价格事实）
 HIGH_WINDOW_DAYS = 60
 MULTI_ZT_WINDOW_DAYS = 10
 MULTI_ZT_MIN_COUNT = 2
@@ -85,7 +85,7 @@ def _stock_names(conn, codes: list[str]) -> dict[str, str]:
 
 
 def compute_strong_rows(conn, trade_date: str) -> list[dict] | None:
-    """库内自算强势股行（STRONG_FIELDS 键集）；输入缺失（stock_daily 当日无
+    """库内自算强势股行（STRONG_FIELDS 键集）；输入缺失（价格事实 当日无
     数据）返回 None，调用方按 no_data_for_date 正常语义处理。"""
     adj = select_dominant_adj(conn, trade_date)
     if adj is None:

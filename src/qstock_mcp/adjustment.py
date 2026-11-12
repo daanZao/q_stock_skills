@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
+from .adjustment_lock import lock_adjustment_facts
 from .dates import prev_trading_day
 
 _RAW_FIELDS = (
@@ -147,6 +148,7 @@ def rebuild_stock(
         )
 
     try:
+        lock_adjustment_facts(conn)
         if window_end is not None:
             # 只拒绝“库内已有”的窗口外事实；调用方显式传入的窗口外输入由下方
             # 窗口过滤处理。回填入口另有全局守卫，避免历史窗口回退生产派生。

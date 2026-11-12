@@ -1,10 +1,9 @@
 """统一查询面：query_sw_board_daily 申万板块自算行情（issue #75，spec #70）。
 
 point-in-time 成分归属（字典中 source_system='sw' 且 effective_date ≤ trade_date
-的最新行）× 库内 stock_daily（横截面 adj 动态选择，issue #92：当日各 adj 行数
-多者胜、平局取 qfq；单一 adj 防一股多行重复计入；板块截面用
-change_percent/amount，与复权方式无关，选择逻辑在
-repository.select_dominant_adj）。单日截面聚合下推 SQL：level=1 按行业码前 2
+的最新行）× 统一价格读取接缝（legacy 按当日各 adj 行数多者胜、平局取 qfq；
+new 统一标 qfq，板块聚合只取与复权方式无关的 raw change_percent/amount；
+强势股缺 hfq 时不得退回 raw 伪算新高）。单日截面聚合下推 SQL：level=1 按行业码前 2
 位补 '0000'、level=2 按前 4 位补 '00' 聚合，聚合码形态与 sw_industry_meta 的
 XX0000/XXXX00 一致，可直接 join 名称（缺失时 industry_name 为 None 不报错）。
 change_pct 为成交额加权（停牌占位行 change_percent/amount 为 null 时从权重

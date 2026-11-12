@@ -38,6 +38,10 @@
                              本地全量结构/事件 + Golden/样本 + 四表哈希；默认
                              零上游只读，显式 smoke 才请求 3–5 个连续交易日。
                              官方手册见 docs/adj-acceptance-cli.md。
+  adj-switch status|cutover|rollback|roll-forward [--report-dir DIR]
+                             复权全局切读、立即/修复回滚与 roll-forward（#166）；
+                             开发演练仅限 qstock_test，生产执行归 #184。零上游请求，
+                             手册见 docs/adj-switch-cli.md。
   sw-boards [--date D] [--check] [--level 1|2|all] [--limit N]
                              申万板块固定入口（issue #118）：默认抓申万
                              双级实时快照落 market_boards（收盘后调用即当日
@@ -127,6 +131,7 @@ from .baostock_errors import BaostockError
 from .baostock_lease import BaostockLease, LeaseContext, use_lease_context
 from .adjustment_acceptance import run_adjustment_acceptance
 from .adjustment_backfill import run_adjustment_backfill
+from .adjustment_switch import run_adjustment_switch
 from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
 from .dates import normalize_date, today_str, trading_day_window
@@ -310,6 +315,12 @@ def cmd_adj_acceptance(
         report_dir=report_dir, throttle=throttle,
     )
     _emit({"job": "adj-acceptance", **result})
+    return 0 if result.get("status") == "ok" else 1
+
+
+def cmd_adj_switch(action: str, report_dir: str | None = None) -> int:
+    result = run_adjustment_switch(action, report_dir=report_dir)
+    _emit({"job": "adj-switch", **result})
     return 0 if result.get("status") == "ok" else 1
 
 
@@ -1038,6 +1049,12 @@ def _main(argv: list[str] | None = None,
                                   help="验收报告目录；缺省 <migration-dir>/acceptance")
     p_adj_acceptance.add_argument("--throttle", type=float, default=None,
                                   help="smoke 相邻上游请求间隔秒，缺省 1.5")
+    p_adj_switch = sub.add_parser(
+        "adj-switch", help="复权全局切读、修复回滚与 roll-forward（issue #166）")
+    p_adj_switch.add_argument(
+        "action", choices=("status", "cutover", "rollback", "roll-forward"))
+    p_adj_switch.add_argument("--report-dir", default=None,
+                              help="执行工件目录；status 不生成工件")
     p_sw_boards = sub.add_parser(
         "sw-boards", help="申万板块：双级实时快照落库 / 三方位对拍（--check）")
     p_sw_boards.add_argument("--date", default=None,
@@ -1240,6 +1257,8 @@ def _main(argv: list[str] | None = None,
                 smoke_end=args.smoke_end, report_dir=args.report_dir,
                 throttle=args.throttle,
             )
+        if args.command == "adj-switch":
+            return cmd_adj_switch(args.action, report_dir=args.report_dir)
         if args.command == "sw-boards":
             return cmd_sw_boards(
                 date_arg=args.date,

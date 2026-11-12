@@ -1,18 +1,24 @@
-"""个股价格读取接缝（issue #159）；默认 legacy，后续实现经注册切换。"""
+"""全局个股价格读取接缝（issue #159/#166）；默认 legacy，可切换 new。"""
 
 import os
 
 from .adapters.base import BAR_FIELDS
 
 
+def _legacy_table(conn) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.stock_daily_legacy')")
+        return "stock_daily_legacy" if cur.fetchone()[0] is not None else "stock_daily"
+
+
 class LegacyPriceReader:
     def select_daily(self, conn, stock_code: str, adj: str, start: str, end: str) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT trade_date, open, high, low, close, volume, amount, amplitude,
                     change_percent, change_amount, turnover_rate, source, tradestatus
-                FROM stock_daily
+                FROM {_legacy_table(conn)}
                 WHERE stock_code=%s AND adj=%s AND trade_date BETWEEN %s AND %s
                 ORDER BY trade_date
                 """,
@@ -26,7 +32,7 @@ class LegacyPriceReader:
     def select_dates(self, conn, stock_code: str, adj: str, start: str, end: str) -> set[str]:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT trade_date FROM stock_daily"
+                f"SELECT trade_date FROM {_legacy_table(conn)}"
                 " WHERE stock_code=%s AND adj=%s AND trade_date BETWEEN %s AND %s",
                 (stock_code, adj, start, end),
             )
@@ -34,13 +40,13 @@ class LegacyPriceReader:
 
     def select_latest_date(self, conn) -> str | None:
         with conn.cursor() as cur:
-            cur.execute("SELECT max(trade_date) FROM stock_daily")
+            cur.execute(f"SELECT max(trade_date) FROM {_legacy_table(conn)}")
             return cur.fetchone()[0]
 
     def select_dominant_adj(self, conn, trade_date: str) -> str | None:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT adj FROM stock_daily WHERE trade_date=%s"
+                f"SELECT adj FROM {_legacy_table(conn)} WHERE trade_date=%s"
                 " GROUP BY adj ORDER BY COUNT(*) DESC,"
                 " CASE WHEN adj='qfq' THEN 0 ELSE 1 END, adj LIMIT 1",
                 (trade_date,),
@@ -51,7 +57,7 @@ class LegacyPriceReader:
     def select_window_anchor(self, conn, trade_date: str, days: int) -> str | None:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT trade_date FROM stock_daily"
+                f"SELECT DISTINCT trade_date FROM {_legacy_table(conn)}"
                 " WHERE trade_date<=%s ORDER BY trade_date DESC LIMIT %s",
                 (trade_date, days),
             )
@@ -62,7 +68,7 @@ class LegacyPriceReader:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT stock_code, close, change_percent, volume, amount, turnover_rate"
-                " FROM stock_daily WHERE trade_date=%s AND adj=%s",
+                f" FROM {_legacy_table(conn)} WHERE trade_date=%s AND adj=%s",
                 (trade_date, adj),
             )
             cols = ("stock_code", "close", "change_percent", "volume", "amount", "turnover_rate")
@@ -71,7 +77,7 @@ class LegacyPriceReader:
     def select_window_max_close(self, conn, adj: str, start: str, end: str) -> dict[str, float]:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT stock_code, MAX(close) FROM stock_daily"
+                f"SELECT stock_code, MAX(close) FROM {_legacy_table(conn)}"
                 " WHERE adj=%s AND trade_date BETWEEN %s AND %s"
                 " AND close IS NOT NULL GROUP BY stock_code",
                 (adj, start, end),
@@ -85,25 +91,16 @@ class LegacyPriceReader:
         if prefix is not None:
             where = "WHERE p.board_code LIKE %s"
             args.append(prefix + "%")
+        price_join = (
+            f"{_legacy_table(conn)} d ON d.stock_code=p.stock_code"
+            " AND d.trade_date=%s AND d.adj=%s"
+        )
         with conn.cursor() as cur:
-            cur.execute(_SW_BOARD_AGG_SQL.format(where=where), args)
-            return [
-                {
-                    "industry_code": code,
-                    "industry_name": name,
-                    "change_pct": round(float(pct), 4) if pct is not None else None,
-                    "up_count": up,
-                    "down_count": down,
-                    "flat_count": flat,
-                    "amount": round(float(amt), 2) if amt is not None else None,
-                    "stock_count": stocks,
-                    "counted_count": counted,
-                    "adj": adj,
-                    "basis": "sw_amount_weighted",
-                }
-                for code, name, pct, up, down, flat, amt, stocks, counted
-                in cur.fetchall()
-            ]
+            cur.execute(
+                _SW_BOARD_AGG_SQL.format(where=where, price_join=price_join),
+                args,
+            )
+            return _map_sw_rows(cur.fetchall(), adj)
 
 
 _SW_BOARD_AGG_SQL = """
@@ -129,8 +126,7 @@ agg AS (
            COUNT(*) FILTER (WHERE d.change_percent IS NOT NULL AND d.amount IS NOT NULL)
                AS counted_count
     FROM pit p
-    LEFT JOIN stock_daily d
-      ON d.stock_code = p.stock_code AND d.trade_date = %s AND d.adj = %s
+    LEFT JOIN {price_join}
     {where}
     GROUP BY 1
     HAVING COUNT(d.stock_code) > 0
@@ -141,6 +137,25 @@ FROM agg a
 LEFT JOIN sw_industry_meta m ON m.industry_code = a.industry_code
 ORDER BY a.industry_code
 """
+
+
+def _map_sw_rows(rows, adj: str) -> list[dict]:
+    return [
+        {
+            "industry_code": code,
+            "industry_name": name,
+            "change_pct": round(float(pct), 4) if pct is not None else None,
+            "up_count": up,
+            "down_count": down,
+            "flat_count": flat,
+            "amount": round(float(amt), 2) if amt is not None else None,
+            "stock_count": stocks,
+            "counted_count": counted,
+            "adj": adj,
+            "basis": "sw_amount_weighted",
+        }
+        for code, name, pct, up, down, flat, amt, stocks, counted in rows
+    ]
 
 
 class PriceQueryError(RuntimeError):
@@ -297,6 +312,108 @@ class NewPriceReader:
                 (stock_code, start, end),
             )
             return {row[0] for row in cur.fetchall()}
+
+    def select_latest_date(self, conn) -> str | None:
+        with conn.cursor() as cur:
+            cur.execute("SELECT max(trade_date) FROM stock_daily_raw")
+            return cur.fetchone()[0]
+
+    def select_dominant_adj(self, conn, trade_date: str) -> str | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM stock_daily_raw WHERE trade_date=%s",
+                (trade_date,),
+            )
+            raw_rows = cur.fetchone()[0]
+        return "qfq" if raw_rows else None
+
+    def select_window_anchor(self, conn, trade_date: str, days: int) -> str | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT trade_date FROM stock_daily_raw"
+                " WHERE trade_date<=%s ORDER BY trade_date DESC LIMIT %s",
+                (trade_date, days),
+            )
+            rows = cur.fetchall()
+        return rows[-1][0] if rows else None
+
+    def _price_source(self, adj: str) -> tuple[str, str]:
+        if adj == "qfq":
+            return (
+                "JOIN stock_daily_hfq h"
+                " ON h.stock_code=r.stock_code AND h.trade_date=r.trade_date"
+                " JOIN stock_factor_state s ON s.stock_code=r.stock_code"
+                " AND s.factor_latest IS NOT NULL",
+                "h.close / s.factor_latest",
+            )
+        if adj == "hfq":
+            return (
+                "JOIN stock_daily_hfq h"
+                " ON h.stock_code=r.stock_code AND h.trade_date=r.trade_date",
+                "h.close",
+            )
+        return "", "r.close"
+
+    def select_today_rows(self, conn, trade_date: str, adj: str) -> dict[str, dict]:
+        price_sql, close_sql = self._price_source(adj)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT r.stock_code, {close_sql}, r.change_percent, r.volume,"
+                " r.amount, r.turnover_rate FROM stock_daily_raw r"
+                f" {price_sql} WHERE r.trade_date=%s",
+                (trade_date,),
+            )
+            cols = ("stock_code", "close", "change_percent", "volume", "amount", "turnover_rate")
+            return {row[0]: dict(zip(cols, row)) for row in cur.fetchall()}
+
+    def select_window_max_close(self, conn, adj: str, start: str, end: str) -> dict[str, float]:
+        price_sql, close_sql = self._price_source(adj)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT r.stock_code, MAX({close_sql}) FROM stock_daily_raw r"
+                f" {price_sql} WHERE r.trade_date BETWEEN %s AND %s"
+                f" AND {close_sql} IS NOT NULL GROUP BY r.stock_code",
+                (start, end),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+    def select_coverage(
+        self, conn, stock_code: str, adj: str, start: str, end: str
+    ) -> dict:
+        try:
+            result = self.query_daily(conn, stock_code, adj, start, end)
+            return {
+                "coverage": result["adjust"]["coverage"],
+                "note": result.get("note"),
+            }
+        except PriceQueryError as exc:
+            if exc.error_kind != "data_unavailable":
+                raise
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code=%s",
+                    (stock_code,),
+                )
+                state = cur.fetchone()
+            return {
+                "coverage": "unknown" if state is None else "partial",
+                "note": str(exc),
+            }
+
+    def select_sw_board_daily(
+        self, conn, trade_date: str, level: int, prefix: str | None = None, adj: str = "qfq"
+    ) -> list[dict]:
+        where, args = "", [trade_date, level, trade_date]
+        if prefix is not None:
+            where = "WHERE p.board_code LIKE %s"
+            args.append(prefix + "%")
+        price_join = (
+            "stock_daily_raw d ON d.stock_code=p.stock_code AND d.trade_date=%s"
+        )
+        sql = _SW_BOARD_AGG_SQL.format(where=where, price_join=price_join)
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            return _map_sw_rows(cur.fetchall(), adj)
 
 
 _READERS = {"legacy": LegacyPriceReader(), "new": NewPriceReader()}
