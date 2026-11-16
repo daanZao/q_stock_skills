@@ -21,7 +21,7 @@ Issue [#166](https://github.com/daanZao/q_stock_skills/issues/166)，spec [#158]
 2. 确认四张复权表存在且已有代表性事实：`stock_daily_raw`、`stock_adjust_factor`、`stock_daily_hfq`、`stock_factor_state`。
 3. 生产执行前另按 #184 记录目标库、窗口、最大日期、断点、写入表、耗时上限和备份/恢复方式；预检不符即停止。非 `qstock_test*` 写动作默认以 `production_not_enabled` 拒绝，只有 #184 预检完成后才可显式设置 `QSTOCK_ADJ_SWITCH_ENABLE_PRODUCTION=true`；该开关不替代任何验收。
 4. cutover 后必须把读取环境设为 `QSTOCK_PRICE_SOURCE=new`；rollback 后设为 `legacy`。命令在 `required_env` 中回显所需值，但不会修改调用进程之外的持久环境配置。
-5. new 模式下 morning 继续写 raw/因子并停止 legacy 双写。daily/T+0/init 的持续采集改造归 #167，未完成前不得生产切读。
+5. new 模式下 morning 继续写 raw/因子并停止 legacy 双写；daily/T+0/init 由 #167 接入同一事实管线。正常期不双写，回滚期间仍持续采集；生产切读前必须确认 #167 与 #183 均已完成。
 
 ## 命令
 
@@ -60,7 +60,7 @@ export QSTOCK_PRICE_SOURCE=new
 
 - `cutover` / `roll-forward`：要求当前为 legacy、`stock_daily` 存在且不存在同名归档冲突。记录当前四表事实水位，再改名并持久化 `mode=new`。切换与 `rebuild_stock` 共用事务咨询锁，并发写入会串行等待，不能绕过水位。
 - `rollback`：要求当前为 new 且归档表存在。事实水位未变时 `repair_required=false`，修复计数均为 0；否则把归档表恢复为 `stock_daily`，从持续保留的 raw/hfq/state 幂等修复 `none`、`hfq`、`qfq`。
-- 修复覆盖新事件造成的历史 qfq 重锚，不只补切换后的缺失日期。缺少有效锚点的 pending 股票会删除新窗口陈旧 qfq，不伪造新值；提交前验证 `missing_none/missing_hfq/missing_qfq/stale_qfq` 全为 0，否则整个事务回滚。
+- 修复覆盖新事件造成的历史 qfq 重锚，不只补切换后的缺失日期。`last_rebuilt_at` 为空（含基线不可验证）的股票会删除新窗口陈旧 qfq，不伪造新值；后续事件 mismatch 保留可信锚并支持重锚；提交前验证 `missing_none/missing_hfq/missing_qfq/stale_qfq` 全为 0，否则整个事务回滚。
 - roll-forward 不删除或重抓新事实；回滚期间仍可继续 raw/因子采集。
 - `summary.json` 记录模式、所需环境、零上游请求、修复标记和各口径修复行数。退出码 0 表示动作成功，1 表示预检或执行失败，2 表示 CLI 参数错误。
 

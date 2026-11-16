@@ -49,7 +49,7 @@ _Avoid_: 落库
 _Avoid_: 全量初始化
 
 **全量回溯**:
-由 `backfill_history=True` 显式开启的全市场个股历史日线补全（数千只 × 全历史），复用日线头尾自愈，单股失败不中断；绝不默认执行。
+由 `backfill_history=True` 显式开启的全市场个股历史补全：以股票清单为标的来源，复用逐日全市场 raw + 累计 B 回填管线，从 `QSTOCK_ADJ_WINDOW_START`（缺省 20230101）起采集并重建 hfq/state，不再直接写 qfq；断点、失败隔离与审计产物在 `parts.backfill` 报告，绝不默认执行。
 _Avoid_: 回填、补数据（不加限定时）
 
 ### 数据口径
@@ -75,7 +75,7 @@ strong_stocks 的库内派生产出口径（issue #120，ADR 0012）：统一价
 _Avoid_: 强势股回补、强势股抓取
 
 **采集台账**:
-一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。低频纪律的"每日一次"守卫也读台账（当日已 ok/empty 即跳过上游，issue #120）。复权回填另用 section `stock_adjust_factor`（逐日权威因子）/`stock_daily_raw`（逐日全市场 raw）/`stock_factor_repair`（待修复原因）/`stock_factor_retracted`（事件撤销事实标记）承载审计；repair 的 error_kind 是复权审计原因词表，不复用抓取三态（ADR 0007 补记、issue #163）。
+一切写库动作（fetch/init/调度/手动补抓）的 append-only 审计表 `collection_log`：每次采集动作落一行（交易日/section/status/来源/行数/error_kind/起止时间），全历史保留。status 词表 = 采集结果三态 ok/empty/error + 编排第四态 planned_absent（计划缺席）。就绪检查先读台账：无行=未采集、empty=上游确认无数据、error=采集失败、planned_absent=计划缺席（迁移占位，非故障非未采集），表述不得混用。低频纪律的"每日一次"守卫也读台账（当日已 ok/empty 即跳过上游，issue #120）。复权采集另用 section `stock_adjust_factor`（逐日权威因子）/`stock_daily_raw`（raw 写入：回填为逐日全市场，daily/T+0 为单票区间）/`stock_factor_repair`（待修复原因）/`stock_factor_retracted`（事件撤销事实标记）承载审计；repair 的 error_kind 是复权审计原因词表，不复用抓取三态（ADR 0007 补记、issue #163）。
 _Avoid_: 采集日志、抓取记录
 
 **计划缺席（planned_absent）**:
@@ -120,7 +120,7 @@ _Avoid_: 强制整窗重抓、逐席位 upsert、详情缺失即采集失败
 _Avoid_: 定时任务（不加限定时）
 
 **次晨批**:
-`qstock-scheduler morning` 执行的开盘前采集（目标日恒为前一交易日）：baostock 一把抓全市场日线（含 tradestatus 权威停牌列、turn 换手率，volume 股 / amount 万元口径）+ 7 大指数尾行缺失即补，逐部分独立成败并落采集台账。baostock 当日 bar 晚间才就绪，次晨批不用于当日。
+`qstock-scheduler morning` 执行的开盘前采集（目标日恒为前一交易日）：baostock 一把抓全市场 raw（含 tradestatus 权威停牌列、turn 换手率，volume 股 / amount 万元口径）+ 逐日累计 B，并重建受影响 hfq/state；另补 7 大指数与申万估值，逐部分独立成败并落采集台账。baostock 当日 bar 晚间才就绪，次晨批不用于当日。
 _Avoid_: 早盘补抓
 
 **板块回补**:
@@ -128,14 +128,14 @@ _Avoid_: 早盘补抓
 
 **复权事件回填**:
 `qstock-scheduler adj-backfill` 执行的复权回填（issue #163，spec #158 §6.1/§6.2）：窗口内逐日全市场累计因子事件集（成功空日/失败日可审计，失败不当作无事件）+ D-1 与窗口内逐日全市场不复权 raw；随后本地按票重建，事件票反推窗口基线 B0、无事件票 B0=1，并重建 hfq/state。断点续跑按因子日/raw 日读采集台账，失败重试，未决项落 `stock_factor_repair` 待修复台账，事件撤销落 `stock_factor_retracted` 标记（与整日替换同事务并标记受影响 state 为 pending）；同 B 非阶跃行不写事件表。`--end` 必须覆盖库内最新复权事实，历史窗口不回退窗口外派生。#164 复用本入口的无事件票 raw 并验收分类/隔离；北交所与替代源全市场回填不在本入口。
-_Avoid_: 全量回溯（那是 legacy 个股日线全历史）、板块回补
+_Avoid_: 板块回补
 
 **复权迁移硬验收**:
 `qstock-scheduler adj-acceptance` 执行的切换前验收（issue #165，spec #158 §7）：复用迁移产物和库内快照，以全量结构/事件 SQL、小样本逐值定值、100+100 分层样本和每股四表摘要哈希覆盖八项判据；Golden 边界票不占普通样本名额。默认零上游、只读业务表；真实上游 smoke 仅限显式 3–5 个连续交易日。八项全绿才可判 verified，pending、未解释显著差异或未运行 smoke 均不得宣称可切换。
 _Avoid_: 全市场新旧逐值对拍、为验收重抓全历史
 
 **个股日线入口**:
-`qstock-scheduler daily` 执行的个股日线固定入口：默认经腾讯 → 新浪 → baostock 的 fallback 链抓取并按业务键幂等写入 `stock_daily`；`--check` 只做三源对拍、不写库。北交所旧码 43x/83x/87x 请求前归一化到 920 新码。手册见 `docs/daily-source-cli.md`。
+`qstock-scheduler daily` 执行的个股日线固定入口：写库时以 baostock 为首选采集 raw，并逐日确认累计 B；仅在可信 B0 已存在时重建 hfq/state，无锚只写事实。单票 raw 可由腾讯/新浪补缺但保持 partial，后续 baostock 可覆盖升级并修订派生；`--all` 固定走 baostock 逐日全市场整窗重刷，不在全市场失败后切换替代源。写库模式的 `adj` 仅兼容回显，`--check` 才按所选口径做三源对拍且不写库。手册见 `docs/daily-source-cli.md`。
 _Avoid_: 日线脚本、补数脚本
 
 **指数日线入口**:
@@ -156,8 +156,8 @@ baostock `backAdjustFactor` 的累计复权因子口径，存于 `stock_adjust_f
 _Avoid_: 把 adjustFacto(r) 当作累计 B 或单次事件因子
 
 **窗口基线 B0**:
-当前复权窗口首次事件前的累计因子基线，由 `B0=B1×f1` 反推；D-1 必须是交易日历上的确切前一交易日 raw close，缺证据时 pending，不猜 B0=1。只有事件集完整且窗口确无事件的股票才归一 B0=1。
-_Avoid_: 默认基线、provisional 基线
+覆盖 `QSTOCK_ADJ_WINDOW_START` 的采集窗口归一锚。仅全窗口采集（init 回溯、复权事件回填、`daily --all`）或新股上市首日（morning）可建立；首次事件由 `B0=B1×f1` 反推，D-1 必须是交易日历上的确切前一交易日 raw close，事件集完整且全窗口确无事件时才归一 B0=1。daily 单票与 T+0 查询只消费 B0，不建立或改写；无锚只写 raw 与因子证据，保持 NULL/pending，不派生 hfq/qfq。
+_Avoid_: 默认基线、provisional 基线、查询窗基线
 
 **窗口基线 D-1 输入**:
 窗口首日即发生事件时，需要读取的窗口外最后一个交易日 raw 行；仅作 `B0=B1×f1` 的计算输入，保留在 `stock_daily_raw` 供审计/续跑，但不进入 hfq、事件集或窗口查询交付。它不是 legacy 价格，也不用于从旧 qfq 反推。
@@ -172,7 +172,7 @@ _Avoid_: 把事件表 B 与 hfq 表 F 混为同一 factor_cum
 _Avoid_: qfq 快照、固定前复权价
 
 **复权覆盖（coverage）**:
-新价格模型数据可用性分级：complete 要求生命周期内 raw 连续、逐日事件证据完整、基线可信且无未决异常；pending、已知缺口或无效 raw 为 partial；尚无足够状态为 unknown。单票 walking skeleton 只提供 complete 门控，不代替完整覆盖核验。
+新价格模型数据可用性分级：complete 要求相对可信 B0 的生命周期内 raw 连续、逐日事件证据完整、基线可信且无未决异常；B0 缺失只能 partial/unknown，pending、已知缺口或无效 raw 为 partial，尚无足够状态为 unknown。单票 walking skeleton 只提供 complete 门控，不代替完整覆盖核验。
 _Avoid_: 有行即完整、采集成功即 complete
 
 **复权切读**:

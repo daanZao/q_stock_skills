@@ -30,40 +30,37 @@
 - **baostock 第三（兜底）**：保留 `tradestatus` 权威停牌列；`_FIELDS` 补 `turn`
   恢复 `turnover_rate`（个股与指数接口共用字段，`index_daily.turnover_rate`
   同步恢复为 baostock 实测值）。
-- **链成员切换**：`default_daily_adapters()` = 腾讯 → 新浪 → baostock；
-  当前 legacy `fetch_daily`/`query_daily` 自愈与 `init_database(backfill_history=True)`
-  全量回溯均走该链。ADR 0018/#166 只交付全局切读与回滚能力，daily/T+0/init 的
-  raw + 累计因子改造由 #167 承担，本 ADR 的 qfq 落库结论在该任务完成前仍适用于
-  legacy 写路径。`AkshareAdapter.fetch_daily`（东财 `stock_zh_a_hist`）
-  显式抛 `FetchError(kind="unsupported")` 退役，避免误接线后静默走回东财。
+- **链成员切换**：`default_daily_adapters()` = 腾讯 → 新浪 → baostock，继续服务
+  legacy 查询与三源对拍。#167 新增 `default_adjustment_adapters()` =
+  baostock → 腾讯 → 新浪，服务 raw+B 的单票 daily/T+0 写入；init 与 `daily --all`
+  则复用 baostock 逐日全市场管线。新写入不再直接落 qfq；`AkshareAdapter.fetch_daily`
+  （东财 `stock_zh_a_hist`）显式抛 `FetchError(kind="unsupported")` 退役。
   其他能力面（盘面/快照/清单）仍用 `default_adapters()`，由 #111 后续 ticket
   逐个迁移——本 ADR 只约束个股日线。
 - **北交所归一化**：`adapters/_bse_codes.py` + `data/bse_code_map.csv`（北交所
   官方新旧代码对照表 248 条，2025-10-09 全面切换完成）。请求前把旧码归一化到
   920 新码；对照表未覆盖的旧码原样请求（保留冻结历史可取）。归一化只作用于
   请求，`stock_daily.stock_code` 仍记录调用方传入的代码。
-- **复权键缺失的语义**：请求 qfq/hfq 但上游只给 `day` 时，按"无复权事件"
-  处理并返回 day 数据（实测 920047 三口径数值一致）；不臆造调整序列。
-  **回落可见化**（2026-10-21 双轴评审后补）：发生时置适配器
-  `adjust_fallback` 标记并记 WARNING 日志，fetch/query 响应 note、采集
-  台账 detail、`daily --check` 源条目 note 三处同步标注，不静默落库。
+- **复权键缺失的语义**：legacy 或显式对拍请求 qfq/hfq 但上游只给 `day` 时，
+  按"无复权事件"处理并返回 day 数据（实测 920047 三口径数值一致）；不臆造调整序列。
+  回落经适配器标记、WARNING、legacy 响应/台账与 `daily --check` 源条目 note 留痕。
+  #167 新写入口固定取 raw，不再把 day 回落标成 qfq 写入。
 - **三源对拍**：`daily_parity.compare_daily_sources` 逐源直取同一交易日 bar 做
   字段级比较、不落库。`qfq`/`none` 全字段；`hfq` 只比成交量/成交额/换手率——
   各源后复权基准不同，价格类字段直接比会误报。固定入口
   `qstock-scheduler daily --check`。
-- **限速**：多段回溯段间 0.3s（实测连发 5–6 个腾讯请求触发 TLS 断连）；
-  CLI `--all` 缺省 1 秒/只。
+- **限速**：腾讯多段回溯段间 0.3s（实测连发 5–6 个请求触发 TLS 断连）；
+  #167 全市场管线固定 baostock 串行、相邻请求至少 1.5 秒，不沿用逐股 1 秒口径。
 
 ## Consequences
 
-- 收盘后当晚即可落 T+0 当日行；个股日线不再依赖东财。
-- 腾讯单请求 640 根：全历史回溯逐股约 19 次请求，属重操作；日常全市场 T+1
-  补数仍优先 `morning` 批（baostock 一把抓约 20s）。
-- 新浪走全历史下载（老股 6.5–15.4s）且封 IP 风险有官方文档背书，只作腾讯
-  故障时的备选，不作主源。
-- 腾讯/新浪无 `tradestatus`：两源写入行为 null，停牌语义仍靠 baostock 兜底与
-  ADR 0009 的启发式；腾讯/新浪的 change_percent/change_amount/amplitude 为
-  前收推算值，与 baostock/东财原生列可能有末位差异（对拍容差已覆盖）。
+- 收盘后当晚可通过单票替代源落 T+0 raw；个股日线不再依赖东财。
+- init 与 `daily --all` 已改为逐日全市场 raw+因子，不再执行“腾讯逐股全历史约
+  19 次请求”的旧回溯；日常权威修订仍优先 `morning`。
+- 新浪走全历史下载（老股 6.5–15.4s）且封 IP 风险有官方文档背书，只作单票 raw
+  备选，不作全市场回填源。
+- 腾讯/新浪无权威 `tradestatus` 与 pctChg：其 raw 可返回但保持 partial，不能用
+  推算 change_percent 反推 B0；停牌与权威修订仍靠 baostock。对拍容差规则不变。
 - 北交所旧码/新码若混用会形成两条 `stock_daily` 序列；统一代码口径需单独的
   数据迁移动作。
 - `default_adapters()` 仍含东财，其他能力面的退役不在本 ADR 范围内。

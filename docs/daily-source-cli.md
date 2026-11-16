@@ -1,176 +1,121 @@
 # 个股日线固定入口操作手册（`qstock-scheduler daily`）
 
-issue #112（spec #111）：个股日线 fallback 链重排为 **腾讯 → 新浪 → baostock**，
-东财日线退出。本手册是该能力的固定 CLI 入口说明——抓取、区间更新、三源对拍
-都走同一入口，可重复运行、可挂定时任务；不使用一次性临时脚本。
+issue #112 提供三源对拍；issue #167 将写库模式改为 **raw + 累计 B + 派生重建**。
+本手册是固定 CLI 入口说明；不使用一次性临时脚本。
 
 ## 适用场景
 
 | 场景 | 命令要点 |
 | --- | --- |
-| 收盘后当晚补当日行（T+0） | `daily --codes ... --date <当日>` |
-| 补某段历史缺口 | `daily --codes ... --start <起> --end <止>`（默认只补头尾） |
-| 最近 90 个交易日整窗刷新 | `daily --all --trading-days 90 --force`；已有行也重抓，窗外不动 |
-| 迁移/换源后验证数据质量 | `daily --codes ... --date <交易日> --check`（不写库） |
-| 全市场刷新（重操作） | `daily --all --limit N` 冒烟后再全量；缺省 1 秒/只节流 |
-| 北交所个股 | 新码 `920xxx` 直接传；旧码 `43x/83x/87x` 自动归一化到 920 新码 |
-| 三复权口径**取数** | `--adj qfq` / `--adj hfq` / `--adj none` 分别执行（业务键含 adj，互不覆盖）；三源**对拍**时 hfq 只比量/额/换手率（见下） |
+| 单票收盘后补当日行（T+0） | `daily --codes 600519 --date <当日>` |
+| 单票修复历史窗口 | `daily --codes 600519 --start <起> --end <止>` |
+| 显式全市场整窗重刷 | `daily --all --trading-days 90`；`--all` 本身即强制重刷 |
+| 三源对拍 | `daily --codes ... --date <交易日> --check`（不写库） |
+| 全量回溯 | `init_database(backfill_history=True)`，复用同一逐日全市场管线 |
 
 ## 前置条件
 
-- 已完成 editable 安装：`.venv/bin/pip install -e ".[sources,dev]"`；
-- 环境变量 `PG_DSN` 指向业务库（写库模式必需；`--check` 不连库，仅 `--all`
-  取股票清单时需要）；
-- 数据库表已初始化（`init_database` 或此前已运行过任一写库批）。
+- 已完成 editable 安装：`.venv/bin/pip install -e ".[sources,dev]"`。
+- 写库模式的 `PG_DSN` 指向目标库，且 schema 已初始化。
+- baostock 遵守实例租约：CLI 首次实际使用时自动 acquire，命令结束释放；锁冲突返回
+  `baostock_locked`，不静默排队或换源。MCP 仍须 agent 获得用户确认后显式 acquire。
 
 ## 命令
 
 ```bash
-# 单日抓取落库（沪/深/北代表股）
-qstock-scheduler daily --codes 600519,000001,920001 --date 20261020
-
-# 区间补采（按业务键 upsert，可重复执行）
+# 单票 raw + 因子 + 派生重建
+qstock-scheduler daily --codes 600519,000001 --date 20261020
 qstock-scheduler daily --codes 600519 --start 20261001 --end 20261020
 
+# 显式全市场整窗重刷；逐日全市场 raw + 因子，不逐股请求
+qstock-scheduler daily --all --date 20261020 --throttle 1.5
+
 # 三源对拍：逐源直取、字段级比较，不写库
-qstock-scheduler daily --codes 600519,000001,920001,833171 --date 20261020 --check
-
-# 北交所旧码（833171）经官方对照表归一化到 920571 后抓取
-qstock-scheduler daily --codes 833171 --date 20261020
-
-# 全市场（先冒烟 20 只；全量约 1.5–2 小时）
-qstock-scheduler daily --all --limit 20 --date 20261020
-qstock-scheduler daily --all --date 20261020 --throttle 1
+qstock-scheduler daily --codes 600519,000001 --date 20261020 --check
+qstock-scheduler daily --codes 600519 --date 20261020 --adj hfq --check
 ```
 
 参数说明：
 
-- `--codes`：逗号分隔，支持 `sh/sz/bj` 前缀；与 `--all` 互斥。
-- `--all`：从库内 `stock_list` 取全部代码；`--limit` 只取前 N 只（冒烟）。
-- `--date` 与 `--start/--end/--trading-days` 互斥；都不传时缺省当日。区间跨多个交易日时
-  逐段补齐，空结果（停牌/非交易日）不是失败。
-- `--trading-days N`：选择含截止日在内的 N 个 A 股交易日，不是 N 个自然日；
-  可用 `--end` 指定截止日，缺省截止最近已收盘交易日；与 `--start` 互斥。
-- `--force`：整窗重抓并覆盖窗内同键记录，不读取已有日期做头尾跳过；窗口外不动。
-  默认仍只补头尾缺口，中段缺口不会自动补。
-- `--adj`：`qfq`（缺省）/ `hfq` / `none`，写入 `stock_daily.adj`。
-- `--check`：逐源直取**结束日**的 bar 比对（区间模式取 `--end`），不落库；
-  沪/深/北各源可比值见下。**`--adj hfq` 时只比成交量/成交额/换手率**——各源
-  后复权基准不同（实测 600519 腾讯 9298.83 / 新浪 11830.44 / baostock
-  10214.53），价格类字段直接比会误报；输出带 `note` 与每只股票的
-  `compared_fields`。`qfq`/`none` 全字段比对。
-- `--throttle`：逐 code 间隔秒；`--all` 缺省 1.0，显式 `--codes` 缺省 0。
-  腾讯公开端点实测连发 5–6 个请求会触发 TLS 层断连（间隔 8s 恢复），批量
-  抓取务必保留节流。
-- 全量回溯（`init_database(backfill_history=True)`）也走本链：腾讯单请求
-  640 根，逐股约 19 次请求；适配器在分段回溯之间留 0.3s 间隔，但整批仍建议
-  放在非交易时段执行。日常全市场 T+1 补数优先用 `morning`（baostock 一把抓）。
+- `--codes` 与 `--all` 互斥；`--all` 仍要求库内 `stock_list` 非空。
+- `--date` 与 `--start/--end/--trading-days` 互斥；都不传时缺省当日。
+- 单票默认只补 raw 头尾缺口，并补齐窗口内缺失的逐日因子证据；`--force` 整窗重抓。
+  baostock 优先；其单票 raw 失败或暂未返回当日行时，可尝试腾讯/新浪补单票 raw。
+- `--all` 是显式全量重刷：固定复用 `run_adjustment_backfill`，逐日调用全市场因子与
+  raw 接口，并额外取得窗口外 D-1 输入。baostock 整体不可用时失败并落台账，
+  **不自动执行全市场腾讯/新浪回填**。`--force` 对 `--all` 是冗余参数。
+- `--all --limit N` 只限制事件票的本地重建，不减少按日全市场请求；有限样本会标记
+  `limited` 并按 `partial_error` 报告，不能当作全市场验收通过。
+- 写库模式的 `--adj` 仅为兼容保留并原样回显：无论传 `qfq/hfq/none`，都写 raw+B，
+  不再直接写对应口径的 `stock_daily` 行。`--adj` 只在 `--check` 时选择对拍口径。
+- `--throttle` 单票模式控制逐 code 的调用间隔（缺省 0），不控制单票内部的逐日因子请求；
+  `--all` 由全市场管线固定串行，缺省相邻 baostock 请求至少 1.5 秒，显式值覆盖缺省。
+  单票窗口越长，逐日因子请求数按交易日数增长，调用前须按数据源预算与最短间隔评估。
+  单请求 60 秒硬超时、会话与预算由 baostock 公共层承载。
+- `--check` 逐源直取结束日 bar，不落库。hfq 只比成交量/成交额/换手率；qfq/none
+  按既有字段规则比对。
 
 ## 输出与退出码
 
-stdout 只输出一份 JSON（日志走 stderr）：
+单票模式保留逐股 `results`：关注 `status`、`source`、`rows_upserted`、`data_range`、
+`segments` 与 `adjust.coverage`。无 raw 缺口且因子证据已成功时零上游请求，
+`source=null`、`rows_upserted=0`。
 
-```json
-{"status":"ok","job":"daily","mode":"fetch","range":{"start":"20261020","end":"20261020"},
- "adj":"qfq","total":3,"succeeded":3,"failed":0,
- "results":[{"stock_code":"600519","status":"ok","source":"tencent",
-             "rows_upserted":1,"data_range":{"start":"20261020","end":"20261020"}}]}
-```
+`--all` 输出 `stage`、`summary` 和 `artifacts`；请求数、断点命中、失败日、pending、
+修复项和窗口行数在 `summary` 中。只有 `status=ok` 才是完整成功；`partial_error` 和
+`error` 均退出 1。输入非法退出 1，argparse 参数错误退出 2。
 
-- `mode="fetch"`：`status` 为 `ok` / `partial_error` / `error`（全失败）；
-  每只股票带实际命中源 `source`（`tencent`/`sina`/`baostock`）。默认模式下已补过的区间
-  重跑为零抓取：`source` 为 null、`rows_upserted` 0、`note` 为「区间内无缺口，
-  零抓取」；`--force` 不适用此跳过规则。顶层回显 `trading_days` 与 `force`。
-  腾讯复权键缺失按 day 回落时（无复权事件或
-  上游不提供调整序列），`note` 标注「上游缺复权键，已按不复权（day）数据落库」，
-  采集台账 detail 同步留「复权回落=day」。
-- `mode="check"`：`status` 为 `ok` / `mismatch` / `error`；每只股票带
-  `sources.{tencent,sina,baostock}` 的逐源状态（`ok`/`no_data`/`error`/
-  `unsupported`）与 `diffs` 字段级差异；`single_source` 只算警告（如北交所
-  baostock by-design 不支持），不改变退出码。某源复权回落时该源条目带
-  `note`（「上游缺复权键，本次取数为不复权（day）回落」）。
-- 退出码：0 = 无失败/无差异；1 = 有失败、有对拍差异或输入非法；2 = 参数错误
-  （argparse）。
+因子请求失败与成功空结果严格区分：失败会落 `stock_adjust_factor/error` 台账并令
+state pending，不能据此判 complete。替代源 raw 缺少权威 pctChg 时同样保持 partial；
+无可信基线时不生成 hfq/qfq。次晨 `morning` 的 baostock raw+因子可修订这些 T+0 行，
+并重建受影响派生。
 
-## 数据口径
+## 可信 B0 与重建权限
 
-- **T+0**：腾讯/新浪收盘后当晚返回当日行（#104 实测 15:37 已可取）；baostock
-  仍为 T+1，作兜底与停牌权威列来源。
-- **单位**：volume 入库存股（腾讯手 ×100；科创板 sh688/sh689 原生为股；新浪
-  原生为股）；amount 入库万元（腾讯原生万元；新浪元 ÷1e4）；turnover_rate
-  为百分数（腾讯原生；新浪 fraction ×100）。
-- **推算字段**：腾讯/新浪无 change_percent/change_amount/amplitude，按前收
-  推算；区间首行的前收随回溯取得，上市首日无前收则置 null（不伪造）。
-- **北交所**：`data/bse_code_map.csv` 为北交所官方新旧代码对照表（248 只，
-  2025-10-09 全面切换）。腾讯旧码数据冻结在迁码前，因此旧码一律先归一化到
-  920 新码再请求；对照表未覆盖的旧码原样请求（保留冻结历史可取）。注意：
-  归一化只作用于**请求**，`stock_daily.stock_code` 仍记录你传入的代码——若
-  同一只票既要按旧码又要按新码取数，会形成两条序列，迁移时需统一代码口径。
-- **落库**：每只股票调用一次 `tools_daily.fetch_daily`，默认只补头尾缺口，
-  `--force` 整窗重抓；按 `(stock_code, trade_date, adj)` 幂等 upsert，并落一条 `collection_log`
-  （section=`stock_daily`）。`--all` 会为每只股票各落一条台账行，与逐股调用
-  `fetch_daily` 一致。
+`QSTOCK_ADJ_WINDOW_START` 定义的采集窗口才能建立 B0：init 全量回溯、
+`adj-backfill` 和 `daily --all` 复用该路径，但只有 `start <= QSTOCK_ADJ_WINDOW_START`
+且事件集完整时才实际建锚；窄窗回填不获得建锚权限。morning 仅新股上市首日可初始化。
+单票 daily 与 T+0 查询只消费 B0，不根据查询窗无事件记录假定 B0=1，也不从查询窗
+首事件反推。无锚时仅写 raw 与因子证据，baseline/F_latest 为 NULL 且 pending，
+不生成或改写 hfq/qfq。
 
-## 回滚与还原
+带锚 daily 只从 `rebuild_from` 起做 0.1% 对账，mismatch/unverified 进入
+`stock_factor_repair`。窄窗 daily 不清全量采集留下的 pending；腾讯/新浪 raw 可由后续
+baostock 覆盖升级并修订派生。morning 始终消费已有锚，只有新股首日例外初始化。
 
-CLI 只写 `stock_daily`（业务键 upsert）与 append-only 台账；无 schema 变更。
-**upsert 会把被覆盖行的 `source` 改成本次命中源**，所以不能仅凭 `source`
-判断"这行原来是谁写的"。写库前（尤其 `--all` 覆盖既有行时）先备份：
+## 数据与审计口径
+
+- 写 `stock_daily_raw`、`stock_adjust_factor`、`stock_daily_hfq`、`stock_factor_state`；
+  qfq 只按最新锚点在读取时派生，不物化。
+- raw 与因子按业务键幂等 upsert；amount 由 baostock 适配层从元除以 10000 为万元，
+  volume 为股。raw/因子重跑与派生重建幂等。
+- `stock_daily_raw`、`stock_adjust_factor` 与 `stock_factor_repair` 台账保留采集、
+  断点、异常和修复证据；采集台账 append-only。
+- 本管线不写 legacy：正常期不双写；回滚期间仍持续写 raw+B，legacy 修复统一由
+  `adj-switch rollback` 完成，不启动第二套采集器。
+
+## 备份与还原
+
+`--all` 会覆盖窗内事实并重建派生。运行前记录目标库、窗口、当前最大日期、预计请求数、
+写入表和耗时上限，并备份四张表：
 
 ```bash
-pg_dump -t stock_daily <db> > stock_daily_before_$(date +%Y%m%d%H%M).sql
+pg_dump "$PG_DSN" \
+  -t stock_daily_raw -t stock_adjust_factor \
+  -t stock_daily_hfq -t stock_factor_state \
+  > adjustment_before_$(date +%Y%m%d%H%M).sql
 ```
 
-回滚分两类：
-
-```sql
--- 1) 清理本次**新增**的行（未发生过 upsert 覆盖：created_at = updated_at）
-DELETE FROM stock_daily
- WHERE trade_date = '20261020' AND adj = 'qfq'
-   AND source IN ('tencent', 'sina')
-   AND created_at = updated_at
-   AND stock_code IN ('600519', '000001', '920001');
-
--- 区间版同理：trade_date BETWEEN '20261001' AND '20261020'
-```
-
-- 本次**覆盖**的旧行无法从库内反推原值：从 `pg_dump` 备份恢复到临时表后按
-  `(stock_code, trade_date, adj)` 回写，或用目标源重跑覆盖（upsert 幂等）。
-- 台账 `collection_log` 为审计表，append-only，不回滚。
-- 只想换回旧源数据时，按业务键删除后由 `query_daily` 自愈补回，或用目标源
-  重跑。
-
-## 定时任务示例（launchd）
-
-收盘后 19:30 补当日行（示例；路径按实际仓库替换）：
-
-```xml
-<key>ProgramArguments</key>
-<array>
-  <string>/path/to/q_stock_skills/.venv/bin/qstock-scheduler</string>
-  <string>daily</string>
-  <string>--all</string>
-  <string>--throttle</string>
-  <string>1</string>
-</array>
-<key>StartCalendarInterval</key>
-<dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
-```
-
-不传 `--date` 时由 CLI 取当日（目标日恒为当日 yyyymmdd）。
-
-更完整的 launchd 安装步骤见 [`scheduler-launchd.md`](scheduler-launchd.md)。
-注意：全市场 `--all` 是重操作（约 5900 次腾讯请求），日常全市场 T+1 补数仍
-优先用 `morning` 批；`daily --all` 仅用于确需当晚 T+0 全量的场景。
+还原先恢复备份，再按同一窗口重跑并检查 summary/artifacts；不要用旧 qfq 反推 raw。
+详细断点、修复和产物说明见 [`adj-backfill-cli.md`](adj-backfill-cli.md)，全局回滚见
+[`adj-switch-cli.md`](adj-switch-cli.md)。生产切读仍归 #184，本命令完成不等于已切读。
 
 ## 验证
 
-- 单元/集成：`.venv/bin/pytest tests/test_tencent_adapter.py tests/test_sina_adapter.py tests/test_daily_chain.py tests/test_scheduler.py`
-- 全量：`.venv/bin/pytest tests/`（PG 不可达自动 skip）
-- 真实冒烟（不写库）：
+```bash
+.venv/bin/pytest tests/test_fetch_daily.py tests/test_query_daily_adjustment.py \
+  tests/test_scheduler.py tests/test_init_full.py tests/test_morning_batch.py
+.venv/bin/pytest tests/
+```
 
-  ```bash
-  qstock-scheduler daily --codes 600519,000001,920001,833171 --date 20261020 --check
-  # 期望：status=ok、mismatch_count=0；北交所 baostock=unsupported、
-  # tencent/sina 数值一致；833171 经映射返回 2026-10-20 行
-  ```
+`--check` 仍是独立的上游对拍入口，不替代 raw+B 写入、派生重建或迁移硬验收。

@@ -103,7 +103,7 @@ python3 -m venv .venv
 | 次晨全市场 raw、累计因子、hfq 重建与指数补采 | `qstock-scheduler morning` |
 | 收盘后盘面采集 | `qstock-scheduler close` |
 | 个股日线补采 | `qstock-scheduler daily --codes 600519,000001 --date 20261023` |
-| 最近 90 日个股整窗刷新 | `qstock-scheduler daily --all --trading-days 90 --force --throttle 1` |
+| 最近 90 日个股整窗刷新 | `QSTOCK_ADJ_WINDOW_START=<窗口首日> qstock-scheduler daily --all --trading-days 90 --throttle 1.5` |
 | 指数日线回补 | `qstock-scheduler index --trading-days 90` |
 | 申万板块历史回补 | `qstock-scheduler backfill --source sw --trading-days 90 --force` |
 | 复权回填：事件集 + 全市场 raw + 本地重建 | `qstock-scheduler adj-backfill --trading-days 3 --limit 20` |
@@ -113,7 +113,9 @@ python3 -m venv .venv
 
 **[查看全部 17 个子命令及参数说明](docs/first-run.md#第二章调度-cli-命令手册)** · **[launchd 定时采集配置](docs/scheduler-launchd.md)**
 
-建议交易日 **19:30 之后**执行每日复盘：此时涨停池、龙虎榜与当日日线通常已经就绪。全市场 `daily --all` 通常需要约 1.5–2 小时，请保留节流。
+建议交易日 **19:30 之后**执行每日复盘：此时涨停池、龙虎榜与当日日线通常已经就绪。`daily --all` 逐日串行采集，实际请求间隔至少 1.5 秒，耗时以当次 summary 为准。
+
+`QSTOCK_ADJ_WINDOW_START` 是全窗口 B0 的建立边界：只有覆盖该起点的完整事件集可建锚；窄窗 daily/T+0 只消费已有锚，无锚只写 raw 与因子证据。
 
 > 历史分析就绪不等于历史每日复盘完整可重做。全市场快照、实时板块快照、营业部累计榜等数据无法全部事后恢复；涨停池的历史深度也有限。日常采集与告警不能由事后补录替代。
 
@@ -121,7 +123,7 @@ python3 -m venv .venv
 
 | 数据面 | 主要承载 |
 | --- | --- |
-| 个股日线 | 腾讯 → 新浪 → baostock |
+| 个股日线 | 新写入 baostock raw+累计 B（单票可由腾讯/新浪补缺）；legacy 查询腾讯 → 新浪 → baostock |
 | 全市场快照 | 腾讯批量报价 → 腾讯 rank → 新浪 |
 | 指数 | 腾讯 → baostock / 新浪（按日线或快照能力区分） |
 | 申万板块 | 申万官网；故障时复盘可降级到库内自算 |

@@ -14,7 +14,7 @@
 | 数据 | 形态 | 可补范围与前置依赖 | 一致性策略 |
 | --- | --- | --- | --- |
 | 股票清单 | 当前原始清单 | 全市场个股日线的前置；不代表历史 Universe | 先刷新清单，再执行 `daily --all` |
-| 个股、指数日线 | 原始行情 | 可按 90 日窗口或更深历史回补；复权口径分开 | 个股 `--force` 整窗覆盖同键；指数按业务键补采与覆盖核验 |
+| 个股、指数日线 | 个股 raw+累计 B 与派生；指数原始行情 | 可按 90 日窗口或更深历史回补；个股 qfq 在读取时派生 | 个股按日全市场采集并重建；指数按业务键补采与覆盖核验 |
 | 申万板块历史 | 原始板块行情 | 申万官网趋势数据可回溯至 1999 年；限当前一级/二级口径 | `--force` 整窗重抓，默认逐板断点续跑；旧口径只读 |
 | 龙虎榜 basic | 原始披露 | 交易所官方源实测沪深可回溯至 2015 年、北交所至 2021 年开市；同花顺主采深度待验证；深圳失败才由官方补缺 | 同花顺校验通过即完整；完整官方日默认保留，`--force` 才替换；实际重抓日原子替换 |
 | 龙虎榜滚动统计 | 物化派生数据 | 由 basic 与窗前 60 日历日输入派生 | 按当前公式 DELETE+INSERT 重算；staging 复用完整输入且窗外零写入 |
@@ -50,7 +50,7 @@ export PG_DSN='postgresql://user:pass@host:5432/qstock'
 {"backfill_history": false}
 ```
 
-不要开启 `backfill_history`：它会触发全市场全历史回溯，不是本指南的 90 个交易日刷新。
+不要开启 `backfill_history`：它会从 `QSTOCK_ADJ_WINDOW_START`（缺省 20230101）触发全市场 raw+B 回溯与派生重建，不是本指南的 90 个交易日刷新。
 
 **成功标志**：返回 `status="ok"`，且 `parts.stock_list.status="ok"`。如果返回 `partial_error`，查看 `failed_parts` 和各 part 的错误，修正后重试；不要继续跑全量任务。
 
@@ -68,12 +68,12 @@ export PG_DSN='postgresql://user:pass@host:5432/qstock'
 
 ```bash
 psql "$PG_DSN" -c "
-SELECT 'stock_daily' AS section, md5(string_agg(md5(stock_daily::text), '' ORDER BY md5(stock_daily::text))) FROM stock_daily WHERE trade_date NOT BETWEEN 'START' AND 'END'
+SELECT 'stock_daily_raw' AS section, md5(string_agg(md5(stock_daily_raw::text), '' ORDER BY md5(stock_daily_raw::text))) FROM stock_daily_raw WHERE trade_date NOT BETWEEN 'START' AND 'END'
 UNION ALL SELECT 'index_daily', md5(string_agg(md5(index_daily::text), '' ORDER BY md5(index_daily::text))) FROM index_daily WHERE trade_date NOT BETWEEN 'START' AND 'END'
 UNION ALL SELECT 'market_boards', md5(string_agg(md5(market_boards::text), '' ORDER BY md5(market_boards::text))) FROM market_boards WHERE trade_date NOT BETWEEN 'START' AND 'END'
 UNION ALL SELECT 'lhb_basic', md5(string_agg(md5(lhb_basic::text), '' ORDER BY md5(lhb_basic::text))) FROM lhb_basic WHERE trade_date NOT BETWEEN 'START' AND 'END'
 UNION ALL SELECT 'lhb_stock_statistic', md5(string_agg(md5(lhb_stock_statistic::text), '' ORDER BY md5(lhb_stock_statistic::text))) FROM lhb_stock_statistic WHERE trade_date NOT BETWEEN 'START' AND 'END';
-SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
+SELECT rebuild_pending, COUNT(*) FROM stock_factor_state GROUP BY rebuild_pending ORDER BY rebuild_pending;
 " > /tmp/qstock_before.txt
 ```
 
@@ -89,25 +89,35 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 
 **成功标志**：`status="ok"`，`rows_upserted` 大于 0。若为 `empty` 或 `error`，不要继续；根据输出中的 `attempted_sources` 排查数据源后重跑。
 
-### 5. 用 20 只个股做日线冒烟
+### 5. 用有限重建样本做日线冒烟
 
-先验证数据源、复权口径和写库链路：
+先验证数据源、raw+B 写库与派生链路：
 
 ```bash
-.venv/bin/qstock-scheduler daily --all --limit 20 --trading-days 90 --force
+QSTOCK_ADJ_WINDOW_START=<90交易日窗口首日> \
+  .venv/bin/qstock-scheduler daily --all --limit 20 --trading-days 90
 ```
 
-**成功标志**：`status="ok"`、`failed=0`，20 只股票均有结果。若为 `partial_error` 或 `error`，先查看 `results` 中失败股票的原因，修正后重跑本命令，不要直接开始全量任务。
+`--limit` 只限制事件票本地重建，不减少逐日全市场请求，因此结果会带 `limited` 并按
+`partial_error` 报告。检查 `summary` 中无失败日、无未解释修复项，并保存 `artifacts`；
+不要把有限样本当作全市场验收。
 
 ### 6. 刷新全市场个股日线
 
 ```bash
-.venv/bin/qstock-scheduler daily --all --trading-days 90 --force --throttle 1
+QSTOCK_ADJ_WINDOW_START=<90交易日窗口首日> \
+  .venv/bin/qstock-scheduler daily --all --trading-days 90 --throttle 1.5
 ```
 
-全量通常需要约 1.5–2 小时。进度日志输出到 stderr，最终 JSON 输出到 stdout；长时间运行不等于卡死，请保留 1 秒/只的节流。
+需要建立 B0 时，变量必须设为实际窗口首日；只有覆盖该起点的完整事件集才可建锚。
+已有可信 B0 的窄窗只消费锚，不要把 90 日窗口误当成建锚权限。
 
-**成功标志**：`status="ok"`、`failed=0`。失败时根据 `results` 定位问题，修正后重跑同一命令。
+`--all` 本身是显式整窗重刷，逐日获取全市场 raw 与因子，不再逐股请求。进度日志输出到
+stderr，最终 JSON 输出到 stdout；耗时随窗口交易日数增长，以本次 `summary` 的实际请求数
+和耗时为准，不沿用旧逐股耗时估算。
+
+**成功标志**：`status="ok"`、`failed=0`，无失败日或未决修复项。失败时根据 `summary`
+和 `artifacts` 定位问题，修正后重跑同一命令。
 
 ### 7. 刷新指数、申万板块和龙虎榜
 
@@ -133,13 +143,15 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 ### 8. 验收覆盖结果
 
 ```bash
-.venv/bin/qstock-scheduler coverage --trading-days 90
+QSTOCK_PRICE_SOURCE=new .venv/bin/qstock-scheduler coverage --trading-days 90
 ```
+
+这里显式用 new reader 核验 raw 连续性、事件证据与派生状态；不代表已经执行生产切读。
 
 **完成标准**：返回 `status="ok"`，且 `summary.gaps=0`。逐项检查，而不是只看退出码：
 
 - 顶层 `range` 与 `calendar_days` 是预期的 90 个交易日窗口；
-- `stock_daily`、`index_daily`、`market_boards` 中各标的的 `first_date`、`last_date`、`rows` 和 `missing_days` 覆盖完整，`status="ok"`；
+- `stock_daily` 节在 new 模式下读取 raw，与 `index_daily`、`market_boards` 各标的的 `first_date`、`last_date`、`rows` 和 `missing_days` 覆盖完整，`status="ok"`；
 - `lhb` 逐日的 `basic_rows`、`statistic_rows` 与 `ledger_status` 相互印证：有 basic 的日期必须有滚动统计，确认空日应有 `empty` 台账，不应残留 `error`；
 - 个股、指数和申万的刷新结果及相应采集台账也要无未处理的 `error`/`partial_error`，不能只检查龙虎榜台账。
 
@@ -180,17 +192,17 @@ SELECT adj, COUNT(*) FROM stock_daily GROUP BY adj ORDER BY adj;
 
 #### `daily`：个股日线抓取、区间刷新与三源对拍
 
-- **写库**：抓取模式写 `stock_daily` 并落台账；`--check` 不写库。
+- **写库**：抓取模式写 raw、累计 B、hfq/state 并落台账，不写 legacy qfq；`--check` 不写库。
 - **常用命令**：
 
   ```bash
   .venv/bin/qstock-scheduler daily --codes 600519,000001 --date 20261023
-  .venv/bin/qstock-scheduler daily --all --trading-days 90 --force --throttle 1
+  .venv/bin/qstock-scheduler daily --all --trading-days 90 --throttle 1.5
   .venv/bin/qstock-scheduler daily --codes 600519 --date 20261023 --check
   ```
 
-- **关键参数**：`--codes` 与 `--all` 二选一；`--limit` 配合 `--all` 冒烟；`--adj` 可选 `qfq/hfq/none`；`--force` 整窗重抓；`--throttle` 控制逐股间隔；`--check` 对拍结束日数据。
-- **结果判断**：抓取模式应为 `status="ok"`、`failed=0`；`partial_error` 时查看逐股 `results`。对拍差异见 `diffs`。
+- **关键参数**：`--codes` 与 `--all` 二选一；`--all` 固定逐日全市场整窗重刷；`--limit` 只限制事件票本地重建；单票 `--force` 整窗重抓；写库时 `--adj` 仅兼容回显，`--check` 时选择对拍口径；`--throttle` 控制请求间隔。
+- **结果判断**：完整抓取应为 `status="ok"`、`failed=0`；单票看 `results`，全市场看 `summary` 与 `artifacts`。对拍差异见 `diffs`。
 - **详细手册**：[个股日线 CLI](daily-source-cli.md)。
 
 #### `index`：指数日线回补、当日补采与覆盖核验
