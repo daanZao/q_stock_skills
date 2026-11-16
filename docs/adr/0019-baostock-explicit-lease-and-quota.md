@@ -37,8 +37,8 @@ baostock 官方黑名单页只写了一条额度规则：**每日 API 请求不�
    - agent 发现无锁后先询问用户，得到确认才调用 `baostock_lock(acquire)`；工具不自动申请。
    - 相关数据工具在整个工具入口验证当前实例租约，在 PG 或其他数据源工作前返回
      `baostock_locked`。仅持有实例可正常 release，release 同时关闭当前进程会话。
-   - `QSTOCK_PRICE_SOURCE=new` 的纯 PG `query_daily` 不触 baostock，豁免租约；其他非
-     baostock 工具不受影响。
+   - #167 前 new `query_daily` 曾是纯 PG 并豁免租约；#167 接入自愈后该豁免取消，
+     入口统一验租约，缓存命中仍可在持锁后零上游。其他非 baostock 工具不受影响。
 4. **stale 只经人工确认，代际变更不得误删。**
    - 不做 TTL 或自动进程存活判定。`status` 展示实例信息；操作者确认持有进程终止后才执行
      `release --force`。

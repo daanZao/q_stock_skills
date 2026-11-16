@@ -162,17 +162,20 @@ def test_mcp_holder_can_use_data_tool_and_then_release(tmp_path, monkeypatch):
     assert server.baostock_lock("release")["released"] is True
 
 
-def test_mcp_new_price_query_is_pure_pg_and_exempt_from_lease(
-    tmp_path, monkeypatch
-):
+def test_mcp_new_price_query_requires_lease_before_core(tmp_path, monkeypatch):
     monkeypatch.setenv("QSTOCK_BAOSTOCK_LOCK_DIR", str(tmp_path))
     monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
-    expected = {"status": "ok", "rows": []}
     monkeypatch.setattr(
-        server.tools_daily, "query_daily", lambda *args, **kwargs: expected
+        server.tools_daily,
+        "query_daily",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("可自愈的 new 查询不得跳过入口租约")
+        ),
     )
 
-    assert server.query_daily("600519", days=5) == expected
+    out = server.query_daily("600519", days=5)
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
 
 
 def test_baostock_data_tools_declare_instance_lease_and_user_confirmation():

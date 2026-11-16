@@ -1,11 +1,19 @@
 """单票复权竖切：raw 与累计 B 事实 upsert，重建 hfq/state 并派生 qfq。"""
 
+import os
 from decimal import Decimal
 
 from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from .adjustment_lock import lock_adjustment_facts
 from .dates import prev_trading_day
+
+ADJUSTMENT_WINDOW_START = "20230101"
+
+
+def adjustment_window_start() -> str:
+    return os.environ.get("QSTOCK_ADJ_WINDOW_START", ADJUSTMENT_WINDOW_START).replace("-", "")
+
 
 _RAW_FIELDS = (
     "trade_date", "open", "high", "low", "close", "preclose", "volume",
@@ -45,6 +53,8 @@ def _event_price_factor(raw_by_date: dict[str, dict], ex_date: str) -> Decimal |
     row = raw_by_date.get(ex_date)
     previous = raw_by_date.get(prev_trading_day(ex_date))
     if row is None or previous is None:
+        return None
+    if row.get("source") != "baostock" or previous.get("source") != "baostock":
         return None
     return event_factor_from_pctchg(
         previous.get("close"), row.get("close"), row.get("change_percent")
@@ -130,6 +140,10 @@ def rebuild_stock(
     *,
     authoritative_event_dates=(),
     baseline_factor=None,
+    event_set_complete: bool = True,
+    force_pending: bool = False,
+    allow_baseline_init: bool = False,
+    preserve_pending: bool = False,
     rebuild_from: str | None = None,
     window_start: str | None = None,
     window_end: str | None = None,
@@ -137,9 +151,9 @@ def rebuild_stock(
     """写入单票事实并原子重建派生；authoritative_event_dates 整日替换事件。
 
     window_start/window_end 是回填窗口（#163）：事件、派生与状态只按窗口内
-    事实计算，窗口外 raw 仅作首个事件 D-1 计算输入，不写入 hfq。窗口模式下
-    逐事件做 B 路径 vs 权威 pctChg 价格路径对账，未通过即 pending 但保留已
-    建立的基线（基线本身不可验证时仍 NULL/NULL）。
+    事实计算，窗口外 raw 仅作首个事件 D-1 计算输入，不写入 hfq。只有显式
+    allow_baseline_init 才允许建立 B0；daily/T+0 不得传入。对账只覆盖
+    rebuild_from 起的事件，preserve_pending 保留全量采集遗留的 pending。
     """
     def _in_window(trade_date: str) -> bool:
         return (
@@ -290,24 +304,55 @@ def rebuild_stock(
                     "quarantined": quarantined,
                 }
 
-            pending = False
+            previous_pending = False
+            if preserve_pending:
+                cur.execute(
+                    "SELECT rebuild_pending FROM stock_factor_state WHERE stock_code=%s",
+                    (stock_code,),
+                )
+                previous = cur.fetchone()
+                previous_pending = bool(previous and previous[0])
+            pending = previous_pending or not event_set_complete or force_pending
+            if baseline_factor is None and not allow_baseline_init:
+                cur.execute(
+                    "SELECT baseline_factor FROM stock_factor_state WHERE stock_code=%s",
+                    (stock_code,),
+                )
+                existing_state = cur.fetchone()
+                if existing_state is not None and existing_state[0] is not None:
+                    baseline_factor = existing_state[0]
             if baseline_factor is None:
-                if events:
+                if events and allow_baseline_init:
                     first_factor = _event_price_factor(raw_by_date, events[0]["ex_date"])
                     if first_factor is None:
                         pending = True
                         baseline = None
                     else:
                         baseline = _decimal(events[0]["factor_cum"]) * first_factor
-                else:
+                elif not events and allow_baseline_init and event_set_complete:
                     baseline = Decimal(1)
+                else:
+                    pending = True
+                    baseline = None
             else:
                 baseline = _decimal(baseline_factor)
 
-            factor_audit, audit_not_ok = _audit_event_factors(
+            factor_audit, _ = _audit_event_factors(
                 events, raw_by_date, baseline
             )
-            if window_start is not None and audit_not_ok:
+            affected_audit = [
+                item for item in factor_audit
+                if rebuild_from is None or item["ex_date"] >= rebuild_from
+            ]
+            rebuild_unverified = bool(
+                affected_audit and affected_audit[-1]["status"] == "unverified"
+            )
+            audit_not_ok = any(
+                item["status"] != "ok"
+                for item in factor_audit
+                if rebuild_from is None or item["ex_date"] >= rebuild_from
+            )
+            if audit_not_ok:
                 pending = True
             audit_by_date = {item["ex_date"]: item for item in factor_audit}
             for event in events:
@@ -315,7 +360,6 @@ def rebuild_stock(
 
             if baseline is None:
                 latest_trade_date = raw[-1]["trade_date"]
-                cur.execute("DELETE FROM stock_daily_hfq WHERE stock_code=%s", (stock_code,))
                 cur.execute(
                     """
                     INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,
@@ -410,15 +454,19 @@ def rebuild_stock(
                 """
                 INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,
                     latest_trade_date, rebuild_pending, last_rebuilt_at)
-                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s,
+                    CASE WHEN %s THEN NULL ELSE CURRENT_TIMESTAMP END)
                 ON CONFLICT (stock_code) DO UPDATE SET
                     baseline_factor=EXCLUDED.baseline_factor,
                     factor_latest=EXCLUDED.factor_latest,
                     latest_trade_date=EXCLUDED.latest_trade_date,
                     rebuild_pending=EXCLUDED.rebuild_pending,
-                    last_rebuilt_at=CURRENT_TIMESTAMP
+                    last_rebuilt_at=CASE WHEN %s THEN NULL ELSE CURRENT_TIMESTAMP END
                 """,
-                (stock_code, baseline, factor_latest, latest_trade_date, pending),
+                (
+                    stock_code, baseline, factor_latest, latest_trade_date, pending,
+                    rebuild_unverified, rebuild_unverified,
+                ),
             )
 
             select_sql = (

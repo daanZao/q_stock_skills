@@ -31,7 +31,7 @@ from time import monotonic
 from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from .adapters.base import FetchError, fetch_failure_kind
-from .adjustment import rebuild_stock
+from .adjustment import adjustment_window_start, rebuild_stock
 from .adjustment_audit import audit_adjustment_migration
 from .baostock_errors import BaostockError
 from .dates import (
@@ -49,7 +49,6 @@ from .tools_baostock import baostock_error
 
 log = logging.getLogger(__name__)
 
-ADJ_BACKFILL_DEFAULT_START = "20230101"
 # 2026-11-04/05 实测：baostock 串行、相邻请求 ≥1.5s 可承载；并发/长期 TPS
 # 未验证，回填固定串行并使用该间隔（不据此推断全历史容量）。
 ADJ_BACKFILL_THROTTLE_S = 1.5
@@ -656,13 +655,14 @@ def _ingest_raw_day(conn, adapter, trade_date: str, start: str, end: str,
 
 
 def _rebuild_event_stock(conn, stock: dict, window_days: list[str],
-                         known_missing: list[str]) -> dict:
+                         known_missing: list[str], allow_baseline_init: bool) -> dict:
     """复用逐日落库的全市场 raw 重建事件票，不再发起逐票请求。"""
     stock_code = stock["stock_code"]
     first_event = stock["first"]
     try:
         snapshot = rebuild_stock(
             conn, stock_code, [], [],
+            allow_baseline_init=allow_baseline_init,
             window_start=window_days[0], window_end=window_days[-1],
         )
     except Exception as e:  # noqa: BLE001 - 单票失败不终止回填
@@ -712,11 +712,12 @@ def _rebuild_event_stock(conn, stock: dict, window_days: list[str],
 
 
 def _rebuild_without_events(conn, stock_code: str, start: str, end: str,
-                            known_missing: list[str]) -> dict:
+                            known_missing: list[str], allow_baseline_init: bool) -> dict:
     """复用库内 raw 重建无事件票或事件已撤销票，不再发起上游请求。"""
     try:
         snapshot = rebuild_stock(
-            conn, stock_code, [], [], window_start=start, window_end=end,
+            conn, stock_code, [], [], allow_baseline_init=allow_baseline_init,
+            window_start=start, window_end=end,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("adj-backfill 无事件重建失败 %s: %s", stock_code, e)
@@ -854,9 +855,7 @@ def _write_artifacts(report_dir: str, *, days: list[dict], raw_days: list[dict],
 
 
 def _default_start() -> str:
-    return os.environ.get("QSTOCK_ADJ_WINDOW_START", ADJ_BACKFILL_DEFAULT_START).replace(
-        "-", ""
-    )
+    return adjustment_window_start()
 
 
 def _default_end(now) -> str:
@@ -929,7 +928,10 @@ def run_adjustment_backfill(
         from .adapters.baostock_adapter import BaostockAdapter
 
         adapter = BaostockAdapter()
-    pause = ADJ_BACKFILL_THROTTLE_S if throttle is None else throttle
+    pause = (
+        ADJ_BACKFILL_THROTTLE_S
+        if throttle is None else max(ADJ_BACKFILL_THROTTLE_S, throttle)
+    )
     conn, err = connect()
     if err:
         return _error(tool, params, err)
@@ -1007,6 +1009,9 @@ def run_adjustment_backfill(
                 )
 
         event_set_complete = not failed_days
+        allow_baseline_init = (
+            start_d <= adjustment_window_start() and event_set_complete
+        )
         events_export, event_stocks = _load_event_exports(conn, start_d, end_d)
         event_codes = {stock["stock_code"] for stock in event_stocks}
 
@@ -1058,7 +1063,7 @@ def run_adjustment_backfill(
         total_stocks = len(selected)
         for index, stock in enumerate(selected, 1):
             result = _rebuild_event_stock(
-                conn, stock, window_days, known_missing
+                conn, stock, window_days, known_missing, allow_baseline_init
             )
             raw_results.append(result)
             repairs.extend(result.get("repairs", []))
@@ -1093,7 +1098,8 @@ def run_adjustment_backfill(
             )
             for code in no_event_codes:
                 result = _rebuild_without_events(
-                    conn, code, window_days[0], window_days[-1], known_missing
+                    conn, code, window_days[0], window_days[-1], known_missing,
+                allow_baseline_init,
                 )
                 result.update({
                     "rows": raw_stats[code]["rows"], "attempts": 0,
@@ -1110,13 +1116,31 @@ def run_adjustment_backfill(
         retracted_results = []
         for code in retracted_with_raw:
             result = _rebuild_without_events(
-                conn, code, window_days[0], window_days[-1], known_missing
+                conn, code, window_days[0], window_days[-1], known_missing,
+                allow_baseline_init,
             )
+            result.update({
+                "pending": bool(
+                    (result.get("state") or {}).get("rebuild_pending")
+                    or result.get("repairs")
+                ),
+            })
             retracted_results.append(result)
             repairs.extend(result.get("repairs", []))
         retracted_failures = [
             result for result in retracted_results if result["status"] == "error"
         ]
+        retracted_processing = {
+            "verified": sum(
+                1 for result in retracted_results
+                if result["status"] == "ok"
+                and not result.get("pending")
+                and not result.get("repairs")
+            ),
+            "pending": sum(
+                1 for result in retracted_results if result.get("pending")
+            ),
+        }
 
         selected_event_codes = {stock["stock_code"] for stock in selected}
         classification_rows: list[dict] = []
@@ -1148,7 +1172,10 @@ def run_adjustment_backfill(
             if result["status"] in ("error", "empty")
             and window_days[0] <= result["trade_date"] <= window_days[-1]
         ]
-        audit = audit_adjustment_migration(conn, start_d, end_d, event_set_complete)
+        audit = audit_adjustment_migration(
+            conn, start_d, end_d, event_set_complete,
+            require_normalized_baseline=allow_baseline_init,
+        )
         audit_failed = any(
             audit["validation"][key] for key in (
                 "pending_states", "hfq_without_valid_raw", "valid_raw_without_hfq",
@@ -1180,6 +1207,7 @@ def run_adjustment_backfill(
             "stage": stage,
             "window": {"start": start_d, "end": end_d},
             "source": adapter.name,
+            "allow_baseline_init": allow_baseline_init,
             "trading_days": len(window_days),
             "days": {
                 "ok": sum(1 for r in day_results if r["status"] == "ok"),
@@ -1202,6 +1230,10 @@ def run_adjustment_backfill(
             "event_stock_processing": {
                 "selected": len(selected),
                 "ok": sum(1 for r in raw_results if r["status"] == "ok"),
+                "verified": sum(
+                    1 for r in raw_results
+                    if r["status"] == "ok" and not r.get("pending")
+                ),
                 "skipped": sum(1 for r in raw_results if r["status"] == "skipped"),
                 "error": sum(
                     1 for r in raw_results if r["status"] in ("error", "empty")
@@ -1212,6 +1244,10 @@ def run_adjustment_backfill(
             "no_event_stock_processing": {
                 "selected": len(no_event_results),
                 "ok": sum(1 for r in no_event_results if r["status"] == "ok"),
+                "verified": sum(
+                    1 for r in no_event_results
+                    if r["status"] == "ok" and not r.get("pending")
+                ),
                 "error": sum(
                     1 for r in no_event_results if r["status"] in ("error", "empty")
                 ),
@@ -1247,6 +1283,7 @@ def run_adjustment_backfill(
             "repair_counts": repair_counts,
             "retracted_rebuilt": len(retracted_results),
             "retracted_failed": len(retracted_failures),
+            "retracted_processing": retracted_processing,
             "isolation": {
                 "rows": len(quarantined),
                 "stocks": len({row["stock_code"] for row in quarantined}),

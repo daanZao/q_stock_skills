@@ -316,6 +316,9 @@ class TestAdjustmentMorning:
             ),
             adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
 
+        assert out["parts"]["stock_adjust_factor"].get("error_kind") is None, out[
+            "parts"
+        ]["stock_adjust_factor"]
         assert out["status"] == "ok"
         assert out["parts"]["stock_adjust_factor"]["rows"] == 1
         conn = psycopg2.connect(pg_ready)
@@ -604,7 +607,8 @@ class TestAdjustmentMorning:
         try:
             rebuild_stock(
                 conn, "600519",
-                [{**_morning_rows("20261015")[0], "close": 1700.0}], []
+                [{**_morning_rows("20261015")[0], "close": 1700.0}], [],
+                baseline_factor=1.0,
             )
             with conn.cursor() as cur:
                 cur.execute(
@@ -619,6 +623,9 @@ class TestAdjustmentMorning:
         out = fetch_morning_batch(
             trade_date=TARGET, adapter=FakeMorningAdapter(rows=_morning_rows()[:1]),
             adapters=[FakeInitAdapter("fake")], sw_adapters=_sw(), now=NOW_MONDAY_AM)
+        assert out["parts"]["stock_adjust_factor"].get("error_kind") is None, out[
+            "parts"
+        ]["stock_adjust_factor"]
         assert out["status"] == "ok"
 
         conn = psycopg2.connect(pg_ready)
@@ -667,7 +674,7 @@ class TestAdjustmentMorning:
         finally:
             conn.close()
 
-    def test_first_authoritative_event_recomputes_no_event_baseline(self, pg_ready):
+    def test_first_authoritative_event_consumes_existing_baseline(self, pg_ready):
         from qstock_mcp.adjustment import rebuild_stock
 
         conn = psycopg2.connect(pg_ready)
@@ -676,7 +683,7 @@ class TestAdjustmentMorning:
                 conn, "688300",
                 [{**_morning_rows("20261015")[0], "stock_code": "688300",
                   "open": 136.01, "high": 136.01, "low": 136.01, "close": 136.01}],
-                [], baseline_factor=1.0,
+                [], baseline_factor=2.965588537153224,
             )
         finally:
             conn.close()
@@ -898,3 +905,38 @@ class TestSwBoardValuationPart:
         rows = _ledger(pg_ready, section="sw_board_valuation")
         assert rows[0][2] == "error"
         assert rows[0][5] == "fetch_failed"
+
+
+def test_morning_authoritative_raw_revises_t0_and_clears_pending(pg_ready):
+    from qstock_mcp.adjustment import rebuild_stock
+
+    conn = psycopg2.connect(pg_ready)
+    t0 = dict(_morning_rows()[0], close=1700.0, source="tencent", preclose=None)
+    rebuild_stock(conn, "600519", [t0], [], baseline_factor=1.0, force_pending=True)
+    conn.close()
+
+    out = fetch_morning_batch(
+        trade_date=TARGET,
+        adapter=FakeMorningAdapter(rows=_morning_rows()),
+        adapters=[FakeInitAdapter("fake")],
+        sw_adapters=_sw(),
+        now=NOW_MONDAY_AM,
+    )
+
+    assert out["status"] == "ok"
+    conn = psycopg2.connect(pg_ready)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT close, source FROM stock_daily_raw"
+            " WHERE stock_code='600519' AND trade_date=%s",
+            (TARGET,),
+        )
+        assert cur.fetchone() == (1710.0, "baostock")
+        cur.execute(
+            "SELECT h.close, s.rebuild_pending FROM stock_daily_hfq h"
+            " JOIN stock_factor_state s ON s.stock_code=h.stock_code"
+            " WHERE h.stock_code='600519' AND h.trade_date=%s",
+            (TARGET,),
+        )
+        assert cur.fetchone() == (1710.0, False)
+    conn.close()

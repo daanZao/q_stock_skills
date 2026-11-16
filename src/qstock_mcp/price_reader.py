@@ -3,6 +3,7 @@
 import os
 
 from .adapters.base import BAR_FIELDS
+from .adjustment import adjustment_window_start
 
 
 def _legacy_table(conn) -> str:
@@ -168,7 +169,7 @@ class NewPriceReader:
     def query_daily(self, conn, stock_code: str, adj: str, start: str, end: str) -> dict:
         from .dates import trading_days_between
 
-        window_start = os.environ.get("QSTOCK_ADJ_WINDOW_START", "20230101").replace("-", "")
+        window_start = adjustment_window_start()
         if adj == "qfq" and end < window_start:
             rows = LegacyPriceReader().select_daily(conn, stock_code, "qfq", start, end)
             for row in rows:

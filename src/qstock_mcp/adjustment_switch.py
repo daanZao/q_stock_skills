@@ -45,6 +45,12 @@ _REPAIR_PRICE_SOURCES = {
 def _repair_legacy(cur) -> dict[str, int]:
     window_start = os.environ.get("QSTOCK_ADJ_WINDOW_START", "20230101").replace("-", "")
     cur.execute(
+        "DELETE FROM stock_daily_hfq WHERE stock_code IN ("
+        " SELECT stock_code FROM stock_factor_state"
+        " WHERE last_rebuilt_at IS NULL OR baseline_factor IS NULL"
+        " OR factor_latest IS NULL)"
+    )
+    cur.execute(
         "DELETE FROM stock_daily d WHERE d.adj='qfq' AND d.trade_date>=%s"
         " AND EXISTS (SELECT 1 FROM stock_daily_raw r WHERE r.stock_code=d.stock_code)",
         (window_start,),

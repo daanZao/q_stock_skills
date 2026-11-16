@@ -4,7 +4,6 @@
 数据库连接在工具调用时按需建立，server 启动本身不依赖 PG 可达。
 """
 
-import os
 from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
@@ -29,7 +28,7 @@ SERVER_INSTRUCTIONS = (
     "agent 必须先询问用户是否尝试申请，得到确认后才调用 baostock_lock(action='acquire')；"
     "不得自动申请。成功后仅当前实例可用，完成后由当前实例 baostock_lock(action='release')。"
     "其他实例持锁时查看真实持有者并等待其 release；确认持有进程终止后才可 force。"
-    "QSTOCK_PRICE_SOURCE=new 的纯 PG query_daily 豁免，其他非 baostock 工具不受影响。"
+    "query_daily 可触发自愈，不豁免租约；其他非 baostock 工具不受影响。"
 )
 
 mcp = MCPServer("qstock-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -76,8 +75,8 @@ def baostock_lock(
 def init_database(backfill_history: bool = False) -> dict:
     """初始化数据库：幂等建表 + 轻量初始化数据（股票清单、全市场快照、主要指数日线），各部分独立成败报告；重复调用幂等（无重复行）。
 
-    backfill_history=True 追加全市场个股历史日线回溯（重操作：数千只 × 全历史，
-    显式开启，绝非默认；进度与失败在 parts.backfill 中报告，单股失败不中断）。
+    backfill_history=True 追加全市场 raw + 累计 B 回溯与派生重建（重操作，显式开启，
+    绝非默认；从 QSTOCK_ADJ_WINDOW_START 起按日采集，断点、失败与产物在 parts.backfill 报告）。
     无当前 MCP 实例租约时返回 baostock_locked；agent 须先获得用户确认再 acquire，完成后由持有实例显式 release。
     """
     return _run_baostock_tool(
@@ -95,10 +94,10 @@ def fetch_daily(
     end: str | None = None,
     adj: str = "qfq",
 ) -> dict:
-    """抓取个股日线并落库：只补请求区间头尾缺口，腾讯 → 新浪 → baostock fallback（issue #112），按 (stock_code, trade_date, adj) 幂等 upsert。
+    """采集单票 raw + 累计 B 并重建 hfq/state：baostock 优先，默认只补头尾缺口与缺失因子证据。
 
-    stock_code: 6 位 A 股代码（如 600519；北交所旧码 43x/83x/87x 自动归一化到 920）；days 与 start/end 二选一；
-    日期格式 yyyymmdd 或 yyyy-mm-dd；adj: qfq/hfq/none。
+    stock_code 为 6 位 A 股代码；days 与 start/end 二选一；日期格式 yyyymmdd 或 yyyy-mm-dd。
+    adj 仅为兼容保留并回显，写库口径恒为 raw+B，不直接写 qfq；替代源 raw 保持 partial。
     无当前 MCP 实例租约时返回 baostock_locked；agent 须先获得用户确认再 acquire，完成后由持有实例显式 release。
     """
     return _run_baostock_tool(
@@ -120,16 +119,13 @@ def query_daily(
 ) -> dict:
     """查询个股日线，参数同 fetch_daily；行含 price_basis，顶层含 adjust 覆盖状态。
 
-    缺省 legacy 路径保留头尾自愈，无当前 MCP 实例租约时返回 baostock_locked；
-    agent 须先获得用户确认再 acquire，完成后由持有实例显式 release；
-    QSTOCK_PRICE_SOURCE=new 时纯读 PG，豁免租约。
+    缺省 legacy 路径保留头尾自愈；QSTOCK_PRICE_SOURCE=new 时在新窗口内盘后自愈写
+    raw+B，缓存命中零上游。无当前 MCP 实例租约时返回 baostock_locked；agent 须先获得
+    用户确认再 acquire，完成后由持有实例显式 release。盘中当日行禁写。
     """
     operation = lambda: tools_daily.query_daily(
         stock_code, days=days, start=start, end=end, adj=adj
     )
-    if os.environ.get("QSTOCK_PRICE_SOURCE") == "new":
-        with use_lease_context(MCP_LEASE_CONTEXT):
-            return operation()
     return _run_baostock_tool(
         "query_daily",
         {"stock_code": stock_code, "days": days, "start": start, "end": end, "adj": adj},

@@ -130,7 +130,7 @@ from .baostock_api import BaostockApi
 from .baostock_errors import BaostockError
 from .baostock_lease import BaostockLease, LeaseContext, use_lease_context
 from .adjustment_acceptance import run_adjustment_acceptance
-from .adjustment_backfill import run_adjustment_backfill
+from .adjustment_backfill import ADJ_BACKFILL_THROTTLE_S, run_adjustment_backfill
 from .adjustment_switch import run_adjustment_switch
 from .cli_output import CliOutput
 from .daily_parity import compare_daily_sources
@@ -502,11 +502,9 @@ def cmd_daily(
     force: bool = False,
     daily_adapters: Sequence | None = None,
 ) -> int:
-    """个股日线固定入口（issue #112）：抓取落库 / 三源对拍。
+    """个股日线固定入口：单票 raw+B 采集 / 全市场逐日重刷 / 三源对拍。
 
-    - 默认（fetch）：逐 code 走 腾讯→新浪→baostock fallback 链落库；
-    - --check：逐源直取结束日 bar 做字段级对拍，不落库；
-    - --all：从 stock_list 取全市场，缺省按 1 秒/只节流（腾讯连接级限速实测）。
+    单票 baostock 优先；--all 复用逐日全市场回填且禁止替代源；--check 不写库。
     """
     tool = "daily"
     rng, err = _daily_range(date_arg, start_arg, end_arg, trading_days)
@@ -545,7 +543,55 @@ def cmd_daily(
         )
         _emit({"job": tool, "mode": "check", **result})
         return 0 if result.get("status") == "ok" else 1
-    pause = throttle if throttle is not None else (1.0 if all_codes else 0.0)
+    if all_codes:
+        if daily_adapters is None:
+            from .adapters import default_adjustment_adapters
+
+            daily_adapters = default_adjustment_adapters()
+            adapter = daily_adapters[0]
+        else:
+            adapter = daily_adapters[0]
+        effective_throttle = (
+            ADJ_BACKFILL_THROTTLE_S
+            if throttle is None else max(ADJ_BACKFILL_THROTTLE_S, throttle)
+        )
+        result = run_adjustment_backfill(
+            start=start,
+            end=end,
+            adapter=adapter,
+            limit=limit,
+            force=True,
+            throttle=effective_throttle,
+        )
+        summary = result.get("summary", {})
+        raw_days = summary.get("raw_day_processing", {})
+        status = result.get("status", "error")
+        if raw_days.get("error") and not raw_days.get("ok"):
+            status = "error"
+        out = {
+            "status": status,
+            "job": tool,
+            "mode": "fetch",
+            "range": {"start": start, "end": end},
+            "adj": adj,
+            "trading_days": trading_days,
+            "force": True,
+            "failed": 0 if status == "ok" else 1,
+            "stage": result.get("stage"),
+            "summary": summary,
+            "artifacts": result.get("artifacts"),
+            "error": result.get("error"),
+        }
+        for key in BAOSTOCK_ERROR_FIELDS:
+            if key in result:
+                out[key] = result[key]
+        _emit(out)
+        return 0 if status == "ok" else 1
+    if daily_adapters is None:
+        from .adapters import default_adjustment_adapters
+
+        daily_adapters = default_adjustment_adapters()
+    pause = throttle if throttle is not None else 0.0
     results: list[dict] = []
     fatal_error = None
     for i, code in enumerate(codes):
@@ -1070,13 +1116,13 @@ def _main(argv: list[str] | None = None,
     p_sw_dict.add_argument("--url", default=None,
                            help="分类 xls 直链，缺省申万官网 SwClass2021 文件")
     p_daily = sub.add_parser(
-        "daily", help="个股日线：腾讯→新浪→baostock 抓取落库 / 三源对拍")
+        "daily", help="个股日线：raw+B 持续采集 / 全市场逐日重刷 / 三源对拍")
     p_daily.add_argument("--codes", default=None,
                          help="逗号分隔股票代码（支持北交所旧码 43x/83x/87x）")
     p_daily.add_argument("--all", action="store_true",
-                         help="从数据库 stock_list 取全市场标的")
+                         help="显式全市场整窗重刷；baostock 失败不切替代源")
     p_daily.add_argument("--limit", type=int, default=None,
-                         help="--all 时只取前 N 只（冒烟用）")
+                         help="--all 时只限制事件票本地重建，不减少按日请求")
     p_daily.add_argument("--date", default=None,
                          help="单日 yyyymmdd，缺省当日")
     p_daily.add_argument("--start", default=None,
@@ -1086,13 +1132,13 @@ def _main(argv: list[str] | None = None,
     p_daily.add_argument("--trading-days", type=int, default=None,
                          help="最近 N 个交易日；可用 --end 指定截止日")
     p_daily.add_argument("--force", action="store_true",
-                         help="整窗重抓并覆盖窗内同键记录，不只补头尾缺口")
+                         help="单票整窗重抓；--all 本就强制重刷")
     p_daily.add_argument("--adj", default="qfq", choices=("qfq", "hfq", "none"),
-                         help="复权口径，缺省 qfq")
+                         help="写库时仅兼容回显；--check 时选择对拍口径")
     p_daily.add_argument("--check", action="store_true",
                          help="对拍模式：逐源直取结束日 bar 比对，不落库")
     p_daily.add_argument("--throttle", type=float, default=None,
-                         help="逐 code 间隔秒；--all 缺省 1.0，显式 codes 缺省 0")
+                         help="请求间隔秒；全市场管线缺省 1.5，显式 codes 缺省 0")
     p_fund = sub.add_parser(
         "fundamentals",
         help="基本面透传：逐 code 走 get_fundamentals 链出状态报告（不落库）")

@@ -20,6 +20,7 @@ from qstock_mcp.tools_ledger import query_collection_log
 from qstock_mcp.tools_snapshot import fetch_market_snapshot
 
 from fakes import (
+    FakeAdjustmentAdapter,
     FakeAdapter,
     FakeBoardAdapter,
     FakeInitAdapter,
@@ -110,24 +111,34 @@ def test_fetch_board_snapshot_ledgers_three_states(pg_test):
 
 
 def test_fetch_daily_ledgers_ok_and_error(pg_test):
-    """日线抓取落账：成功 ok（行数/来源），全源失败 error + error_kind。"""
+    """raw 与逐日因子分别落账；raw 全源失败另记 error。"""
     _init(pg_test)
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,"
+            " latest_trade_date, rebuild_pending) VALUES ('600519', 1.0, 1.0, '20231229', false)"
+        )
+    conn.commit()
+    conn.close()
     ok = fetch_daily("600519", start="20261012", end="20261014",
-                     adapters=[FakeAdapter("efake", rows_fn=trading_rows)])
+                     adapters=[FakeAdjustmentAdapter()])
     assert ok["status"] == "ok"
-    rows = _ledger_rows(pg_test, "WHERE section = 'stock_daily'")
+    rows = _ledger_rows(pg_test, "WHERE section = 'stock_daily_raw'")
     assert len(rows) == 1
     assert rows[0]["status"] == "ok"
     assert rows[0]["trade_date"] == "20261014"
     assert rows[0]["rows"] > 0
-    assert rows[0]["source"] == "efake"
-    assert "20261012" in rows[0]["detail"]  # 区间摘要
+    assert rows[0]["source"] == "baostock"
+    assert "20261012" in rows[0]["detail"]
+    factors = _ledger_rows(pg_test, "WHERE section = 'stock_adjust_factor'")
+    assert len(factors) == 3
 
     bad = fetch_daily("000001", start="20261012", end="20261014",
                       adapters=[FakeAdapter("broken", fail_times=99)])
     assert bad["status"] == "error"
     rows = _ledger_rows(
-        pg_test, "WHERE section = 'stock_daily' AND status = 'error'"
+        pg_test, "WHERE section = 'stock_daily_raw' AND status = 'error'"
     )
     assert len(rows) == 1
     assert rows[0]["error_kind"] == "fetch_failed"
@@ -135,15 +146,17 @@ def test_fetch_daily_ledgers_ok_and_error(pg_test):
 
 
 def test_fetch_daily_no_gap_no_ledger(pg_test):
-    """区间无缺口（零抓取零写库）不落台账——台账只记真实发生的采集动作。"""
+    """raw 与因子均无缺口时不新增台账。"""
     _init(pg_test)
-    ad = FakeAdapter("efake", rows_fn=trading_rows)
+    ad = FakeAdjustmentAdapter()
     fetch_daily("600519", start="20261012", end="20261014", adapters=[ad])
     again = fetch_daily("600519", start="20261012", end="20261014",
-                        adapters=[FakeAdapter("efake2", rows_fn=trading_rows)])
+                        adapters=[FakeAdjustmentAdapter()])
     assert again["rows_upserted"] == 0
-    rows = _ledger_rows(pg_test, "WHERE section = 'stock_daily'")
-    assert len(rows) == 1  # 第二次无写库动作，不落账
+    rows = _ledger_rows(pg_test, "WHERE section = 'stock_daily_raw'")
+    assert len(rows) == 1
+    factors = _ledger_rows(pg_test, "WHERE section = 'stock_adjust_factor'")
+    assert len(factors) == 3
 
 
 def test_fetch_market_snapshot_ledgers(pg_test):
@@ -187,21 +200,23 @@ def test_query_collection_log_filters(pg_test):
     ak = FakeBoardAdapter("akshare", fail_sections=("zt_pool",), rows={"boards": []})
     fetch_board_snapshot(trade_date=TODAY, adapters=[ak])
     fetch_daily("600519", start="20261012", end="20261014",
-                adapters=[FakeAdapter("efake", rows_fn=trading_rows)])
+                adapters=[FakeAdjustmentAdapter()])
 
     all_rows = query_collection_log(trade_date=TODAY)
     assert all_rows["status"] == "ok"
-    assert all_rows["count"] == 5  # 5 个盘面 section
+    assert all_rows["count"] == 5
     daily_rows = query_collection_log(trade_date="20261014")
-    assert daily_rows["count"] == 1
-    assert daily_rows["rows"][0]["section"] == "stock_daily"
+    assert daily_rows["count"] == 2
+    assert {row["section"] for row in daily_rows["rows"]} == {
+        "stock_daily_raw", "stock_adjust_factor"
+    }
     by_section = query_collection_log(section="zt_pool")
     assert by_section["count"] == 1
     assert by_section["rows"][0]["status"] == "error"
-    by_status = query_collection_log(status="empty")
+    by_status = query_collection_log(section="boards", status="empty")
     assert by_status["count"] == 1
     assert by_status["rows"][0]["section"] == "boards"
-    empty = query_collection_log(trade_date="20261013")
+    empty = query_collection_log(trade_date="20261010")
     assert empty["status"] == "ok"
     assert empty["count"] == 0
     assert empty["rows"] == []
@@ -211,8 +226,8 @@ def test_query_collection_log_row_shape(pg_test):
     """台账行输出含全部字段；时间戳 ISO 序列化（JSON 安全）。"""
     _init(pg_test)
     fetch_daily("600519", start="20261012", end="20261014",
-                adapters=[FakeAdapter("efake", rows_fn=trading_rows)])
-    out = query_collection_log(section="stock_daily")
+                adapters=[FakeAdjustmentAdapter()])
+    out = query_collection_log(section="stock_daily_raw")
     row = out["rows"][0]
     assert set(row) == {
         "trade_date", "section", "status", "source", "rows",

@@ -93,6 +93,7 @@ def test_688300_derives_first_window_baseline(pg_test):
             _raw("20261016", 102.70, preclose=104.62, pct=-1.8352),
         ],
         [{"ex_date": "20261016", "factor_cum": 3.855379}],
+        allow_baseline_init=True,
     )
 
     assert snapshot["state"]["baseline_factor"] == pytest.approx(2.965588537153224)
@@ -203,6 +204,7 @@ def test_invalid_close_is_quarantined_and_not_derived(pg_test):
             _raw("20240105", 11.0),
         ],
         [],
+        allow_baseline_init=True,
     )
 
     assert len(snapshot["raw_rows"]) == 4
@@ -346,7 +348,8 @@ def test_authoritative_revision_and_retraction_rebuild_derived_rows(pg_test):
     assert [row["close"] for row in revised["qfq_rows"]] == pytest.approx([2.5, 11.0, 12.0])
 
     retracted = rebuild_stock(
-        conn, "600519", [], [], authoritative_event_dates=("20240103",)
+        conn, "600519", [], [], authoritative_event_dates=("20240103",),
+        baseline_factor=1.0,
     )
     assert retracted["factor_events"] == []
     assert [row["factor_cum"] for row in retracted["hfq_rows"]] == pytest.approx([1.0, 1.0, 1.0])
@@ -437,6 +440,7 @@ def test_window_backfill_derives_first_event_baseline_and_hides_pre_window_rows(
             _raw("20230104", 100.0, preclose=104.0, pct=-3.846154),
         ],
         [{"ex_date": "20230104", "factor_cum": 3.0}],
+        allow_baseline_init=True,
         window_start="20230103",
     )
 
@@ -471,6 +475,7 @@ def test_window_backfill_audit_flags_authoritative_price_path_mismatch(pg_test):
             {"ex_date": "20230104", "factor_cum": 3.0},
             {"ex_date": "20230105", "factor_cum": 4.0},
         ],
+        allow_baseline_init=True,
         window_start="20230103",
     )
 
@@ -497,6 +502,7 @@ def test_window_backfill_audit_flags_missing_pctchg_as_unverified(pg_test):
             {"ex_date": "20230104", "factor_cum": 3.0},
             {"ex_date": "20230105", "factor_cum": 4.0},
         ],
+        allow_baseline_init=True,
         window_start="20230103",
     )
 
@@ -512,6 +518,7 @@ def test_window_backfill_missing_d1_keeps_state_null_and_pending(pg_test):
         "688300",
         [_raw("20230103", 130.0, preclose=120.0, pct=8.333333)],
         [{"ex_date": "20230103", "factor_cum": 3.0}],
+        allow_baseline_init=True,
         window_start="20230103",
     )
 
@@ -538,6 +545,7 @@ def test_window_end_excludes_later_events_and_rows(pg_test):
             {"ex_date": "20230104", "factor_cum": 3.0},
             {"ex_date": "20230105", "factor_cum": 4.0},
         ],
+        allow_baseline_init=True,
         window_start="20230103",
         window_end="20230104",
     )

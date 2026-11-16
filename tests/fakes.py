@@ -49,6 +49,44 @@ def trading_rows(start: str, end: str, close: float = 10.0) -> list[dict]:
     return _rows_between(start, end, close, lambda d: is_trading_day(d.strftime("%Y%m%d")))
 
 
+class FakeAdjustmentAdapter:
+    def __init__(
+        self, name="baostock", *, rows=None, factor_events=None, fail_times=0, exc=None
+    ):
+        self.name = name
+        self._rows = rows
+        self._factor_events = factor_events or []
+        self._fail_times = fail_times
+        self._exc = exc
+        self.calls = []
+        self.factor_calls = []
+
+    def fetch_daily(self, stock_code, start, end, adj="qfq"):
+        self.calls.append({"stock_code": stock_code, "start": start, "end": end, "adj": adj})
+        if len(self.calls) <= self._fail_times:
+            if self._exc is not None:
+                raise self._exc
+            raise FetchError(f"{self.name} boom")
+        return self._rows if self._rows is not None else trading_rows(start, end)
+
+    def fetch_daily_adjust_factor(self, trade_date):
+        self.factor_calls.append(trade_date)
+        return [row for row in self._factor_events if row["ex_date"] == trade_date]
+
+    def fetch_astock_daily(self, trade_date):
+        self.calls.append({"trade_date": trade_date})
+        if len(self.calls) <= self._fail_times:
+            if self._exc is not None:
+                raise self._exc
+            raise FetchError(f"{self.name} boom")
+        rows = self._rows if self._rows is not None else trading_rows(trade_date, trade_date)
+        return [
+            {**row, "stock_code": code, "adj": "none"}
+            for code in ("600519", "000001")
+            for row in rows
+        ]
+
+
 class FakeAdapter:
     """记录调用分段、按脚本成败的 fake 数据源。
 
@@ -408,6 +446,7 @@ class FakeInitAdapter:
         self._daily_rows = daily_rows
         self._fail_stocks = set(fail_stocks)
         self.calls = []
+        self.factor_calls = []
 
     def _check(self, capability):
         self.calls.append(capability)
@@ -444,6 +483,27 @@ class FakeInitAdapter:
             if self._daily_rows is not None
             else weekday_rows(start, end)
         )
+
+    def fetch_astock_daily(self, trade_date):
+        self._check("daily")
+        template = (self._daily_rows or trading_rows(trade_date, trade_date))[0]
+        row = {**template, "trade_date": trade_date}
+        return [
+            {
+                **row,
+                "stock_code": item["stock_code"],
+                "close": 0.0 if item["stock_code"] in self._fail_stocks else row["close"],
+                "preclose": row.get("close"),
+                "tradestatus": 1,
+                "adj": "none",
+            }
+            for item in LIST_ROWS
+        ]
+
+    def fetch_daily_adjust_factor(self, trade_date):
+        self._check("factor")
+        self.factor_calls.append(trade_date)
+        return []
 
 
 # ---------------------------------------------------------------- 申万官网板块（issue #118）

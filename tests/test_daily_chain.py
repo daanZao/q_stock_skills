@@ -7,7 +7,11 @@
 import pytest
 
 from fakes import FakeAdapter
-from qstock_mcp.adapters import FetchError, default_daily_adapters
+from qstock_mcp.adapters import (
+    FetchError,
+    default_adjustment_adapters,
+    default_daily_adapters,
+)
 from qstock_mcp.adapters.akshare_adapter import AkshareAdapter
 from qstock_mcp.daily_parity import compare_daily_sources
 from qstock_mcp.fetch_chain import fetch_with_fallback
@@ -40,6 +44,12 @@ def test_default_daily_chain_order():
     """腾讯 → 新浪 → baostock；东财链路不在个股日线链中。"""
     assert [a.name for a in default_daily_adapters()] == [
         "tencent", "sina", "baostock"
+    ]
+
+
+def test_default_adjustment_chain_prefers_baostock():
+    assert [a.name for a in default_adjustment_adapters()] == [
+        "baostock", "tencent", "sina"
     ]
 
 

@@ -1,9 +1,9 @@
 -- 复权影子表（issue #160）：raw + 累计 B → 物化 hfq + 每股状态；qfq 不落表。
--- 承载：写 rebuild_stock 单票竖切（morning #161、adj-backfill #163 共用）；
--- 读 adjustment 快照、NewPriceReader 与后续统一价格接缝。
--- adj-backfill 额外写 collection_log 的 stock_adjust_factor/stock_daily_raw/
--- stock_factor_repair/stock_factor_retracted 四类审计行（断点续跑、待修复
--- 台账与事件撤销标记）。
+-- 承载：写 rebuild_stock 单票竖切（morning #161、adj-backfill #163、daily/T+0/init
+-- #167 共用）；读 adjustment 快照、NewPriceReader 与统一价格接缝。
+-- daily/T+0/init/adj-backfill 另写 collection_log 的 stock_adjust_factor/
+-- stock_daily_raw/stock_factor_repair/stock_factor_retracted 审计行（逐日证据、
+-- 断点续跑、待修复台账与事件撤销标记）。
 CREATE TABLE IF NOT EXISTS stock_daily_raw (
     stock_code      text NOT NULL,
     trade_date      text NOT NULL,

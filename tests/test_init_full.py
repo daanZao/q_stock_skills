@@ -23,7 +23,10 @@ def _counts(pg_test) -> dict:
     conn = psycopg2.connect(pg_test)
     with conn.cursor() as cur:
         out = {}
-        for table in ("stock_list", "market_snapshot", "index_daily", "stock_daily"):
+        for table in (
+            "stock_list", "market_snapshot", "index_daily", "stock_daily",
+            "stock_daily_raw", "stock_daily_hfq", "stock_factor_state",
+        ):
             cur.execute(f"SELECT count(*) FROM {table}")
             out[table] = cur.fetchone()[0]
     conn.close()
@@ -107,32 +110,58 @@ def test_index_daily_failure_isolated(pg_test):
     assert result["parts"]["market_snapshot"]["status"] == "ok"
 
 
-def test_backfill_writes_stock_daily(pg_test):
+def test_backfill_writes_raw_factor_and_derived(pg_test, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20240101")
+    monkeypatch.chdir(tmp_path)
     result = init_database(
-        backfill_history=True, adapters=[_fake(daily_rows=DAILY_ROWS)]
+        backfill_history=True,
+        adapters=[_fake(daily_rows=DAILY_ROWS)],
+        now=datetime(2024, 2, 1, 8, 30, tzinfo=timezone(timedelta(hours=8))),
     )
-    assert result["status"] == "ok"
+    assert result["status"] == "ok", result
 
     part = result["parts"]["backfill"]
     assert part["status"] == "ok"
     assert part["total"] == len(LIST_ROWS)
     assert part["succeeded"] == len(LIST_ROWS)
     assert part["failed"] == []
-    assert part["rows_upserted"] == len(DAILY_ROWS) * len(LIST_ROWS)
-    assert _counts(pg_test)["stock_daily"] == len(DAILY_ROWS) * len(LIST_ROWS)
+    assert part["rows_upserted"] > 0
+    assert part["stage"] == "verified"
+    assert part["artifacts"]
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM stock_daily")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM stock_daily_raw")
+        assert cur.fetchone()[0] == part["rows_upserted"] + len(LIST_ROWS)
+        cur.execute("SELECT count(*) FROM stock_daily_hfq")
+        assert cur.fetchone()[0] == part["rows_upserted"]
+        cur.execute("SELECT count(*) FROM stock_factor_state")
+        assert cur.fetchone()[0] == len(LIST_ROWS)
+    conn.close()
 
 
-def test_backfill_single_stock_failure_does_not_abort(pg_test):
+def test_backfill_single_stock_failure_does_not_abort(pg_test, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20240101")
+    monkeypatch.chdir(tmp_path)
     result = init_database(
         backfill_history=True,
         adapters=[_fake(daily_rows=DAILY_ROWS, fail_stocks={"000001"})],
+        now=datetime(2024, 2, 1, 8, 30, tzinfo=timezone(timedelta(hours=8))),
     )
     assert result["status"] == "partial_error"
 
     part = result["parts"]["backfill"]
     assert part["status"] == "partial_error"
     assert part["total"] == len(LIST_ROWS)
-    assert part["succeeded"] == len(LIST_ROWS) - 1
+    assert part["succeeded"] == len(LIST_ROWS) - 1, {
+        "event": part["summary"]["event_stock_processing"],
+        "no_event": part["summary"]["no_event_stock_processing"],
+    }
     assert [f["stock_code"] for f in part["failed"]] == ["000001"]
     assert part["failed"][0]["error"]
 
@@ -181,13 +210,60 @@ def test_repeated_init_is_idempotent(pg_test):
     assert before["index_daily"] > 0
 
 
-def test_repeated_backfill_is_idempotent(pg_test):
+def test_repeated_backfill_is_idempotent(pg_test, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20240101")
+    monkeypatch.chdir(tmp_path)
     adapters = [_fake(daily_rows=DAILY_ROWS)]
-    first = init_database(backfill_history=True, adapters=adapters)
+    now = datetime(2024, 2, 1, 8, 30, tzinfo=timezone(timedelta(hours=8)))
+    first = init_database(backfill_history=True, adapters=adapters, now=now)
     assert first["status"] == "ok"
     before = _counts(pg_test)
 
-    second = init_database(backfill_history=True, adapters=adapters)
+    second = init_database(backfill_history=True, adapters=adapters, now=now)
     assert second["status"] == "ok"
     assert _counts(pg_test) == before
-    assert before["stock_daily"] > 0
+    assert before["stock_daily"] == 0
+    assert before["stock_daily_raw"] > 0
+    assert second["parts"]["backfill"]["summary"]["skip_reasons"] == {
+        "factor_day_checkpoint": 22,
+        "raw_day_checkpoint": 23,
+    }
+
+
+def test_backfill_upstream_failure_reports_zero_succeeded(pg_test, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20240102")
+    monkeypatch.chdir(tmp_path)
+    result = init_database(
+        backfill_history=True,
+        adapters=[_fake(fail={"daily"})],
+        now=datetime(2024, 1, 3, 8, 30, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    part = result["parts"]["backfill"]
+    assert part["status"] == "error"
+    assert part["succeeded"] == 0
+    assert part["rows_upserted"] == 0
+
+
+def test_backfill_factor_failure_does_not_count_unclassified_as_succeeded(
+    pg_test, monkeypatch, tmp_path
+):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20240102")
+    monkeypatch.chdir(tmp_path)
+    result = init_database(
+        backfill_history=True,
+        adapters=[_fake(fail={"factor"})],
+        now=datetime(2024, 1, 3, 8, 30, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    part = result["parts"]["backfill"]
+    assert part["status"] == "error"
+    assert part["succeeded"] == 0
+    assert part["summary"]["event_set_complete"] is False
+    assert part["summary"]["classification"]["unclassified_stocks"] == len(LIST_ROWS)

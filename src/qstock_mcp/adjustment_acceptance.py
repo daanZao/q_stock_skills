@@ -725,7 +725,17 @@ def _check_indicator_regression(conn, migration_dir: str, start: str, end: str,
 
 def _check_structure_coverage(conn, start: str, end: str, migration: dict,
                               migration_dir: str) -> dict:
-    validation = _validation(conn, start, end, bool(migration.get("event_set_complete")))
+    from .adjustment import adjustment_window_start
+
+    allow_baseline_init = migration.get(
+        "allow_baseline_init",
+        migration.get("window", {}).get("start", "") <= adjustment_window_start()
+        and bool(migration.get("event_set_complete")),
+    )
+    validation = _validation(
+        conn, start, end, bool(migration.get("event_set_complete")),
+        require_normalized_baseline=allow_baseline_init,
+    )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -995,13 +1005,15 @@ def _revision_scenarios(conn) -> tuple[dict, str | None]:
         assert factor_revision["hfq_rows"][1]["close"] == 44.0
         scenarios["factor_revision"] = "ok"
         retracted = rebuild_stock(
-            conn, code, [], [], authoritative_event_dates=("20240103",)
+            conn, code, [], [], authoritative_event_dates=("20240103",),
+            baseline_factor=1.0,
         )
         assert retracted["factor_events"] == []
         assert [row["close"] for row in retracted["qfq_rows"]] == [10.0, 11.0, 13.0]
         scenarios["event_retraction"] = "ok"
         repeated = rebuild_stock(
-            conn, code, [], [], authoritative_event_dates=("20240103",)
+            conn, code, [], [], authoritative_event_dates=("20240103",),
+            baseline_factor=1.0,
         )
         keys = ("factor_events", "hfq_rows", "qfq_rows", "state")
         assert all(repeated[key] == retracted[key] for key in keys)

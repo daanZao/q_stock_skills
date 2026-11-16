@@ -48,6 +48,7 @@ __all__ = [
     "json_safe",
     "default_adapters",
     "default_daily_adapters",
+    "default_adjustment_adapters",
     "default_snapshot_adapters",
     "default_fundamentals_adapters",
     "default_index_daily_adapters",
@@ -101,6 +102,15 @@ def default_daily_adapters() -> list[DailyAdapter]:
     from .tencent_adapter import TencentAdapter
 
     return [TencentAdapter(), SinaAdapter(), BaostockAdapter()]
+
+
+def default_adjustment_adapters() -> list[DailyAdapter]:
+    """raw+B 持续采集链：baostock 优先，替代源只补单票 raw。"""
+    from .baostock_adapter import BaostockAdapter
+    from .sina_adapter import SinaAdapter
+    from .tencent_adapter import TencentAdapter
+
+    return [BaostockAdapter(), TencentAdapter(), SinaAdapter()]
 
 
 def default_index_spot_adapters() -> list[BoardAdapter]:

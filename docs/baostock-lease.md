@@ -75,9 +75,9 @@ agent 行为契约：
    才可经用户确认执行 force。
 5. 完成后由当前持有实例 `baostock_lock(release)`，同时关闭当前 MCP 进程的会话。
 
-MCP server 本身和非 baostock 工具不受租约限制。`init_database`、`fetch_daily`、legacy
+MCP server 本身和非 baostock 工具不受租约限制。`init_database`、`fetch_daily`、
 `query_daily`、`get_fundamentals` 无锁时在整个工具入口拒绝，不连接 PG、不尝试其他数据源。
-`QSTOCK_PRICE_SOURCE=new` 的 `query_daily` 仅读 PG、不触 baostock，属于明确豁免。
+#167 后 new `query_daily` 也可自愈写 raw+B，因此不再豁免；持锁后的缓存命中仍零上游。
 
 工具 description 与 server instructions 必须写明确认流程、实例归属和 release；实现与描述同步
 更新，不得让 agent 未经用户确认自动 acquire。

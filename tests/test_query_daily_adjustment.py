@@ -8,6 +8,13 @@ from qstock_mcp.db import ensure_schema
 from qstock_mcp.tools_daily import query_daily
 
 
+@pytest.fixture(autouse=True)
+def _block_unplanned_upstream(monkeypatch):
+    monkeypatch.setattr(
+        "qstock_mcp.tools_daily.default_adjustment_adapters", lambda: []
+    )
+
+
 def _conn(pg_test):
     conn = psycopg2.connect(pg_test)
     ensure_schema(conn)
@@ -33,15 +40,32 @@ def _raw(trade_date, close, *, pct=0.0, source="baostock"):
     }
 
 
+def _factor_evidence(conn, *dates, event_dates=()):
+    from qstock_mcp.ledger import record_collection
+
+    for day in dates:
+        has_event = day in event_dates
+        record_collection(
+            conn,
+            trade_date=day,
+            section="stock_adjust_factor",
+            status="ok" if has_event else "empty",
+            source="baostock",
+            rows=int(has_event),
+            detail="morning_batch:test",
+        )
+
+
 def test_new_qfq_is_derived_from_hfq_and_latest_anchor(pg_test, monkeypatch):
     conn = _conn(pg_test)
     rebuild_stock(
         conn,
         "600519",
-        [_raw("20240102", 10.0), _raw("20240103", 11.0, pct=-45.4545)],
+        [_raw("20240102", 10.0), _raw("20240103", 11.0, pct=120.0)],
         [{"ex_date": "20240103", "factor_cum": 2.0}],
         baseline_factor=1.0,
     )
+    _factor_evidence(conn, "20240102", "20240103", event_dates={"20240103"})
     conn.close()
     monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
 
@@ -77,7 +101,7 @@ def test_new_hfq_and_raw_keep_formal_pctchg_fallback_complete(
     rebuild_stock(
         conn,
         "600519",
-        [_raw("20240102", 10.0), _raw("20240103", 11.0, pct=-45.4545)],
+        [_raw("20240102", 10.0), _raw("20240103", 11.0, pct=120.0)],
         [{
             "ex_date": "20240103",
             "factor_cum": 2.0,
@@ -85,6 +109,7 @@ def test_new_hfq_and_raw_keep_formal_pctchg_fallback_complete(
         }],
         baseline_factor=1.0,
     )
+    _factor_evidence(conn, "20240102", "20240103", event_dates={"20240103"})
     conn.close()
     monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
 
@@ -151,6 +176,7 @@ def test_raw_gap_is_partial_with_note(pg_test, monkeypatch):
         "600519",
         [_raw("20240102", 10.0), _raw("20240104", 12.0)],
         [],
+        baseline_factor=1.0,
     )
     conn.close()
     monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
@@ -266,7 +292,7 @@ def test_latest_unresolved_factor_anomaly_blocks_complete(pg_test, monkeypatch):
     from qstock_mcp.ledger import record_collection
 
     conn = _conn(pg_test)
-    rebuild_stock(conn, "600519", [_raw("20240102", 10.0)], [])
+    rebuild_stock(conn, "600519", [_raw("20240102", 10.0)], [], baseline_factor=1.0)
     record_collection(
         conn,
         trade_date="20240102",
@@ -288,7 +314,184 @@ def test_latest_unresolved_factor_anomaly_blocks_complete(pg_test, monkeypatch):
         section="stock_adjust_factor",
         status="ok",
         source="baostock",
+        detail="morning_batch:resolved",
     )
+    rebuild_stock(conn, "600519", [], [], baseline_factor=1.0)
     conn.close()
     resolved = query_daily("600519", start="20240102", end="20240102")
     assert resolved["adjust"]["coverage"] == "complete"
+
+
+def test_new_query_self_heals_facts_without_baseline(pg_test, monkeypatch):
+    from fakes import FakeAdjustmentAdapter
+
+    conn = _conn(pg_test)
+    conn.close()
+    monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
+    adapter = FakeAdjustmentAdapter()
+
+    result = query_daily(
+        "600519",
+        start="20240102",
+        end="20240105",
+        adj="none",
+        adapters=[adapter],
+    )
+    qfq = query_daily(
+        "600519", start="20240102", end="20240105", adapters=[adapter]
+    )
+
+    assert result["status"] == "ok"
+    assert result["count"] == 4
+    assert result["healed"] == [
+        {"start": "20240102", "end": "20240105", "source": "baostock", "rows": 4}
+    ]
+    assert result["adjust"]["coverage"] == "partial"
+    assert [row["close"] for row in result["rows"]] == [10.0, 10.0, 10.0, 10.0]
+    assert qfq["status"] == "error"
+    assert qfq["error_kind"] == "data_unavailable"
+    assert [call["adj"] for call in adapter.calls] == ["none"]
+    assert len(adapter.factor_calls) == 4
+    conn = _conn(pg_test)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM stock_daily_hfq")
+        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "SELECT baseline_factor, factor_latest, rebuild_pending"
+            " FROM stock_factor_state WHERE stock_code='600519'"
+        )
+        assert cur.fetchone() == (None, None, True)
+    conn.close()
+
+
+def test_new_query_empty_baostock_raw_can_use_single_stock_alternative(pg_test, monkeypatch):
+    from fakes import FakeAdjustmentAdapter, FakeAdapter
+
+    conn = _conn(pg_test)
+    conn.close()
+    monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
+    baostock = FakeAdjustmentAdapter(rows=[])
+    tencent = FakeAdapter("tencent", rows_fn=lambda start, end: [
+        _raw("20240105", 12.0, source="tencent")
+    ])
+
+    result = query_daily(
+        "600519",
+        start="20240105",
+        end="20240105",
+        adj="none",
+        adapters=[baostock, tencent],
+    )
+
+    assert result["status"] == "ok"
+    assert result["rows"][0]["close"] == 12.0
+    assert result["rows"][0]["source"] == "tencent"
+    assert result["adjust"]["coverage"] == "partial"
+    assert result["healed"][0]["source"] == "tencent"
+    assert len(tencent.calls) == 1
+
+
+def test_new_query_intraday_defers_current_raw_and_factor_write(pg_test, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from fakes import FakeAdjustmentAdapter
+
+    conn = _conn(pg_test)
+    rebuild_stock(conn, "600519", [_raw("20240104", 10.0)], [], baseline_factor=1.0)
+    _factor_evidence(conn, "20240104")
+    conn.close()
+    monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
+    adapter = FakeAdjustmentAdapter()
+    now = datetime(2024, 1, 5, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    result = query_daily(
+        "600519",
+        start="20240104",
+        end="20240105",
+        adapters=[adapter],
+        now=now,
+    )
+
+    assert result["status"] == "ok"
+    assert result["deferred_rows"] == 1
+    assert result["adjust"]["coverage"] == "partial"
+    assert [row["trade_date"] for row in result["rows"]] == ["20240104"]
+    assert adapter.factor_calls == []
+    conn = _conn(pg_test)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM stock_daily_raw")
+        assert cur.fetchone()[0] == 1
+    conn.close()
+
+
+def test_new_query_factor_unknown_returns_raw_partial_but_not_qfq(pg_test, monkeypatch):
+    from fakes import FakeAdjustmentAdapter
+
+    class FactorUnavailable(FakeAdjustmentAdapter):
+        def fetch_daily_adjust_factor(self, trade_date):
+            self.factor_calls.append(trade_date)
+            from qstock_mcp.adapters import FetchError
+
+            raise FetchError("factor unavailable", kind="connection")
+
+    conn = _conn(pg_test)
+    conn.close()
+    monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
+    adapter = FactorUnavailable()
+
+    raw = query_daily(
+        "600519",
+        start="20240102",
+        end="20240105",
+        adj="none",
+        adapters=[adapter],
+    )
+    qfq = query_daily(
+        "600519",
+        start="20240102",
+        end="20240105",
+        adapters=[adapter],
+    )
+
+    assert raw["status"] == "ok"
+    assert raw["count"] == 4
+    assert raw["adjust"]["coverage"] == "partial"
+    assert raw["note"]
+    assert qfq["status"] == "error"
+    assert qfq["error_kind"] == "data_unavailable"
+
+
+def test_full_backfill_establishes_baseline_independent_of_query_order(
+    pg_test, monkeypatch, tmp_path
+):
+    from fakes import FakeAdjustmentAdapter
+    from qstock_mcp.adjustment_backfill import run_adjustment_backfill
+
+    conn = _conn(pg_test)
+    conn.close()
+    monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20240102")
+    backfill = run_adjustment_backfill(
+        start="20240102",
+        end="20240105",
+        adapter=FakeAdjustmentAdapter(),
+        report_dir=str(tmp_path),
+        throttle=0,
+    )
+    assert backfill["status"] == "ok"
+
+    recent = query_daily("600519", start="20240104", end="20240105", adapters=[])
+    older = query_daily("600519", start="20240102", end="20240103", adapters=[])
+
+    assert recent["adjust"]["coverage"] == older["adjust"]["coverage"] == "complete"
+    assert [row["close"] for row in recent["rows"]] == [10.0, 10.0]
+    assert [row["close"] for row in older["rows"]] == [10.0, 10.0]
+    conn = _conn(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT baseline_factor, rebuild_pending"
+            " FROM stock_factor_state WHERE stock_code='600519'"
+        )
+        baseline, pending = cur.fetchone()
+        assert float(baseline) == 1.0
+        assert pending is False
+    conn.close()

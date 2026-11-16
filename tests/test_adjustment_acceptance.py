@@ -4,17 +4,28 @@ import csv
 import json
 
 import psycopg2
+import pytest
 
 from qstock_mcp.adjustment_acceptance import run_adjustment_acceptance
 from test_adjustment_backfill import (
-    END, WINDOW_DAYS, FakeBackfillAdapter, _bar, _raw_series, _run,
+    END, START, WINDOW_DAYS, FakeBackfillAdapter, _bar, _raw_series, _run,
 )
+
+
+@pytest.fixture(autouse=True)
+def _full_window_start(monkeypatch):
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", START)
 
 
 def test_acceptance_exposes_eight_checks_and_is_local_by_default(pg_test, tmp_path):
     migration_dir = tmp_path / "migration"
     migration = _run(pg_test, FakeBackfillAdapter(), report_dir=str(migration_dir))
-    assert migration["status"] == "ok"
+    assert migration["status"] == "ok", {
+        "repairs": migration["summary"]["repair_counts"],
+        "validation": migration["summary"]["validation"],
+        "event": migration["summary"]["event_stock_processing"],
+        "no_event": migration["summary"]["no_event_stock_processing"],
+    }
 
     out = run_adjustment_acceptance(migration_dir=str(migration_dir))
 

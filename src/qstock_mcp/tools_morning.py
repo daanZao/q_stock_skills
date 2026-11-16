@@ -241,6 +241,11 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
                 (target, stock_code),
             )
             state = cur.fetchone()
+        allow_baseline_init = (
+            state is None
+            and _previous_raw(conn, stock_code, target) is None
+            and not events_by_stock.get(stock_code)
+        )
         snapshot = rebuild_stock(
             conn,
             stock_code,
@@ -249,7 +254,8 @@ def _stock_adjustment_part(conn, adapter, target: str, raw_rows: list[dict]) -> 
             authoritative_event_dates=(
                 () if stock_code in unknown_event_codes else (target,)
             ),
-            baseline_factor=state[0] if state is not None and state[1] else None,
+            baseline_factor=state[0] if state is not None else None,
+            allow_baseline_init=allow_baseline_init,
             rebuild_from=min(
                 [target] + [event["ex_date"] for event in events_by_stock.get(stock_code, [])]
             ),

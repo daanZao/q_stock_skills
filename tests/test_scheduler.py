@@ -14,7 +14,8 @@ import pytest
 from qstock_mcp import scheduler
 from qstock_mcp.db import ensure_schema
 from fakes import (
-    FakeAdapter, FakeBoardAdapter, FakeSnapshotAdapter, SNAPSHOT_ROWS, trading_rows,
+    FakeAdjustmentAdapter, FakeAdapter, FakeBoardAdapter, FakeSnapshotAdapter,
+    SNAPSHOT_ROWS, trading_rows,
 )
 
 TODAY = date.today().strftime("%Y%m%d")
@@ -30,6 +31,18 @@ def _init(pg_test):
 def pg_ready(pg_test):
     _init(pg_test)
     return pg_test
+
+
+def _seed_baseline(dsn, code="600519"):
+    conn = psycopg2.connect(dsn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,"
+            " latest_trade_date, rebuild_pending) VALUES (%s, 1.0, 1.0, '20231229', false)",
+            (code,),
+        )
+    conn.commit()
+    conn.close()
 
 
 def _run(capsys, argv, adapters=None):
@@ -219,23 +232,26 @@ def test_daily_check_mismatch_exit_1(capsys):
 
 
 def test_daily_fetch_writes_rows_and_reports_source(pg_ready, capsys):
+    _seed_baseline(pg_ready)
     rc, out = _daily_run(
         capsys,
         ["daily", "--codes", "600519", "--date", "20261020"],
-        [FakeAdapter("tencent")],
+        [FakeAdjustmentAdapter()],
     )
     assert rc == 0
     assert out["mode"] == "fetch"
-    assert out["results"][0]["source"] == "tencent"
+    assert out["results"][0]["source"] == "baostock"
     assert out["results"][0]["rows_upserted"] == 1
 
     conn = psycopg2.connect(pg_ready)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT stock_code, trade_date, source FROM stock_daily"
+            "SELECT stock_code, trade_date, source FROM stock_daily_raw"
             " WHERE stock_code = '600519' AND trade_date = '20261020'"
         )
-        assert cur.fetchone() == ("600519", "20261020", "tencent")
+        assert cur.fetchone() == ("600519", "20261020", "baostock")
+        cur.execute("SELECT count(*) FROM stock_daily")
+        assert cur.fetchone()[0] == 0
     conn.close()
 
 
@@ -276,9 +292,10 @@ def test_daily_input_conflicts_exit_1(capsys):
 
 def test_daily_fetch_rerun_reports_zero_gap(pg_ready, capsys):
     """已补过的区间重跑零抓取：source 为 null 并带 zero-gap note（幂等）。"""
+    _seed_baseline(pg_ready)
     argv = ["daily", "--codes", "600519", "--date", "20261020"]
-    _daily_run(capsys, argv, [FakeAdapter("tencent")])
-    rc, out = _daily_run(capsys, argv, [FakeAdapter("tencent")])
+    _daily_run(capsys, argv, [FakeAdjustmentAdapter()])
+    rc, out = _daily_run(capsys, argv, [FakeAdjustmentAdapter()])
     assert rc == 0
     assert out["results"][0]["source"] is None
     assert out["results"][0]["rows_upserted"] == 0
@@ -286,7 +303,8 @@ def test_daily_fetch_rerun_reports_zero_gap(pg_ready, capsys):
 
 
 def test_daily_trading_day_window_uses_calendar_not_calendar_days(pg_ready, capsys):
-    adapter = FakeAdapter("tencent", rows_fn=trading_rows)
+    _seed_baseline(pg_ready)
+    adapter = FakeAdjustmentAdapter()
     rc, out = _daily_run(
         capsys,
         ["daily", "--codes", "600519", "--trading-days", "3", "--end", "20261023", "--force"],
@@ -500,3 +518,88 @@ def test_snapshot_check_bad_limit_exit_1(capsys):
     assert rc == 1
     assert out["status"] == "error"
     assert "codes_limit" in out["error"]
+
+
+def test_daily_all_baostock_failure_never_falls_back_to_market_sources(pg_ready, capsys):
+    from fakes import FakeAdjustmentAdapter, LIST_ROWS
+    from qstock_mcp.repository import upsert_stock_list
+
+    conn = psycopg2.connect(pg_ready)
+    upsert_stock_list(conn, LIST_ROWS, "test")
+    conn.close()
+    baostock = FakeAdjustmentAdapter(fail_times=99)
+    tencent = FakeAdapter("tencent")
+
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--all", "--date", "20261020"],
+        [baostock, tencent],
+    )
+
+    assert rc == 1
+    assert out["status"] == "error"
+    assert tencent.calls == []
+    rows = _ledger_rows(pg_ready, section="stock_daily_raw")
+    assert any(row[2] == "error" for row in rows)
+
+
+def test_daily_all_uses_daily_market_raw_and_factor_pipeline(pg_ready, capsys, monkeypatch):
+    from fakes import LIST_ROWS
+    from qstock_mcp.repository import upsert_stock_list
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20261020")
+    conn = psycopg2.connect(pg_ready)
+    upsert_stock_list(conn, LIST_ROWS, "test")
+    conn.close()
+    adapter = FakeAdjustmentAdapter()
+    calls = {}
+    original = scheduler.run_adjustment_backfill
+    def capture(**kwargs):
+        calls.update(kwargs)
+        return original(**kwargs)
+    monkeypatch.setattr(scheduler, "run_adjustment_backfill", capture)
+
+    rc, out = _daily_run(
+        capsys,
+        ["daily", "--all", "--date", "20261020", "--throttle", "0"],
+        [adapter],
+    )
+
+    assert rc == 0
+    assert calls["throttle"] == 1.5
+    assert out["failed"] == 0
+    assert out["force"] is True
+    assert out["summary"]["raw"]["rows"] == 2
+    assert adapter.factor_calls == ["20261020"]
+    assert [call["trade_date"] for call in adapter.calls] == ["20261019", "20261020"]
+    conn = psycopg2.connect(pg_ready)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM stock_daily")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM stock_daily_raw")
+        assert cur.fetchone()[0] == 4
+        cur.execute("SELECT count(*) FROM stock_daily_hfq")
+        assert cur.fetchone()[0] == 2
+    conn.close()
+
+
+def test_daily_all_preserves_baostock_lock_error(pg_ready, capsys):
+    from qstock_mcp.baostock_errors import BaostockLocked
+    from qstock_mcp.repository import upsert_stock_list
+    from fakes import LIST_ROWS
+
+    conn = psycopg2.connect(pg_ready)
+    upsert_stock_list(conn, LIST_ROWS, "test")
+    conn.close()
+    locked = FakeAdjustmentAdapter(
+        fail_times=99, exc=BaostockLocked("未持有有效的 baostock 租约")
+    )
+
+    rc, out = _daily_run(
+        capsys, ["daily", "--all", "--date", "20261020"], [locked]
+    )
+
+    assert rc == 1
+    assert out["status"] == "error"
+    assert out["error_kind"] == "baostock_locked"
+    assert out["error"]

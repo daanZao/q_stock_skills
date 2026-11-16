@@ -2,9 +2,9 @@
 
 轻量初始化（issue #8）= 幂等建表 + 股票清单 + 全市场快照 + 主要指数日线，
 各部分独立 fallback 重试、独立成败报告（单部分失败不拖垮其他，仅全部数据
-部分失败才整体 error）；backfill_history=True 时追加全市场个股历史日线回溯
-（重操作，显式开启，复用日线头尾自愈，单股失败不中断，进度/失败在
-parts.backfill 中报告）。输出自描述 JSON（dict）：status / tool / params /
+部分失败才整体 error）；backfill_history=True 时追加全市场 raw+B 回溯与派生重建
+（重操作，显式开启，复用逐日全市场回填，断点/失败/产物在 parts.backfill 报告）。
+输出自描述 JSON（dict）：status / tool / params /
 schema_files / tables / parts / failed_parts。
 
 query_index_daily（issue #33/T1）：index_daily 已沉淀数据的纯读查询，不触发
@@ -35,9 +35,10 @@ from .adapters import (
     DailyAdapter,
     DataAdapter,
     FetchError,
+    IndexDailyAdapter,
     SnapshotAdapter,
     default_adapters,
-    default_daily_adapters,
+    default_adjustment_adapters,
     default_snapshot_adapters,
 )
 from .dates import is_trading_time, normalize_date, today_str
@@ -61,7 +62,6 @@ from .repository import (
     upsert_sw_industry_meta,
 )
 from .tools_baostock import baostock_error
-from .tools_daily import ensure_coverage
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ MAJOR_INDICES = (
     ("000688", "科创50"),
 )
 
-FULL_HISTORY_START = "19900101"  # 全量回溯/指数日线起点，各源自行截断到上市日
+FULL_HISTORY_START = "19900101"  # 指数日线起点，各源自行截断到上市日
 
 
 def _init_stock_list(conn, adapters: Sequence[DataAdapter]) -> dict:
@@ -133,7 +133,7 @@ def _init_market_snapshot(conn, adapters: Sequence[SnapshotAdapter]) -> dict:
 
 
 def _init_index_daily(
-    conn, adapters: Sequence[DataAdapter], now=None
+    conn, adapters: Sequence[IndexDailyAdapter], now=None
 ) -> dict:
     """主要指数全历史日线：按指数独立 fallback，仅全部失败才 part error。
 
@@ -192,10 +192,9 @@ def _init_index_daily(
     }
 
 
-def _init_backfill(conn, adapters: Sequence[DailyAdapter]) -> dict:
-    """全市场个股历史日线回溯：复用日线头尾自愈，单股失败不中断。"""
-    today = today_str()
-    started = datetime.now(timezone.utc)
+def _init_backfill(conn, adapters: Sequence[DailyAdapter], now=None) -> dict:
+    from .adjustment_backfill import run_adjustment_backfill
+
     codes = select_stock_codes(conn)
     if not codes:
         return {
@@ -206,51 +205,53 @@ def _init_backfill(conn, adapters: Sequence[DailyAdapter]) -> dict:
             "rows_upserted": 0,
             "failed": [],
         }
-    succeeded, rows_upserted, failed = 0, 0, []
-    for code in codes:
-        try:
-            cover = ensure_coverage(
-                conn, adapters, code, "qfq", FULL_HISTORY_START, today
-            )
-        except BaostockError:
-            raise
-        except Exception as e:  # noqa: BLE001 - 单股失败不中断全市场回溯
-            log.warning("全量回溯失败 %s: %s", code, e)
-            failed.append({"stock_code": code, "error": str(e)})
-            continue
-        if not cover["ok"]:
-            seg = cover["failed_segment"]
-            log.warning("全量回溯分段失败 %s %s~%s", code, seg["start"], seg["end"])
-            failed.append(
-                {
-                    "stock_code": code,
-                    "error": f"分段补抓失败（{seg['start']}~{seg['end']}）",
-                    "attempted_sources": cover["attempted_sources"],
-                }
-            )
-            continue
-        succeeded += 1
-        rows_upserted += sum(s["rows"] for s in cover["segments"])
-    if not failed:
-        status = "ok"
-    elif succeeded == 0:
-        status = "error"
-    else:
-        status = "partial_error"
-    # 采集台账（issue #77）：回溯整体落一行；部分失败以 detail 呈现
-    record_collection(
-        conn, trade_date=today, section="stock_daily",
-        status="error" if status == "error" else "ok",
-        rows=rows_upserted,
-        detail=f"backfill total={len(codes)} succeeded={succeeded} failed={len(failed)}",
-        started_at=started,
+    adapter = next(
+        (
+            item for item in adapters
+            if hasattr(item, "fetch_astock_daily")
+            and hasattr(item, "fetch_daily_adjust_factor")
+        ),
+        None,
     )
+    if adapter is None:
+        return {
+            "status": "error",
+            "error": "全量回溯需要 baostock 全市场 raw 与逐日因子源",
+            "total": len(codes),
+            "succeeded": 0,
+            "rows_upserted": 0,
+            "failed": [],
+        }
+    result = run_adjustment_backfill(adapter=adapter, now=now)
+    summary = result.get("summary", {})
+    status = result.get("status", "error")
+    event = summary.get("event_stock_processing", {})
+    no_event = summary.get("no_event_stock_processing", {})
+    succeeded = (
+        event.get("verified", 0)
+        + no_event.get("verified", 0)
+        + summary.get("retracted_processing", {}).get("verified", 0)
+    )
+    raw_days = summary.get("raw_day_processing", {})
+    if (raw_days.get("error") and not raw_days.get("ok")) or not summary:
+        status = "error"
+        succeeded = 0
+    failed_by_code = {
+        item["stock_code"]: {"stock_code": item["stock_code"], "error": item["reason"]}
+        for item in result.get("repairs", [])
+        if item.get("stock_code") and item.get("reason")
+    }
     return {
         "status": status,
         "total": len(codes),
         "succeeded": succeeded,
-        "rows_upserted": rows_upserted,
-        "failed": failed,
+        "rows_upserted": summary.get("raw", {}).get("rows", 0),
+        "failed": list(failed_by_code.values()),
+        "stage": result.get("stage", "ingested"),
+        "messages": result.get("messages", []),
+        "summary": summary,
+        "artifacts": result.get("artifacts"),
+        **({"error": result["error"]} if result.get("error") else {}),
     }
 
 
@@ -259,16 +260,16 @@ def init_database(
     adapters: Sequence[DataAdapter] | None = None,
     daily_adapters: Sequence[DailyAdapter] | None = None,
     snapshot_adapters: Sequence[SnapshotAdapter] | None = None,
-    index_adapters: Sequence[DataAdapter] | None = None,
+    index_adapters: Sequence[IndexDailyAdapter] | None = None,
     now=None,
 ) -> dict:
     """建表 + 轻量初始化数据；backfill_history=True 追加全市场历史日线回溯。
 
-    个股日线回溯走独立 fallback 链（issue #112：腾讯→新浪→baostock），由
+    个股日线回溯使用 baostock 逐日全市场 raw+因子管线（#167），由
     daily_adapters 注入；全市场快照走独立链（issue #116：腾讯批量报价→腾讯
     rank→新浪直连），由 snapshot_adapters 注入；指数日线走独立链
     （issue #117：腾讯→baostock），由 index_adapters 注入；未显式注入时
-    生产默认分别用 default_daily_adapters / default_snapshot_adapters /
+    生产默认分别用 default_adjustment_adapters / default_snapshot_adapters /
     default_index_daily_adapters，测试注入 adapters 时沿用同一组 fake（保持
     既有接缝）。now 为测试注入的时钟（盘中禁写防线，issue #78：交易时段内
     index_daily 当日行不落库）。"""
@@ -277,7 +278,7 @@ def init_database(
     if adapters is None:
         adapters = default_adapters()
         if daily_adapters is None:
-            daily_adapters = default_daily_adapters()
+            daily_adapters = default_adjustment_adapters()
         if snapshot_adapters is None:
             snapshot_adapters = default_snapshot_adapters()
         if index_adapters is None:
@@ -312,7 +313,7 @@ def init_database(
             "index_daily": _init_index_daily(conn, index_adapters, now),
         }
         if backfill_history:
-            parts["backfill"] = _init_backfill(conn, daily_adapters)
+            parts["backfill"] = _init_backfill(conn, daily_adapters, now)
     except BaostockError as exc:
         return baostock_error(tool, params, exc)
     finally:

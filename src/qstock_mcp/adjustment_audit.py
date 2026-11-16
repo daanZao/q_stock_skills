@@ -8,7 +8,10 @@ def _golden_stock_codes() -> list[str]:
     return [row["stock_code"] for row in json.loads(path.read_text(encoding="utf-8"))["cases"]]
 
 
-def _validation(conn, start: str, end: str, event_set_complete: bool) -> dict:
+def _validation(
+    conn, start: str, end: str, event_set_complete: bool,
+    require_normalized_baseline: bool,
+) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -40,8 +43,8 @@ def _validation(conn, start: str, end: str, event_set_complete: bool) -> dict:
                 LEFT JOIN stock_factor_state s USING (stock_code)
                 WHERE %s AND e.stock_code IS NULL
                   AND (
-                      s.stock_code IS NULL OR s.baseline_factor <> 1
-                      OR s.factor_latest <> 1
+                      s.stock_code IS NULL OR s.baseline_factor IS NULL
+                      OR (%s AND (s.baseline_factor <> 1 OR s.factor_latest <> 1))
                       OR EXISTS (
                           SELECT 1 FROM stock_daily_hfq h
                           WHERE h.stock_code=v.stock_code
@@ -83,8 +86,8 @@ def _validation(conn, start: str, end: str, event_set_complete: bool) -> dict:
                 (SELECT count(*) FROM no_event_bad)
             """,
             (
-                start, end, start, end, start, end, event_set_complete, start, end,
-                start, end, start, end,
+                start, end, start, end, start, end, event_set_complete,
+                require_normalized_baseline, start, end, start, end, start, end,
             ),
         )
         row = cur.fetchone()
@@ -263,11 +266,15 @@ def _raw_sample(conn, start: str, end: str, event_set_complete: bool) -> list[di
         ]
 
 
-def audit_adjustment_migration(conn, start: str, end: str,
-                               event_set_complete: bool) -> dict:
+def audit_adjustment_migration(
+    conn, start: str, end: str, event_set_complete: bool,
+    require_normalized_baseline: bool = True,
+) -> dict:
     sample = _raw_sample(conn, start, end, event_set_complete)
     return {
-        "validation": _validation(conn, start, end, event_set_complete),
+        "validation": _validation(
+            conn, start, end, event_set_complete, require_normalized_baseline
+        ),
         "stock_hashes": _stock_hashes(conn, start, end),
         "raw_sample": sample,
         "sample_summary": {

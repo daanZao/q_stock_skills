@@ -1,22 +1,20 @@
-"""fetch/query 能力面核心：fetch_daily 抓取落库，query_daily 自愈查询。
+"""fetch/query 能力面：raw+B 持续采集、派生查询与 legacy 兼容。
 
-工具函数层（server.py）只做薄包装；本层是测试接缝：注入 fake 适配器 +
-真实 PG 测试库（见 tests/）。查询自愈契约（issue #3）：库里缺数据时只补
-请求区间的头部和尾部缺口（中段缺口视为停牌/非交易日），按腾讯 → 新浪 →
-baostock fallback（issue #112，东财退出个股日线）；全失败时报错并给出
-attempted_sources，绝不返回过期/伪造数据。
-盘中禁写（issue #78）：交易时段内（交易日 09:30–15:00 东八区）当日行不落库
-（未收盘数据非最终值），fetch/query 正常返回数据并带 note；盘后行为不变。
+#167 的写入口由 `adjustment_pipeline` 承载：baostock 优先取 raw，逐日确认累计 B，
+再重建 hfq/state；因子未知与替代源权威字段缺失均不得判 complete。legacy 查询
+仍走腾讯 → 新浪 → baostock 与旧表。new 查询在新窗口内盘后自愈，盘中当日禁写。
+全失败返回结构化错误与 attempted_sources，不伪造数据。
 
-三源对拍（issue #112）在独立模块 `daily_parity.py`：逐源直取同一交易日 bar 做
-字段级比对、不落库——固定 CLI `qstock-scheduler daily --check` 的入口。
+三源对拍在 `daily_parity.py`，固定 CLI 为 `qstock-scheduler daily --check`。
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import NamedTuple, Sequence
 
-from .adapters import DailyAdapter, default_daily_adapters
+from .adapters import DailyAdapter, default_adjustment_adapters
+from .adjustment import adjustment_window_start
+from .adjustment_pipeline import ensure_adjustment_coverage
 from .baostock_errors import BaostockError
 from .dates import is_trading_time, resolve_range, today_str
 from .db import connect
@@ -24,7 +22,7 @@ from .fetch_chain import AllSourcesFailed, aggregate_error_kind, fetch_with_fall
 from .gaps import head_tail_gaps
 from .ledger import record_collection, summarize_attempted
 from .output import error as _error
-from .price_reader import PriceQueryError, get_price_reader
+from .price_reader import NewPriceReader, PriceQueryError, get_price_reader
 from .repository import select_daily, select_dates, upsert_daily
 from .tools_baostock import baostock_error
 
@@ -43,7 +41,7 @@ def ensure_coverage(
 ) -> dict:
     """补齐 [start, end] 的头尾缺口，返回 {"ok", "segments", "deferred_rows"}。
 
-    公共能力：fetch/query 自愈与 init 全量回溯（issue #8）共用。
+    仅承载 legacy 查询自愈；#167 新写入走 adjustment_pipeline。
     defer_dates：禁写日期集（盘中禁写防线，issue #78）——命中行不落库，
     收集进 deferred_rows 由调用方决定如何呈现。force=True 时整窗重抓。
     """
@@ -83,7 +81,8 @@ def ensure_coverage(
 
 
 def _ledger_daily(
-    conn, start: str, end: str, segments: list[dict], started: datetime
+    conn, start: str, end: str, segments: list[dict], started: datetime,
+    section: str = "stock_daily",
 ) -> None:
     """日线采集落账（issue #77）：一次区间补抓一行，trade_date 记区间尾日。"""
     rows = sum(s["rows"] for s in segments)
@@ -99,7 +98,7 @@ def _ledger_daily(
     record_collection(
         conn,
         trade_date=end,
-        section="stock_daily",
+        section=section,
         status="ok" if rows > 0 else "empty",
         source=sources,
         rows=rows,
@@ -142,14 +141,15 @@ def _mark_suspension(row: dict) -> dict:
 
 
 class _Ctx(NamedTuple):
-    """_run 公共骨架的产物：参数回显、解析后区间、自愈分段、库内行、盘中禁写行。"""
-
     params: dict
     start: str
     end: str
     segments: list[dict]
     rows: list[dict]
     deferred_rows: list[dict]
+    snapshot: dict | None
+    factor_errors: list[dict]
+    coverage: str | None
 
 
 _INTRADAY_NOTE = (
@@ -164,9 +164,8 @@ _ADJUST_FALLBACK_NOTE = (
 
 def _run(
     stock_code: str, days, start, end, adj, adapters, tool: str, now=None,
-    force: bool = False,
+    force: bool = False, adjustment: bool = True,
 ):
-    """公共骨架：参数解析 → 连接 → 头尾自愈或整窗刷新。"""
     params = {
         "stock_code": stock_code,
         "adj": adj,
@@ -180,27 +179,47 @@ def _run(
         start_d, end_d = resolve_range(days, start, end)
     except ValueError as e:
         return None, _error(tool, params, str(e))
+    if adjustment and start_d < adjustment_window_start():
+        return None, _error(
+            tool,
+            params,
+            "raw+B 写入口仅支持 QSTOCK_ADJ_WINDOW_START 起的窗口，不从 legacy qfq 反推",
+            error_kind="invalid_range",
+        )
     if adapters is None:
-        adapters = default_daily_adapters()
+        if adjustment:
+            adapters = default_adjustment_adapters()
+        else:
+            from .adapters import default_daily_adapters
+
+            adapters = default_daily_adapters()
     conn, err = connect()
     if err:
         return None, _error(tool, params, err)
     try:
         started = datetime.now(timezone.utc)
-        # 盘中禁写（issue #78）：交易时段内当日行不落库（未收盘数据非最终值）
         defer = frozenset({today_str(now)}) if is_trading_time(now) else frozenset()
-        cover = ensure_coverage(
-            conn, adapters, stock_code, adj, start_d, end_d,
-            defer_dates=defer, force=force,
-        )
+        if adjustment:
+            cover = ensure_adjustment_coverage(
+                conn, adapters, stock_code, start_d, end_d,
+                defer_dates=defer, force=force,
+            )
+        else:
+            cover = ensure_coverage(
+                conn, adapters, stock_code, adj, start_d, end_d,
+                defer_dates=defer, force=force,
+            )
         if cover["ok"] and cover["segments"]:
             # 采集台账（issue #77）：真实发生抓取/写库才落账；无缺口零动作不落账
-            _ledger_daily(conn, start_d, end_d, cover["segments"], started)
+            _ledger_daily(
+                conn, start_d, end_d, cover["segments"], started,
+                section="stock_daily_raw" if adjustment else "stock_daily",
+            )
         if not cover["ok"]:
             record_collection(
                 conn,
                 trade_date=end_d,
-                section="stock_daily",
+                section="stock_daily_raw" if adjustment else "stock_daily",
                 status="error",
                 error_kind=aggregate_error_kind(cover["attempted_sources"]),
                 detail=f"range {start_d}~{end_d}; "
@@ -215,12 +234,23 @@ def _run(
                 attempted_sources=cover["attempted_sources"],
                 healed=cover["segments"],
             )
-        rows = select_daily(conn, stock_code, adj, start_d, end_d)
+        coverage = None
+        if tool == "fetch_daily":
+            read_result = NewPriceReader().query_daily(
+                conn, stock_code, "none", start_d, end_d
+            )
+            rows = read_result["rows"]
+            coverage = read_result["adjust"]["coverage"]
+        else:
+            rows = select_daily(conn, stock_code, adj, start_d, end_d)
     except BaostockError as exc:
         return None, baostock_error(tool, params, exc)
     finally:
         conn.close()
-    return _Ctx(params, start_d, end_d, cover["segments"], rows, cover["deferred_rows"]), None
+    return _Ctx(
+        params, start_d, end_d, cover["segments"], rows, cover["deferred_rows"],
+        cover.get("snapshot"), cover.get("factor_errors", []), coverage,
+    ), None
 
 
 def fetch_daily(
@@ -233,24 +263,26 @@ def fetch_daily(
     now=None,
     force: bool = False,
 ) -> dict:
-    """抓取个股日线并落库：默认只补头尾缺口，force=True 时整窗重抓。
-
-    盘中时段（交易日 09:30–15:00）当日行不落库（盘中禁写防线，issue #78），
-    响应带 note；now 为测试注入的时钟。
-    """
+    """抓取 raw 与累计 B 并重建派生；adj 仅为兼容保留，不选择写入口径。"""
     ctx, err = _run(
         stock_code, days, start, end, adj, adapters, "fetch_daily", now, force=force
     )
     if err:
         return err
+    partial = bool(ctx.factor_errors) or (
+        ctx.snapshot is not None and ctx.snapshot["coverage"] == "partial"
+    )
     out = {
-        "status": "ok",
+        "status": "partial_error" if partial else "ok",
         "tool": "fetch_daily",
         "params": ctx.params,
         "range": {"start": ctx.start, "end": ctx.end},
         "data_range": _data_range(ctx.rows),
         "segments": ctx.segments,
         "rows_upserted": sum(s["rows"] for s in ctx.segments),
+        "adjust": {
+            "coverage": ctx.coverage or ("partial" if partial else "unknown")
+        },
     }
     if ctx.deferred_rows:
         out["note"] = _INTRADAY_NOTE
@@ -264,7 +296,7 @@ def fetch_daily(
     return out
 
 
-def _query_derived(reader, stock_code, days, start, end, adj) -> dict:
+def _query_derived(reader, stock_code, days, start, end, adj, adapters, now) -> dict:
     params = {"stock_code": stock_code, "adj": adj, "days": days, "start": start, "end": end}
     try:
         start_d, end_d = resolve_range(days, start, end)
@@ -273,7 +305,46 @@ def _query_derived(reader, stock_code, days, start, end, adj) -> dict:
     conn, err = connect()
     if err:
         return _error("query_daily", params, err)
+    healed: list[dict] = []
+    deferred_rows: list[dict] = []
     try:
+        window_start = adjustment_window_start()
+        should_heal = end_d >= window_start and start_d >= window_start
+        if should_heal:
+            if adapters is None:
+                adapters = default_adjustment_adapters()
+            started = datetime.now(timezone.utc)
+            defer = frozenset({today_str(now)}) if is_trading_time(now) else frozenset()
+            try:
+                cover = ensure_adjustment_coverage(
+                    conn, adapters, stock_code, start_d, end_d, defer_dates=defer
+                )
+            except BaostockError as exc:
+                return baostock_error("query_daily", params, exc)
+            healed = cover["segments"]
+            deferred_rows = cover["deferred_rows"]
+            if healed:
+                _ledger_daily(
+                    conn, start_d, end_d, healed, started, section="stock_daily_raw"
+                )
+            if not cover["ok"]:
+                record_collection(
+                    conn,
+                    trade_date=end_d,
+                    section="stock_daily_raw",
+                    status="error",
+                    error_kind=aggregate_error_kind(cover["attempted_sources"]),
+                    detail=summarize_attempted(cover["attempted_sources"]),
+                    started_at=started,
+                )
+                return _error(
+                    "query_daily",
+                    params,
+                    "分段补抓失败（各数据源错误见 attempted_sources）",
+                    failed_segment=cover["failed_segment"],
+                    attempted_sources=cover["attempted_sources"],
+                    healed=healed,
+                )
         try:
             result = reader.query_daily(conn, stock_code, adj, start_d, end_d)
         except PriceQueryError as e:
@@ -290,12 +361,17 @@ def _query_derived(reader, stock_code, days, start, end, adj) -> dict:
         "range": {"start": start_d, "end": end_d},
         "data_range": _data_range(rows),
         "count": len(rows),
-        "healed": [],
+        "healed": healed,
         "adjust": result["adjust"],
         "rows": rows,
     }
     if result["adjust"]["coverage"] != "complete":
         out["note"] = result.get("note", "复权数据覆盖不完整")
+    if deferred_rows:
+        out["note"] = (
+            f"{out['note']}；{_INTRADAY_NOTE}" if out.get("note") else _INTRADAY_NOTE
+        )
+        out["deferred_rows"] = len(deferred_rows)
     return out
 
 
@@ -308,15 +384,14 @@ def query_daily(
     adapters: Sequence[DailyAdapter] | None = None,
     now=None,
 ) -> dict:
-    """查询个股日线：库里缺数据自动补抓（自愈）后返回完整区间。
-
-    盘中时段当日行不落库但随响应返回（note 标注盘中数据，issue #78）。
-    新复权模型为纯读派生；收盘后自愈写 raw 由 #167 接入。
-    """
+    """查询个股日线：新窗口内盘后自愈写 raw+B；盘中当日行禁写。"""
     reader = get_price_reader()
     if hasattr(reader, "query_daily"):
-        return _query_derived(reader, stock_code, days, start, end, adj)
-    ctx, err = _run(stock_code, days, start, end, adj, adapters, "query_daily", now)
+        return _query_derived(reader, stock_code, days, start, end, adj, adapters, now)
+    ctx, err = _run(
+        stock_code, days, start, end, adj, adapters, "query_daily", now,
+        adjustment=False,
+    )
     if err:
         return err
     rows = ctx.rows

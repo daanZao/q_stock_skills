@@ -20,6 +20,7 @@ from qstock_mcp.tools_snapshot import fetch_market_snapshot
 
 from fakes import (
     INDEX_ROWS,
+    FakeAdjustmentAdapter,
     FakeAdapter,
     FakeBoardAdapter,
     FakeInitAdapter,
@@ -37,6 +38,17 @@ _TODAY = "20261016"
 def _init(pg_test):
     conn = psycopg2.connect(pg_test)
     ensure_schema(conn)
+    conn.close()
+
+
+def _seed_baseline(pg_test):
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO stock_factor_state (stock_code, baseline_factor, factor_latest,"
+            " latest_trade_date, rebuild_pending) VALUES ('600519', 1.0, 1.0, '20231229', false)"
+        )
+    conn.commit()
     conn.close()
 
 
@@ -195,20 +207,22 @@ def test_snapshot_no_param_api_date_accepted(pg_test):
 
 
 def test_intraday_daily_write_skipped(pg_test):
-    """盘中 fetch_daily：当日行不落库、响应带 note；历史行照常落库。"""
+    """盘中 fetch_daily：当日 raw/因子不落库、响应带 note；历史行照常。"""
     _init(pg_test)
+    _seed_baseline(pg_test)
     result = fetch_daily(
         "600519", start="20261013", end=_TODAY,
-        adapters=[FakeAdapter("efake", rows_fn=trading_rows)], now=_INTRADAY,
+        adapters=[FakeAdjustmentAdapter()], now=_INTRADAY,
     )
     assert result["status"] == "ok"
     assert "note" in result
-    assert _count(pg_test, "stock_daily", "WHERE trade_date = '20261016'") == 0
-    assert _count(pg_test, "stock_daily", "WHERE trade_date < '20261016'") > 0
+    assert _count(pg_test, "stock_daily_raw", "WHERE trade_date = '20261016'") == 0
+    assert _count(pg_test, "stock_daily_raw", "WHERE trade_date < '20261016'") > 0
+    assert _count(pg_test, "stock_adjust_factor", "WHERE ex_date = '20261016'") == 0
 
 
 def test_intraday_query_returns_but_not_persisted(pg_test):
-    """盘中 query_daily：返回含当日行（标注 note）但不落库，再查不累积。"""
+    """盘中 legacy query_daily：返回含当日行（标注 note）但不落库。"""
     _init(pg_test)
     out = query_daily(
         "600519", start="20261013", end=_TODAY,
@@ -217,20 +231,21 @@ def test_intraday_query_returns_but_not_persisted(pg_test):
     assert out["status"] == "ok"
     assert "note" in out
     dates = [r["trade_date"] for r in out["rows"]]
-    assert _TODAY in dates  # 盘中数据正常返回
+    assert _TODAY in dates
     assert _count(pg_test, "stock_daily", "WHERE trade_date = '20261016'") == 0
 
 
 def test_after_close_daily_write_unchanged(pg_test):
-    """盘后行为不变：当日行正常落库，无 note。"""
+    """盘后当日 raw 正常落库，无盘中 note。"""
     _init(pg_test)
+    _seed_baseline(pg_test)
     result = fetch_daily(
         "600519", start="20261013", end=_TODAY,
-        adapters=[FakeAdapter("efake", rows_fn=trading_rows)], now=_AFTER_CLOSE,
+        adapters=[FakeAdjustmentAdapter()], now=_AFTER_CLOSE,
     )
     assert result["status"] == "ok"
     assert "note" not in result
-    assert _count(pg_test, "stock_daily", "WHERE trade_date = '20261016'") == 1
+    assert _count(pg_test, "stock_daily_raw", "WHERE trade_date = '20261016'") == 1
 
 
 def test_intraday_init_index_daily_skips_today(pg_test):

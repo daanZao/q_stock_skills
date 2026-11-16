@@ -24,6 +24,11 @@ WINDOW_DAYS = ["20261012", "20261013", "20261014", "20261015", "20261016"]
 D1 = "20261009"
 
 
+@pytest.fixture(autouse=True)
+def _full_window_start(monkeypatch):
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", START)
+
+
 def _bar(trade_date, close, preclose, pct, *, tradestatus=1, amount=100.0):
     return {
         "trade_date": trade_date,
@@ -842,7 +847,7 @@ def test_authoritative_retraction_deletes_stale_event_and_rebuilds_as_no_event(p
     adapter = FakeBackfillAdapter(events=retracted_events)
     out = _run(pg_test, adapter, force=True, report_dir=str(tmp_path / "second"))
 
-    assert out["status"] == "ok"
+    assert out["status"] == "ok", json.dumps(out["summary"]["validation"], indent=2)
     assert out["summary"]["retracted_rebuilt"] == 1
     assert _fetch(
         pg_test,
@@ -1174,3 +1179,46 @@ def test_backfill_uses_shared_api_without_persistent_lifecycle(pg_test, tmp_path
 
     assert out["status"] == "ok"
     assert len(created) == 1
+
+
+def test_narrow_backfill_does_not_initialize_baseline(pg_test, monkeypatch, tmp_path):
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20230101")
+    adapter = FakeBackfillAdapter(events={}, raw={"600001": _stock_a_rows()})
+
+    out = _run(pg_test, adapter, report_dir=str(tmp_path))
+
+    assert out["status"] == "partial_error"
+    rows = _fetch(
+        pg_test,
+        "SELECT baseline_factor, factor_latest, rebuild_pending"
+        " FROM stock_factor_state WHERE stock_code='600001'",
+    )
+    assert rows == [(None, None, True)]
+    assert _fetch(
+        pg_test, "SELECT count(*) FROM stock_daily_hfq WHERE stock_code='600001'"
+    ) == [(0,)]
+
+
+def test_narrow_backfill_consumes_existing_baseline(pg_test, monkeypatch, tmp_path):
+    from qstock_mcp.adjustment import rebuild_stock
+
+    monkeypatch.setenv("QSTOCK_ADJ_WINDOW_START", "20230101")
+    conn = _conn(pg_test)
+    rebuild_stock(conn, "600001", _stock_a_rows(), [], baseline_factor=1.0)
+    conn.close()
+
+    out = _run(
+        pg_test,
+        FakeBackfillAdapter(events={}, raw={"600001": _stock_a_rows()}),
+        report_dir=str(tmp_path),
+    )
+
+    assert out["status"] == "ok"
+    rows = _fetch(
+        pg_test,
+        "SELECT baseline_factor, rebuild_pending"
+        " FROM stock_factor_state WHERE stock_code='600001'",
+    )
+    assert len(rows) == 1
+    assert float(rows[0][0]) == 1.0
+    assert rows[0][1] is False

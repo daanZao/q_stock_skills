@@ -75,7 +75,14 @@ def test_query_all_sources_failed_returns_error_without_data(pg_test):
         "sina",
         "baostock",
     ]
-    assert "rows" not in result  # 不返回任何疑似数据
+    assert "rows" not in result
+    conn = psycopg2.connect(pg_test)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT section, status FROM collection_log ORDER BY id DESC LIMIT 1"
+        )
+        assert cur.fetchone() == ("stock_daily", "error")
+    conn.close()
 
 
 def test_query_days_returns_last_n_rows(pg_test):

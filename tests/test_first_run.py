@@ -8,7 +8,8 @@ from qstock_mcp import scheduler
 from qstock_mcp.db import ensure_schema
 from qstock_mcp.repository import upsert_stock_list
 from fakes import (
-    FakeAdapter, FakeSwBoardsAdapter, SW_BOARD_LIST, _sw_history_row, trading_rows,
+    FakeAdjustmentAdapter, FakeSwBoardsAdapter, SW_BOARD_LIST, _sw_history_row,
+    trading_rows,
 )
 
 
@@ -67,11 +68,15 @@ def _run(capsys, argv, **adapters):
 
 
 def test_first_run_90_trading_day_path(pg_test, capsys, monkeypatch):
+    monkeypatch.setenv("QSTOCK_PRICE_SOURCE", "new")
     conn = psycopg2.connect(pg_test)
     ensure_schema(conn)
     upsert_stock_list(conn, [{"stock_code": "600519", "stock_name": "贵州茅台"}], "fake")
     conn.close()
     window = ["--trading-days", "90", "--end", "20261023"]
+    monkeypatch.setenv(
+        "QSTOCK_ADJ_WINDOW_START", scheduler.trading_day_window(90, end="20261023")[0]
+    )
     monkeypatch.setattr(
         "qstock_mcp.tools_coverage.load_sw_industry_meta_seed",
         lambda: [
@@ -86,7 +91,7 @@ def test_first_run_90_trading_day_path(pg_test, capsys, monkeypatch):
 
     rc, daily = _run(
         capsys, ["daily", "--all", *window, "--force", "--throttle", "0"],
-        daily_adapters=[FakeAdapter("tencent", rows_fn=trading_rows)],
+        daily_adapters=[FakeAdjustmentAdapter()],
     )
     assert rc == 0 and daily["failed"] == 0
 
@@ -104,7 +109,7 @@ def test_first_run_90_trading_day_path(pg_test, capsys, monkeypatch):
     assert rc == 0 and lhb["failed"] == 0
 
     rc, after = _run(capsys, ["coverage", *window])
-    assert rc == 0
+    assert rc == 0, {"summary": after["summary"], "stocks": after["sections"]["stock_daily"]}
     assert after["status"] == "ok"
     assert after["summary"]["gaps"] == 0
     assert after["calendar_days"] == 90
@@ -113,7 +118,11 @@ def test_first_run_90_trading_day_path(pg_test, capsys, monkeypatch):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM stock_daily")
-            assert cur.fetchone()[0] == 90
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "SELECT COUNT(*) FROM stock_daily_raw WHERE stock_code='600519'"
+            )
+            assert cur.fetchone()[0] == 91
             cur.execute("SELECT COUNT(*) FROM index_daily")
             assert cur.fetchone()[0] == 7 * 90
             cur.execute("SELECT COUNT(*) FROM market_boards")
