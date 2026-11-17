@@ -36,8 +36,8 @@ def _gu(v: Any) -> int | None:
 
 
 def _money_cn(v: Any) -> float | None:
-    """中文金额字符串 → 万元："X亿"→×1e4，"X万"→原值，无单位纯数字按万元计
-    （上游实测推断：无单位值与同行"万"档量级自洽，ADR 0006）。"""
+    """中文金额字符串 → 万元："X亿"→×1e4，"X万"→原值，"X元"→÷1e4，
+    无单位纯数字按万元计（上游实测推断：无单位值与同行"万"档量级自洽，ADR 0006）。"""
     if v is None:
         return None
     s = str(v).strip()
@@ -46,6 +46,8 @@ def _money_cn(v: Any) -> float | None:
         return None if n is None else n * 1e4
     if s.endswith("万"):
         return _num(s[:-1])
+    if s.endswith("元"):
+        return _wan(s[:-1])
     return _num(s)
 
 

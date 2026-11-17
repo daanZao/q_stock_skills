@@ -168,9 +168,10 @@ fetch/backfill 模式 JSON 示例：
 - **链序**：单日 `default_lhb_adapters()` 保持交易所官方单源；历史
   `default_lhb_history_adapters()` 在深圳组合同花顺主采，成功时不请求深交所，
   失败才由官方补缺，沪市/北交所仍走官方。显式 `--fallback ths` 只启用其他
-  市场后备，同花顺同一日期页面缓存复用，不重复请求。深交所官方汇总单页仍有
-  最多 3 次（0.5/1 秒退避）的防御性重试。同花顺 buy/sell/net 与普通行
-  `day_amount` 统一万元；累计行 `day_amount` 置 null，`turnover_rate` 无独立
+  市场后备，同花顺同一日期页面缓存复用，不重复请求。深交所官方汇总/个股明细
+  与上交所交易文件均有最多 3 次（0.5/1 秒退避）的防御性重试。同花顺
+  buy/sell/net 的上游元/万元/亿元与普通行 `day_amount` 均统一为万元；累计行
+  `day_amount` 置 null，`turnover_rate` 无独立
   实际值时恒 null。异常 HTML、业务键重复、日期错位或双源失败时当日失败并
   保留旧数据，staging 不继续也不写窗外表。
 

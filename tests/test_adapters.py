@@ -164,10 +164,11 @@ def test_lhb_yyb_mapping():
 
 
 def test_money_cn_formats():
-    """中文金额 → 万元："亿"换算、"万"原值、无单位纯数字按万元计（上游实测推断）、
-    缺失值 None（ADR 0006）。"""
+    """中文金额 → 万元："亿"换算、"万"原值、"元"除万、无单位纯数字按万元计
+    （上游实测推断）、缺失值 None（ADR 0006）。"""
     assert _money_cn("3.55亿") == 35500.0
     assert _money_cn("9785.87万") == 9785.87
+    assert _money_cn("-8772.00元") == pytest.approx(-0.8772)
     assert _money_cn("9950.85") == 9950.85  # 无单位按万元
     assert _money_cn(9950.85) == 9950.85
     assert _money_cn(None) is None

@@ -343,6 +343,79 @@ def test_szse_persistent_summary_page_failure_stops_after_three_attempts(monkeyp
     assert any("szse" in error for error in out["errors"])
 
 
+def test_szse_transient_detail_failure_retries(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+    attempts = []
+
+    def flaky_detail(dqrq, zqdm, zbdm):
+        if zqdm == "301001":
+            attempts.append(zqdm)
+            if len(attempts) == 1:
+                raise FetchError("Remote end closed connection without response")
+        return _szse_detail(dqrq, zqdm, zbdm)
+
+    monkeypatch.setattr(mod._lhb_szse, "fetch_detail", flaky_detail)
+    adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
+    out = adapter.fetch_lhb(TODAY)
+    assert attempts == ["301001", "301001"]
+    assert "errors" not in out
+    assert any(r["stock_code"] == "301001" for r in out["lhb_basic"])
+
+
+def test_szse_persistent_detail_failure_stops_after_three_attempts(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+    attempts = []
+
+    def unavailable_detail(dqrq, zqdm, zbdm):
+        if zqdm == "301001":
+            attempts.append(zqdm)
+            raise FetchError("Remote end closed connection without response")
+        return _szse_detail(dqrq, zqdm, zbdm)
+
+    monkeypatch.setattr(mod._lhb_szse, "fetch_detail", unavailable_detail)
+    adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
+    out = adapter.fetch_lhb(TODAY)
+    assert attempts == ["301001"] * 3
+    assert any("szse" in error for error in out["errors"])
+
+
+def test_sse_transient_file_failure_retries(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+    attempts = []
+
+    def flaky_file(dash):
+        attempts.append(dash)
+        if len(attempts) == 1:
+            raise FetchError("The handshake operation timed out")
+        return _sse_file(dash)
+
+    monkeypatch.setattr(mod._lhb_sse, "fetch_trade_file", flaky_file)
+    adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
+    out = adapter.fetch_lhb(TODAY)
+    assert len(attempts) == 2
+    assert "errors" not in out
+    assert any(r["stock_code"] == "600302" for r in out["lhb_basic"])
+
+
+def test_sse_persistent_file_failure_stops_after_three_attempts(monkeypatch):
+    _patch_markets(monkeypatch)
+    _patch_akshare(monkeypatch)
+    attempts = []
+
+    def unavailable_file(dash):
+        attempts.append(dash)
+        raise FetchError("The handshake operation timed out")
+
+    monkeypatch.setattr(mod._lhb_sse, "fetch_trade_file", unavailable_file)
+    adapter = ExchangeLhbAdapter(pause_s=0.0, clock=lambda _s: None)
+    out = adapter.fetch_lhb(TODAY)
+    assert len(attempts) == 3
+    assert any("sse" in error for error in out["errors"])
+
+
 def test_szse_primary_reuses_ths_page_for_details(monkeypatch):
     _patch_markets(monkeypatch)
     _patch_akshare(monkeypatch)

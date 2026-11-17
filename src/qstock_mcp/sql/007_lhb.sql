@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_lhb_statistic_date ON lhb_stock_statistic (trade_
 
 CREATE TABLE IF NOT EXISTS lhb_yyb_capital (
     -- 上游（东财营业部资金榜）无卖出/净额/均额列：sell_amount/net_buy_amount/avg_amount_per_trade 恒 null（不伪造）；
-    -- 金额列为中文串（"X亿"/"X万"/无单位按万元），经 _money_cn 解析为万元（ADR 0006）
+    -- 金额列为中文串（"X亿"/"X万"/"X元"/无单位按万元），经 _money_cn 解析为万元（ADR 0006）
     id                  bigserial PRIMARY KEY,
     fetch_date          text NOT NULL,  -- yyyymmdd
     rank                integer,

@@ -249,18 +249,21 @@ class ExchangeLhbAdapter:
         ]
         return rows, errors, metadata, details
 
-    def _szse_summary(self, dash: str, page: int) -> dict:
-        # 性能验证（2026-10-27）：单线程、5 秒间隔请求 3 个汇总页均断连；
-        # 最小安全间隔、TPS 与并发能力待验证。3 次尝试及 0.5/1 秒退避是防御性
-        # 重试参数，不代表上游已验证性能指标。
+    def _retry_request(self, fn, *args, **kwargs):
+        # 性能验证（2026-10-27）：深交所汇总单线程、5 秒间隔请求 3 页均断连；
+        # 最小安全间隔、TPS 与并发能力待验证。汇总、个股明细与上交所文件的
+        # 3 次尝试及 0.5/1 秒退避均为防御性参数，不代表上游已验证性能指标。
         for attempt in range(3):
             try:
-                return _lhb_szse.fetch_summary(dash, dash, page=page)
+                return fn(*args, **kwargs)
             except FetchError:
                 if attempt == 2:
                     raise
                 self._clock(0.5 * (2 ** attempt))
         raise AssertionError("unreachable")
+
+    def _szse_summary(self, dash: str, page: int) -> dict:
+        return self._retry_request(_lhb_szse.fetch_summary, dash, dash, page=page)
 
     def _szse_basic(self, trade_date: str) -> list[dict]:
         """深交所：汇总翻页 + 个股席位明细。"""
@@ -283,7 +286,9 @@ class ExchangeLhbAdapter:
                     )
                     continue
                 self._clock(self._pause)
-                d = _lhb_szse.fetch_detail(dash, r["zqdm"], r["zbdm"])
+                d = self._retry_request(
+                    _lhb_szse.fetch_detail, dash, r["zqdm"], r["zbdm"]
+                )
                 rows.append(
                     _basic_row(
                         d["trade_date"] or trade_date,
@@ -299,7 +304,9 @@ class ExchangeLhbAdapter:
         return rows
 
     def _sse_basic(self, trade_date: str) -> list[dict]:
-        parsed = _lhb_sse.fetch_trade_file(dash_date(trade_date))
+        parsed = self._retry_request(
+            _lhb_sse.fetch_trade_file, dash_date(trade_date)
+        )
         rows = []
         for s in parsed["stocks"]:
             rows.append(

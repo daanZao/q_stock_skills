@@ -136,6 +136,22 @@ def test_fetch_lhb_basic_maps_recorded_daily_page():
     ]
 
 
+def test_fetch_lhb_basic_accepts_yuan_net_amount():
+    html = FIXTURE.read_text(encoding="utf-8").replace(
+        '<span class="c-fall">-533.62</span>万元',
+        '<span class="c-fall">-5336200.00</span>元',
+        1,
+    )
+
+    rows = ThsLhbAdapter(
+        page_loader=lambda _url: html.encode("gb18030"), clock=lambda _s: None
+    ).fetch_lhb_basic("20261020")
+
+    assert rows[0]["net_buy_amount"] == pytest.approx(-533.62)
+    assert rows[0]["buy_amount"] == pytest.approx(1255.69)
+    assert rows[0]["sell_amount"] == pytest.approx(1789.31)
+
+
 def test_ths_lhb_pauses_between_dates_and_stops_after_ban():
     calls = []
     sleeps = []

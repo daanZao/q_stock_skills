@@ -40,7 +40,7 @@ def _plain(fragment: str) -> str:
 
 def _span_amount(block: str, label: str) -> tuple[float, str]:
     match = re.search(
-        re.escape(label) + r"\s*：<span[^>]*>\s*([-\d.,]+)\s*</span>\s*(亿元|万元|亿|万)",
+        re.escape(label) + r"\s*：<span[^>]*>\s*([-\d.,]+)\s*</span>\s*(亿元|万元|元|亿|万)",
         block,
     )
     if not match:
