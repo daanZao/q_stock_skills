@@ -18,15 +18,16 @@ def seat_problem(rows: list[dict]) -> str | None:
         identity = (seat_type, seat_code, seat_name, buy, sell, net)
         if identity in seen_rows:
             return f"席位重复: {seat_name}"
-        if seat_code is not None:
-            code_identity = (seat_type, seat_code)
-            if code_identity in seen_codes:
-                return f"席位重复: {seat_name}"
-            seen_codes.add(code_identity)
-        elif seat_name and seat_name not in _GENERIC_SEAT_NAMES:
-            name_identity = (seat_type, seat_name)
-            if name_identity in seen_names:
-                return f"席位重复: {seat_name}"
-            seen_names.add(name_identity)
+        if seat_name not in _GENERIC_SEAT_NAMES:
+            if seat_code is not None:
+                code_identity = (seat_type, seat_code)
+                if code_identity in seen_codes:
+                    return f"席位重复: {seat_name}"
+                seen_codes.add(code_identity)
+            elif seat_name:
+                name_identity = (seat_type, seat_name)
+                if name_identity in seen_names:
+                    return f"席位重复: {seat_name}"
+                seen_names.add(name_identity)
         seen_rows.add(identity)
     return None

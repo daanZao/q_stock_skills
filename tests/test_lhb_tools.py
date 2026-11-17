@@ -442,19 +442,33 @@ def test_fetch_lhb_day_mismatched_detail_date_is_not_complete(pg_ready):
     assert "日期不符" in r["lhb"]["partial_error"]
 
 
-def test_seat_problem_specific_name_ignores_amounts():
+@pytest.mark.parametrize("seat_code", [None, "specific-seat"])
+def test_seat_problem_specific_name_ignores_amounts(seat_code):
     rows = [
-        {"seat_type": "buy", "seat_name": "  示例证券  上海分公司 ", "buy_amount": 100},
-        {"seat_type": "buy", "seat_name": "示例证券 上海分公司", "buy_amount": 200},
+        {
+            "seat_type": "buy", "seat_name": "  示例证券  上海分公司 ",
+            "seat_code": seat_code, "buy_amount": 100,
+        },
+        {
+            "seat_type": "buy", "seat_name": "示例证券 上海分公司",
+            "seat_code": seat_code, "buy_amount": 200,
+        },
     ]
 
     assert "席位重复" in seat_problem(rows)
 
 
-def test_seat_problem_generic_name_requires_exact_duplicate():
+@pytest.mark.parametrize("seat_code", [None, "generic-seat"])
+def test_seat_problem_generic_name_requires_exact_duplicate(seat_code):
     rows = [
-        {"seat_type": "buy", "seat_name": "机构专用", "buy_amount": 100},
-        {"seat_type": "buy", "seat_name": "机构专用", "buy_amount": 200},
+        {
+            "seat_type": "buy", "seat_name": "机构专用",
+            "seat_code": seat_code, "buy_amount": 100,
+        },
+        {
+            "seat_type": "buy", "seat_name": "机构专用",
+            "seat_code": seat_code, "buy_amount": 200,
+        },
     ]
 
     assert seat_problem(rows) is None
