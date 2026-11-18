@@ -39,6 +39,7 @@ PG_DSN=postgresql://localhost/qstock_test qstock-scheduler daily --codes 600519 
 ## 文档分工
 
 - **结构与入口：`docs/knowledge-graph.md`** — 项目全图；"想改 X 先看哪里"覆盖改 schema / 加数据源 / 加指标 / 加 MCP 工具 / 改 fallback 等分支。改代码前先读。
+- **数据表语义：`docs/database-dictionary.md`** — 表含义、业务键与日期轴、真实来源/写方/读方、字段原子性、获取与重算边界；改表或新增消费路径时同步。
 - **词汇：`CONTEXT.md`** — 领域术语的唯一权威（五个能力面、轻量初始化/全量回溯、skill 家族等）。命名时用这里的词，不用 `_Avoid_` 列出的同义词。
 - **决策原因：`docs/adr/0001-0019`** — "为什么"只在 ADR；输出与 ADR 冲突时显式指出。
 
