@@ -108,10 +108,11 @@
 #### `stock_daily`
 
 - **含义/键**：legacy 个股日线，键 `(stock_code, trade_date, adj)`；同一股票日期可有 qfq/hfq/none 多口径。
-- **何时写/来源**：legacy `query_daily` 自愈按腾讯 → 新浪 → baostock 链写入；legacy morning 次晨写 baostock 同键行；回滚可从新模型修复三种口径。存量行还可能来自已退役来源，不能按当前链反推。
-- **读方**：LegacyPriceReader 服务 query_daily、强势股和申万自算。
-- **字段来源**：行情为 U，部分源的涨跌额、涨跌幅和振幅为 L；`adj/source/timestamps` 为 M。上游 qfq/hfq 不是 raw 原子价格。
-- **获取边界**：可按日期重取部分来源，但换源、复核和复权锚点会改变结果。2023 年以前 qfq 仍依赖 legacy，不能反推 raw。
+- **生命周期**：目标消费模型已决定废弃本表，不再作为新分析的事实源；但当前仍处迁移期。2026-11-18 只读核验 `stock_adjustment_switch_state.mode=legacy`，因此“已决定废弃”不等于已经停止消费、切读或删除物理表。
+- **当前写入/来源**：legacy `query_daily` 自愈按腾讯 → 新浪 → baostock 链写入，其中 baostock 使用单票区间接口 `query_history_k_data_plus`；legacy morning 次晨通过 baostock 全市场单日接口 `query_daily_history_k_AStock` 写入；rollback 可从本地新模型修复三种口径。new 模式 morning 和 raw+B 持续采集不写本表。存量行还可能来自已退役来源，不能按当前链反推。
+- **当前读方**：LegacyPriceReader 服务 query_daily、强势股和申万自算；daily-review、limit-up-analysis、SEPA 经 MCP query_daily 间接消费，indicator-tools 再消费 query_daily 的管道输出，并非 skills 直连 PG。
+- **字段来源**：行情为 U，部分源的涨跌额、涨跌幅和振幅为 L；`adj/source/timestamps` 为 M。上游 qfq/hfq 不是 raw 原子价格；腾讯缺 `qfqday` 时可回落 `day`，legacy 仍按请求 adj 落库，因此行级 `adj='qfq'` 不能单独证明统一复权口径或锚点。
+- **获取边界**：可按日期重取部分来源，但换源、复核和复权锚点会改变结果。2023 年以前 qfq 仍依赖 legacy，不能反推 raw；物理删除须待切读、历史边界和回滚依赖解除。
 
 #### `stock_daily_legacy`（条件存在）
 
@@ -122,7 +123,8 @@
 
 #### `index_daily`
 
-- **含义/键**：主要指数不复权日线，键 `(index_code, trade_date)`，指数与个股代码冲突因此分表。
+- **含义/键**：7 个主要指数的发布点位日线，键 `(index_code, trade_date)`；不应用个股 qfq/hfq 复权模型，因此无 `adj`。指数自身的成分调整和除数修正属于指数编制规则，不能与个股复权混称。
+- **角色**：长期历史、当日日终行情和分析窗口的事实源；目标 close 复盘的指数收盘、20/60 日窗口、相关性和量价均以此表为准。
 - **何时写/来源**：init 建历史底座；`index` 按区间或当日补抓；morning 仅在尾行落后目标日时补抓。当前链为腾讯 → baostock，已覆盖目标日的尾行会直接跳过，不保证 baostock 次晨复核。
 - **读方**：query_index_daily、daily-review 和指数覆盖核验。当前 SEPA 不读本表。
 - **字段来源**：OHLCV、amount、turnover 为 U；腾讯涨跌和振幅为 L，baostock 部分字段为 U 或 NULL；source 为 M。
@@ -130,19 +132,22 @@
 
 #### `market_indices`
 
-- **含义/键**：指数实时/收盘截面，键 `(trade_date, index_code)`；不是指数历史日线。
+- **含义/键**：指数实时/收盘截面，键 `(trade_date, index_code)`；不是指数历史日线，也不要求连续交易日覆盖。
+- **角色**：盘中报价、原始量比和当前 SEPA 降级快照。当前生产适配器只取 7 大指数，旧东财路径曾留下更广泛指数代码，不能把存量代码数当作当前采集 Universe。
 - **何时写/来源**：close 或 `fetch_board_snapshot(indices)` 触发，当前链为腾讯批量报价 → 新浪，并含主要指数白名单补漏。
 - **读方**：当前 daily-review、SEPA 指数降级和 query_board_data。
 - **字段来源**：腾讯行情和量比为 U/UD，新浪部分涨跌字段为 L；本表没有行级 source。
-- **获取边界**：仅取当前，历史日期被实时 section 防线拒绝。
+- **获取边界**：仅取当前，历史日期被实时 section 防线拒绝。目标 close 不消费本表，其当日 0 行不得被用来判定 `index_daily` 或 close 指数数据缺失。
+- **覆盖差异示例（2026-11-18 只读核验）**：000905 在 `index_daily` 有 5,311 行（20050104–20261117），在 `market_indices` 只有 5 个采集日（20261009–20261019）；5 个重叠日收盘点位全部一致，成交额仅小数舍入差。这是历史日线与有限快照采集范围不同，不是同一数据集的行数冲突。
 
 #### `market_snapshot`
 
-- **含义/键**：全市场个股实时/收盘截面，键 `(trade_date, stock_code)`，含行情、PE/PB 和市值。
+- **含义/键**：持久化的全市场个股时点截面，键 `(trade_date, stock_code)`，含行情、PE/PB 和市值。“快照”指数据时效短，不表示数据库临时表；已落库历史行会持续保存，但只代表当时取得的截面。
+- **角色**：目标消费限定为盘中/午市时点分析及明确的快照增强，不作为 close 复盘的事实源或就绪前置。close 所需广度、成交额和前 75 应从全市场个股日线派生。
 - **何时写/来源**：snapshot、init 或 fetch_market_snapshot 触发；当前链为腾讯批量报价 → 腾讯 rank 榜单 → 新浪直连。主源需股票清单，后备源字段集不同。
-- **读方**：query_snapshot、当前 daily-review 与 limit-up-analysis。
+- **当前读方**：query_snapshot、当前 daily-review 与 limit-up-analysis；close 当前仍用其做广度、成交额和前 75，涨停子技能用市值/PE 做启发式归因，这些是当前实现而非目标消费。
 - **字段来源**：行情、估值、市值为 U/UD；广度和成交额聚合在查询时计算，不是本表物化列。
-- **获取边界**：仅取当前；API 日期与请求日期不符即拒收。
+- **获取边界**：仅取当前；API 日期与请求日期不符即拒收。目标 close 的就绪检查不查询本表，其当日 0 行不得判为 close 数据缺失；市值/PE 等无法从日线派生的增强项必须删除、独立降级或另找事实源。
 
 #### `stock_daily_raw`
 
@@ -166,6 +171,7 @@
 - **写/读**：rebuild_stock 写；NewPriceReader、审计、切换和回滚读。
 - **字段来源**：OHLC 和 `factor_cum=F` 为 L，量额、换手、停牌状态复制 raw；qfq 不落表，而由 hfq 按最新锚点读时派生。
 - **重算条件**：raw、完整事件、可信 B0、代码版本和无未决异常必须固定。无窗口时删除该票全部 hfq；只有起点时删除起点及之后；有窗口时删除 `[derive_start, window_end]`，再插入本次有效行。新事件可重锚全历史 qfq。
+- **一致性边界（2026-11-18 只读核验）**：已联接行满足 `hfq.close = raw.close × factor_cum`，公式偏差为 0，只能证明逐行计算一致。raw 为 4,797,979 行、hfq 为 4,573,186 行，32 个 state 仍 pending，不能宣称全量集合一致或完整。600519 在 20261116/20261117 的 raw close 为 1453.9/1457.7，hfq close 为 1453.9/11179.4759289；按同一 `factor_latest=7.669257` 派生的 qfq 约为 189.58/1457.7，仍存在跨日基准断层。因此当前证据不支持“raw 与 hfq 全量一致且派生结果正确”的结论。
 
 #### `stock_factor_state`
 
@@ -185,26 +191,34 @@
 
 #### `market_boards`
 
-- **含义/键**：行业/概念板块行情，物理键 `(trade_date, board_type, board_name)`，**不是 board_code**。申万双级和退役口径可并存。
-- **何时写/来源**：sw-boards、close 从申万 current 写当日截面；backfill 从申万 trend 写历史。自算板块不写本表，退役来源只作留档。
-- **读方**：query_board_data、daily-review 和 limit-up-analysis。
-- **字段来源**：current 的点位和量额为 U、涨跌为 L；trend 的涨跌为 U、preclose/振幅含 L；source 为 M。
-- **获取边界**：trend 可按日期重取，current 仅取当前。实时、回补和退役留档不能混成同口径；upsert 不清理改名或消失板块。
+- **含义/键**：持久化的**上游发布板块指数行情**，物理键 `(trade_date, board_type, board_name)`，**不是 board_code**。现役申万一级/二级发布口径与退役行业/概念留档可并存；本表不是成分股本地聚合结果表。
+- **current 当日截面入库链**：`sw-boards` / close → `fetch_board_snapshot(boards)` → `SwSResearchAdapter.fetch_boards` → 申万 current → `map_sw_current_rows` → 通用 `upsert_board_rows`。`latest_price=官网 l8`、`pre_close=官网 l3`，本地计算 `change_percent=(l8-l3)/l3×100`、`change_amount=l8-l3`，振幅也由官网指数高/低/昨收计算；这些 L 列的输入是**官网指数点位**，不是成分股。代码：`adapters/sw_adapter.py:138-178`、`adapters/_sw_board.py:60-99`、`tools_board.py:284-292`。
+- **trend 历史回补入库链**：`backfill --source sw` → `fetch_sw_board_history` → 申万 trend → `map_sw_trend_rows` → `upsert_board_history`。`change_percent=官网 markup`、`change_amount=官网 hike`，为 U；preclose 取上一行、振幅本地计算，为 L。代码：`adapters/sw_adapter.py:180-195`、`adapters/_sw_board.py:102-142`、`repository.py:749-765`。
+- **source 的三个层级**：`SwSResearchAdapter.name='swsresearch'` 可出现在工具响应和采集台账，无论 current 还是 trend。表内 `market_boards.source` 则不同：current 经 `BOARD_FIELDS` 通用 upsert，字段集不含 source，故为 `NULL`；trend 由 `upsert_board_history` 显式写 `swsresearch`。手册冒烟中的“source=swsresearch”若指工具响应，不能据此推断表内 current 行也有该值。
+- **与自算板块的区别**：`query_sw_board_daily` 是“申万成分字典 × 库内个股日线”的查询时成交额加权聚合，`basis=sw_amount_weighted`，不写 `market_boards`。它由 issue #75 建立、#92 修正横截面 adj；#105/#111/#118 定稿的是“申万官网 current/trend 为 boards 主源，自算保留作降级与交叉验证”。两条链不能混称。
+- **读方**：query_board_data、daily-review 和 limit-up-analysis；当前 daily-review 以申万官网发布行为板块主口径，缺失时才按既有规则降级到 `query_sw_board_daily` 自算口径。
+- **获取边界**：trend 可按日期重取，current 仅取当前。实时、回补和退役留档不能混成同口径；`NULL` 还可能包含旧东财实时留档，必须结合 `board_type`、业务日期和台账判断。upsert 不清理改名或消失板块。
+- **时点证据（2026-11-19 只读核验）**：表内 `swsresearch` 的 industry_l1/l2 合计 16,120 行；`NULL` 的 concept/industry 合计 1,002 行且均为 20261013 留档。该分布只描述当前库，不改变上述 current/trend 代码契约。
 
 #### `zt_pool`
 
-- **含义/键**：涨停 zt、跌停 dt、炸板 zb 事件池，键 `(trade_date, pool_type, stock_code)`。
+- **含义/键**：涨停 zt、跌停 dt、炸板 zb 事件池，键 `(trade_date, pool_type, stock_code)`。这些事件是 close 复盘、涨停分析和强势股规则的必要输入；历史覆盖短或上游深史未验证，不构成删除该数据面的理由。
 - **何时写/来源**：close、limitpool 和 fetch_board_snapshot 从 THS 涨停揭秘 dataapi 写入；每日每池一次、池间/分页间默认 20 秒退避。
 - **读方**：limit-up-analysis、daily-review 和强势股自算。
 - **字段来源**：价格、首封、板型、封单额、题材为 U/UD；连板数含本地解析。THS 不提供行业等字段，保持 NULL。
-- **获取边界**：2026-10-20 THS dataapi 限定调研记录 4 天历史可取，更深覆盖未验证。2026-10-23 `qstock_test_120` 三次低频冒烟验证当日三池字段，并非深史验证；详见 ADR 0012。每日一次守卫使重跑可能故意零请求。
+- **获取边界**：2026-10-20 THS dataapi 限定调研记录 4 天历史可取，这是接口样本，不是库内总覆盖或已证明的最大历史深度。2026-10-23 `qstock_test_120` 三次低频冒烟验证当日三池字段，并非深史验证；详见 ADR 0012。每日一次守卫使重跑可能故意零请求。
+- **时点证据（2026-11-19 只读核验）**：业务库现有 1,713 行、20 个有事件记录的交易日期，范围 20260914–20261019；有行日期不等于区间内每日三池均已成功采集，完整性仍须结合交易日历与采集台账核验。
+- **后续工作——THS 实测**：[调研：THS 涨停池历史覆盖与低频请求性能 #200](https://github.com/daanZao/q_stock_skills/issues/200) 验证三池历史边界、同日期重取一致性，以及限定样本串行低频下的时延、分页和成功率；不主动做并发/压力测试，未验证的上游 TPS 与并发上限保持“待验证”。
+- **后续工作——日线自算**：[Spec（待核实）：由个股日线派生收盘涨跌停与疑似炸板候选 #201](https://github.com/daanZao/q_stock_skills/issues/201) 研究以 `stock_daily_raw` 和当日有效交易制度判定收盘涨停/跌停，并以日内高/低价触及涨跌停价但收盘未封识别疑似炸板。该路线是 L 派生结果，不能提供首封时间、封单额、炸板次数或题材；存储口径由 Spec 决定，未决前不得直接混入或覆盖本表的 THS 原始事实。
 
 #### `strong_stocks`
 
 - **含义/键**：本地规则选股池，键 `(trade_date, stock_code)`；规则为 60 交易日新高 ∪ 近 10 交易日涨停至少 2 次。
 - **写/读**：close、limitpool 自算并写；daily-review 和 limit-up-analysis 读，无外部强势股上游。
 - **字段来源**：入选集合和 reason 为 L；行情、连板和名称复制其他事实；市值和行业无真源保持 NULL。
-- **重算条件**：需要完整价格、zt_pool、stock_list 和窗口。当前写路径只 upsert、不清修订后落选旧行，因此从空表重算与旧表重跑必须分开验证。
+- **时点证据（2026-11-19 只读核验）**：业务库现有 3,193 行、18 个有结果日期，范围 20260915–20261019；该分布不证明区间内逐日完整。
+- **重算条件**：需要目标日的完整价格事实、60 交易日价格窗口、10 交易日 `zt_pool` 窗口和 `stock_list`。`zt_pool` 无行必须结合采集台账区分空池与未采集，否则“近 10 日多次涨停”分支不能判为完整。当前写路径只 upsert、不清修订后落选旧行，因此从空表重算与旧表重跑必须分开验证。
+- **后续工作——历史回补**：[Spec（待核实）：strong_stocks 历史回补与整窗重放 #203](https://github.com/daanZao/q_stock_skills/issues/203) 将其纳入首次使用/历史窗口编排。当前 `backfill --source sw` 只承载申万板块，尚无本表历史重放入口；后续应复用自算规则、保持零上游请求，在输入完整后按日原子替换并清理落选旧行。缺事实时报告缺口，不自动转为采集，也不只计算单一分支冒充完整结果。
 
 #### `sw_board_valuation`
 
@@ -303,9 +317,11 @@
 
 | 逻辑事实 | 当前实现 | 目标消费 |
 | --- | --- | --- |
-| 指数收盘与历史 | 当日读 `market_indices`，历史读 `index_daily` | close 统一以 `index_daily` 为指数事实；量比另定派生或删除 |
-| 市场广度与成交额 | `market_snapshot` 聚合 | 从全市场个股日线事实本地聚合 |
-| 成交额前 75 | `market_snapshot` 排序 | 从个股日线事实排序，`stock_list` 补名称 |
+| legacy 个股日线 | skills 经 LegacyPriceReader 消费 `stock_daily`；legacy morning 与 rollback 仍写入，switch 当前为 legacy | `stock_daily` 已决定废弃；完成切读后只保留归档，不再作为分析事实源，新分析使用 raw+B 及受控派生 |
+| 指数收盘与历史 | 当日读 `market_indices`，历史读 `index_daily`，因此快照缺失会被误判为指数未就绪 | close 统一以 `index_daily` 为指数事实；就绪检查查当日行及所需历史窗口，`market_indices` 0 行不参与判定；量比另定派生或删除 |
+| 市场广度与成交额 | `market_snapshot` 聚合，快照缺失会阻断 close | 从全市场个股日线事实本地聚合；`market_snapshot` 0 行不参与判定 |
+| 成交额前 75 | `market_snapshot` 排序 | 从个股日线事实排序，`stock_list` 补名称，不依赖快照表 |
+| 个股时点截面 | close 将 `market_snapshot` 当核心输入 | `market_snapshot` 仅用于盘中/午市时点分析和明确增强，不进入 close 数据源或就绪检查 |
 | 指数实时截面 | close 必需 `market_indices` | 不进入 close；midday 如保留则单独定义 |
 | 涨停/连板 | `zt_pool` + 物化 `strong_stocks` + `limit_up.close` | zt_pool 是事件事实；强势股和 limit_up 是派生结果，不冒充独立上游 |
 | 龙虎榜 | basic + statistic + 两个 yyb 累计榜 | basic/detail 是按日期事实；统计和排行目标为查询时派生 |
@@ -316,17 +332,17 @@
 
 | 使用方 | 当前入口 | 数据使用规则 |
 | --- | --- | --- |
-| **daily-review** | MCP query/fetch + indicator-tools 管道 | 读取逻辑事实，不直连 PG。历史模式禁用 fetch；目标消费按上表改造，报告必须标注实际数据口径。 |
+| **daily-review** | MCP query/fetch + indicator-tools 管道 | 读取逻辑事实，不直连 PG。历史模式禁用 fetch；目标 close 的就绪检查以 `index_daily` 当日行和窗口、全市场个股日线及必要板块/事件事实为准，不以 `market_indices` 或 `market_snapshot` 是否采集为门槛，报告必须标注实际数据口径。 |
 | **limit-up-analysis** | MCP query/fetch + promote/deviation 管道 | zt_pool 是核心事件事实；strong、梯队、晋级率和营业部统计是派生结果。市值/PE 快照依赖需单独收口。 |
 | **SEPA** | query_daily、基本面透传、market_indices 降级、会话资讯 | 个股价格和复权经统一 reader；当前没有 query_index_daily/query_news 入口，指数快照近似必须标注降级。 |
 | **indicator-tools** | stdin/stdout 管道 | 不访问数据库，不物化指标。输入契约由 `query_daily` 等工具输出和技能文档共同维护。 |
 
 ## 7. 常见误用
 
-1. 用 `market_snapshot` 或 `market_indices` 请求历史日期。
-2. 把 `index_daily` 与 `market_indices` 混称为同一指数行情。
+1. 用 `market_snapshot` 或 `market_indices` 请求历史日期；把 `market_snapshot` 当物理临时表，或把它当 close 必需输入并因当日 0 行误判复盘数据缺失。
+2. 把 `index_daily` 与 `market_indices` 混称为同一指数行情，比较两表总行数判断冲突，或因 `market_indices` 当日 0 行而忽略 `index_daily` 已就绪、误判 close 指数数据缺失。
 3. 把业务键 upsert 当成整日集合替换、历史可重取或本地可重算。
-4. 把 `market_boards.board_code` 当物理唯一键，或混合申万双级与退役行业/概念口径。
+4. 把 `market_boards.board_code` 当物理唯一键；混合申万双级与退役行业/概念口径；把申万官网发布行当本地自算，或把 `query_sw_board_daily` 自算结果当 `market_boards` 落库行；只用 `source='swsresearch'` 判断全部申万官网数据。
 5. 把 `lhb_basic.total_amount` 当全日成交额；它是买前五 + 卖前五席位合计。
 6. 把 `lhb_stock_statistic.appear_count_3m` 当自然三个月统计。
 7. 把 `lhb_yyb_most.buy_amount` 当纯买入额。
@@ -352,5 +368,5 @@
 - [静态表语义研究](https://github.com/daanZao/q_stock_skills/blob/research/database-table-semantics-20261118/docs/research/2026-11-18-database-table-semantics.md)（issue #190）。
 - [业务库只读核验](https://github.com/daanZao/q_stock_skills/blob/research/database-live-schema-20261118/docs/research/2026-11-18-database-live-schema.md)（issue #191）。
 - 分类决策：issue #192；词汇同步到根 `CONTEXT.md`。
-- 决策原因：ADR 0003（结论）、0006/0008（单位）、0007（错误语义）、0012（涨停与强势股）、0014–0017（龙虎榜）、0018（复权）、0019（baostock 租约）。
+- 决策原因：ADR 0003（结论）、0006/0008（单位）、0007（错误语义）、0012（涨停与强势股）、0014–0017（龙虎榜）、0018（复权）、0019（baostock 租约）、[0020](adr/0020-sw-boards-published-and-selfcalc.md)（申万官网发布、自算与 source 层级）。
 - 操作手册：`docs/daily-source-cli.md`、`docs/index-source-cli.md`、`docs/sw-boards-cli.md`、`docs/lhb-source-cli.md`、`docs/adj-backfill-cli.md`、`docs/adj-switch-cli.md`。
