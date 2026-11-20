@@ -182,40 +182,56 @@ _Avoid_: 回填、补数据（不加限定时）
 _Avoid_: 复权降级、静默回落
 
 **累计因子 B**:
-baostock `backAdjustFactor` 的累计复权因子口径，存于 `stock_adjust_factor.factor_cum`；`adjustFacto(r)` 仅供原始审计，不进入业务派生。相邻事件派生单次因子 `f=B_prev/B_cur`（ADR 0018）。
-_Avoid_: 把 adjustFacto(r) 当作累计 B 或单次事件因子
+baostock `backAdjustFactor` 的累计复权因子口径；`adjustFacto(r)` 仅供原始审计，不进入业务派生。新模型用相邻事件派生单次因子 `f=B_prev/B_cur`，只维护初始化之后的前向事件因子（ADR 0021）。
+_Avoid_: 把 adjustFacto(r) 当作累计 B 或单次事件因子、初始化补齐全历史因子
 
 **窗口基线 B0**:
-覆盖 `QSTOCK_ADJ_WINDOW_START` 的采集窗口归一锚。仅全窗口采集（init 回溯、复权事件回填、`daily --all`）或新股上市首日（morning）可建立；首次事件由 `B0=B1×f1` 反推，D-1 必须是交易日历上的确切前一交易日 raw close，事件集完整且全窗口确无事件时才归一 B0=1。daily 单票与 T+0 查询只消费 B0，不建立或改写；无锚只写 raw 与因子证据，保持 NULL/pending，不派生 hfq/qfq。
-_Avoid_: 默认基线、provisional 基线、查询窗基线
+ADR 0018 旧影子模型的窗口归一锚，已随 #206 被 ADR 0021 淘汰；新模型不建立、不消费 B0，也不以窗口外基线决定 qfq 可用性。
+_Avoid_: 默认基线、provisional 基线、查询窗基线、新模型建锚
 
 **窗口基线 D-1 输入**:
-窗口首日即发生事件时，需要读取的窗口外最后一个交易日 raw 行；仅作 `B0=B1×f1` 的计算输入，保留在 `stock_daily_raw` 供审计/续跑，但不进入 hfq、事件集或窗口查询交付。它不是 legacy 价格，也不用于从旧 qfq 反推。
-_Avoid_: 窗口内 D-1、legacy 价格输入
+ADR 0018 旧模型反推 B0 时读取的窗口外前一交易日 raw 输入；新模型不使用该概念。
+_Avoid_: 窗口内 D-1、legacy 价格输入、新模型基线输入
 
 **归一累计因子 F**:
-`F(t)=B(t)/B0`，存于 `stock_daily_hfq.factor_cum`；`hfq=raw×F`。F 只要求正且有限，允许上升或下降。
-_Avoid_: 把事件表 B 与 hfq 表 F 混为同一 factor_cum
+ADR 0018 旧模型的 `F=B/B0` 及 hfq 派生因子，已随 B0/hfq 一并淘汰；新模型不存在 F。
+_Avoid_: 把事件表 B 与 hfq 表 F 混为同一 factor_cum、新模型归一因子
 
-**前复权锚点**:
-每股最新有效 raw 日期及 `F_latest=B_latest/B0` 的组合；qfq 在读时按 `hfq/F_latest` 标量派生，不物化。新增事件会重锚全历史 qfq。
-_Avoid_: qfq 快照、固定前复权价
+**前复权读模型**:
+以当前最新除权事实为锚的可变 qfq 视图；初始化采用上游 qfq，后续按事件重锚历史，不承诺 point-in-time（ADR 0021）。
+_Avoid_: qfq 读时 hfq 派生、point-in-time qfq、固定历史前复权价
+
+**前复权重锚**:
+T 日事件以单次因子 `f_T` 只更新 `date<T` 的历史价格；T 日及之后的新行和非价格字段不变，每个事件至多应用一次。
+_Avoid_: 重放全部历史事件、每次事件重抓全历史、修改 T 日及之后价格
+
+**前复权锚日期**:
+某行 qfq 已纳入的复权版本；初始化行取实际数据截止交易日，日常新增行为空，事件重锚后事件日前历史行取该事件日。它不是该行交易日实际发生除权的声明，也不是历史时点快照。
+_Avoid_: 实际除权日、point-in-time 版本、最新 raw 日期与 F_latest 的组合
+
+**价格来源（value_origin）**:
+qfq 价格字段的来源分类：`upstream_qfq` 为上游直接 qfq，`raw_identity` 为最新 raw 恒等写入，`local_reanchor` 为本地事件乘算；不据此推断成交量、成交额等非价格字段也被本地计算。
+_Avoid_: 整行本地计算、raw 恒等行即上游 qfq
+
+**复权待处理（pending）**:
+`factor_unverified` 表示当日事件集未核验，`reanchor_pending` 表示已确认事件但事件日前历史尚未重锚；允许多个 pending，T 日及之后的新行仍然有效。
+_Avoid_: 当日数据错误、成功空日即失败、最多一个 pending
 
 **复权覆盖（coverage）**:
-新价格模型数据可用性分级：complete 要求相对可信 B0 的生命周期内 raw 连续、逐日事件证据完整、基线可信且无未决异常；B0 缺失只能 partial/unknown，pending、已知缺口或无效 raw 为 partial，尚无足够状态为 unknown。单票 walking skeleton 只提供 complete 门控，不代替完整覆盖核验。
-_Avoid_: 有行即完整、采集成功即 complete
+新价格模型按 raw/qfq 各自日期覆盖和未决 pending 判定可用性；有行不等于完整，`factor_unverified`、`reanchor_pending` 或已知缺口不得判 complete，不再以 B0/hfq/state 为前提。
+_Avoid_: 有行即完整、采集成功即 complete、以旧因子状态代替 qfq 覆盖
 
 **复权切读**:
-全局个股价格读取在 legacy 与新复权模型之间的统一切换，覆盖区间序列、横截面、窗口极值、最新日期、coverage、强势股和申万自算，不只切换 `query_daily`。开发及测试库演练、八项硬验收和真实生产切读分别验收；演练完成不代表生产已切换。
-_Avoid_: 只切 query_daily、以开发完成代替生产完成
+全局个股价格读取从 legacy/旧影子模型切到 raw/qfq 双口径，覆盖区间序列、横截面、窗口极值、最新日期、coverage、强势股和申万自算，不只切换单个查询工具；回填、硬验收、消费迁移和生产切读分别完成。
+_Avoid_: 只切 query_daily、以开发完成代替生产完成、沿用旧 B0 八项验收
 
 **修复回滚**:
-复权切读后又产生新事实，而必须恢复 legacy 读取时，由统一管线利用持续保留的 raw、累计因子与派生结果修复 legacy 数据后再切回；事件造成的全历史 qfq 重锚也须修复，不能只补缺失日期。回滚期间事实采集持续，不启动第二套采集器。
-_Avoid_: 只切 flag、停止 raw/因子采集、重抓全历史
+ADR 0018 旧影子模型恢复 legacy 读取的历史术语；ADR 0021 不采用该回滚链，新模型异常通过 pending 补偿或人工单票全量刷新处理。
+_Avoid_: 只切 flag、恢复 B0/hfq/state、自动重抓全历史
 
 **roll-forward**:
-修复回滚后重新切回新复权模型的动作；新复权事实表在回滚期间保留并继续推进，因此无需重新抓取已验证事实。
-_Avoid_: 回滚即删除新表、重新回填
+ADR 0018 旧影子模型修复回滚后重新切读的历史术语；ADR 0021 不再使用该状态机。
+_Avoid_: 新模型回滚状态、重新启用旧切读状态机
 
 **baostock 实例租约**:
 单个 CLI 命令或 MCP 进程实例持有的本地 baostock 互斥许可；其他进程即使属于同一入口也不能共享。正常释放归持有实例，崩溃残留经人工确认 stale 后 force 清理（ADR 0019）。

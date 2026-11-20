@@ -1,7 +1,9 @@
 # 项目知识图谱
 
 面向人类与 AI agent 的 5 分钟全图认知。术语遵循 `CONTEXT.md`（抓取/落库/透传/自愈/回溯/五个能力面）。
-每条论断尽量标注来源（`path:line`）。设计决策的"为什么"在 `docs/adr/0001-0020`，本图只讲"是什么、在哪、和谁相连"。
+每条论断尽量标注来源（`path:line`）。设计决策的"为什么"在 `docs/adr/0001-0021`，本图只讲"是什么、在哪、和谁相连"。
+
+> 复权架构决策变更（2026-11-20）：#206 / ADR 0021 已接受 raw/qfq 双日线与前复权事件重锚目标架构，并取代 ADR 0018。本图相关 0018 条目暂描述当前代码和旧模型留档，不代表旧设计仍有效；实施前先看 ADR 0021，并随实际迁移更新对应条目。
 数据表的业务含义、日期轴、真实来源/使用方与重取/重算边界见 [数据库字典](database-dictionary.md)；改表或新增消费路径时同步查阅。
 
 ## 总览图
@@ -196,7 +198,7 @@ zt_pool/strong_stocks 承载切换（issue #120，ADR 0012，仅生产路径—�
 
 - **改表结构/schema**：`sql/00X_*.sql`（DDL 拥有权在本项目）→ `repository.py`（列集/业务键/注册表）→ `adapters/base.py` 的 `*_FIELDS` → 相关 ADR（0002 选型、0003 结论表、0004 init 表）。改完跑 `tests/test_repository.py` + 对应 fetch/query 测试。
 - **改 `query_daily` 输出结构**：这是跨仓库稳定契约（ADR 0001）——`tools_daily.py` + `skills/indicator-tools/SKILL.md` 输入契约 + `skills/indicator-tools/tests/` 必须同步，变更需谨慎。
-- **改个股价格读取/复权派生**：所有 legacy 读路径只看 `price_reader.py`；raw+B→hfq/qfq 看 `adjustment.py` 与 `sql/019`，单票 raw+B 持续采集入口是 `adjustment_pipeline.py`、逐日全市场回填是 `adjustment_backfill.py`，B 字段映射看 `adapters/baostock_adapter.py`。测试 `tests/test_price_reader.py` / `test_adjustment.py` / `test_fetch_daily.py` / `test_query_daily_adjustment.py` / `test_adapters.py`；决策与切换边界见 ADR 0018。
+- **改个股价格读取/复权派生**：现行 legacy 读路径只看 `price_reader.py`；现行 raw+B→hfq/qfq 看 `adjustment.py` 与 `sql/019`，单票 raw+B 持续采集入口是 `adjustment_pipeline.py`、逐日全市场回填是 `adjustment_backfill.py`，B 字段映射看 `adapters/baostock_adapter.py`。测试 `tests/test_price_reader.py` / `test_adjustment.py` / `test_fetch_daily.py` / `test_query_daily_adjustment.py` / `test_adapters.py`；旧实现边界见 ADR 0018（已被取代），#206 新模型设计与目标接缝见 ADR 0021，实施时不得继续沿用 B0/hfq/state。
 - **加数据源**：实现 `adapters/base.py` 的协议 → 新建 `adapters/<name>_adapter.py` → 调整 `adapters/__init__.py` 对应链的顺序（个股日线/快照/指数/基本面/lhb/boards 各专用链 + 清单 default_adapters）→ `tests/fakes.py`/`test_adapters.py` 覆盖。例外：zt_pool 为 THS 单源（issue #120），接线点在 `tools_board._zt_pool_section`，不走 `default_adapters` 链。
 - **加盘面 section/表**：`sql/` 新 DDL → `repository.BOARD_SECTION_TABLES`/`BOARD_QUERY_TABLES` → `BoardAdapter` 协议与映射模块（`_lhb_yyb.py` 等现存先例）→ `tools_board.ALL_SECTIONS`。
 - **加指标**：只动 `skills/indicator-tools/scripts/indicators.py` 与其测试，不改 MCP server（ADR 0001）；新增指标不得改变既有契约（`skills/indicator-tools/SKILL.md:95`）。

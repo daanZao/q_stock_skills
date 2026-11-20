@@ -1,5 +1,7 @@
 # ADR 0018：复权影子模型与个股价格读取 expand 接缝
 
+> **状态：已被 ADR 0021 取代（2026-11-20，spec #206）。** 本文保留用于审计旧决策；B0/F/hfq/state、qfq 读时派生、旧切读与回填验收不再作为新实施依据。累计 B 只取 `backAdjustFactor`、`adjustFacto(r)` 不参与派生的边界由 ADR 0021 继承。
+
 2026-11-04，issue #158/#159/#160；一手证据见 `docs/research/2026-11-04-adjustment-core-backfill.md`。
 
 ## Context
