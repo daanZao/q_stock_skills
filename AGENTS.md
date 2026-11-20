@@ -18,7 +18,7 @@
 
 ## 数据契约
 
-- 库内金额列统一为万元，成交量统一为股；baostock amount 在适配层由元除以 10000。复权模型只以 `backAdjustFactor` 为累计 B，`adjustFacto(r)` 不参与派生（ADR 0021）。
+- 库内金额列统一为万元，成交量统一为股；baostock amount 在适配层由元除以 10000。新前复权模型只以 `foreAdjustFactor` 为段乘数，`backAdjustFactor` / `adjustFacto(r)` 不参与前复权派生或 pending 门禁（ADR 0021）。
 
 ## 数据库纪律
 

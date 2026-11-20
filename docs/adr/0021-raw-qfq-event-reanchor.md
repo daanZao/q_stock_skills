@@ -29,8 +29,8 @@ ADR 0018 以 raw、窗口基线 B0、累计因子、物化 hfq 和每股状态�
 ### 3. 除权事件只重锚事件日前历史
 
 - `query_daily_adjust_factor(T)` 是 T 日全市场事件集；成功空结果才表示无事件，失败不得记成无事件。
-- 原决策以单票 `query_adjust_factor()` 的 `f_T=B_prev/B_cur` 无条件自动重锚；#208 样本已证明 back-only 在 000001/000002 的特定因子段失效，该公式暂停作为实施依据。事件因子主口径与 back/fore 不一致时的状态语义由 #222 重新决策，#222 关闭前不得实施 #212 自动重锚。
-- 累计 B 仍只取 `backAdjustFactor`，`adjustFacto(r)` 不参与业务派生。#208 同时证明本轮直接 qfq 精确等于 `raw×foreAdjustFactor`；这为事件公式纠偏提供一手证据，但不在研究票中替用户选择 pending/告警行为。
+- 事件股票的本次因子只由单票 `query_adjust_factor()` 返回的相邻前复权段乘数计算：`f_T=fore_prev/fore_cur`；最新事件行通常 `fore_cur=1`，此时 `f_T=fore_prev`。每次事件重新查询，因为历史 fore 会随最新锚点重算，不能永久缓存绝对值。
+- 全局只有前复权，`backAdjustFactor` 与 `adjustFacto(r)` 不参与计算、交叉核验或 pending 门禁；back 最多随原始响应留档。#208 已证明直接 qfq 精确等于 `raw×foreAdjustFactor`，back 异常不再影响 qfq 状态机。
 - 初始化不补历史因子。第一次新事件按需取得单票因子历史，之后只维护新模型运行后的前向事件因子。
 - T 日重锚只将 `date<T` 的 OHLC/preclose 乘以 `f_T`；T 日及之后的行完全不变，成交量、成交额、换手率、涨跌幅、交易状态和 ST 标志也不变。
 - 历史重锚与对应 pending 清除在同一事务中完成，保证每个事件至多应用一次；该事务不回滚或重写 T 日及之后的新行。
@@ -65,6 +65,7 @@ pending 表示事件日前历史尚未完成重锚，不表示 T 日及之后的
 
 ## Considered Options
 
+- **fore-only 前复权**：采用。直接 qfq 为 `raw×fore`，事件重锚为 `fore_prev/fore_cur`；back/adjustFacto(r) 不进入计算或状态门禁，避免与 hfq 无关的 back 修订阻塞 qfq。
 - **raw+B 读时派生 qfq/hfq**：拒绝。仍要求完整因子和基线语义，且保留 hfq/state 与横截面派生复杂度。
 - **每次事件重抓单票全历史 qfq**：拒绝作为默认路径。它把常规事件处理变成上游长历史分页请求，扩大日预算和失败面；保留为人工恢复能力。
 - **初始化上游 qfq + 本地事件重锚**：采用。取消 B0/hfq，常规事件只产生一次单票因子查询和本地历史更新；代价是接受可变历史、尾差和显式 pending。
@@ -85,5 +86,5 @@ pending 表示事件日前历史尚未完成重锚，不表示 T 日及之后的
 - 显式待澄清：[close/morning 职责 #205](https://github.com/daanZao/q_stock_skills/issues/205)。
 - 被取代模型：ADR 0018；旧任务根 #158 及其下辖 task。
 - 一手样本：[#208 qfq 初始化与事件重锚研究](../research/2026-11-20-qfq-event-reanchor-sample-208.md)。
-- 事件公式待决：[Spec #222](https://github.com/daanZao/q_stock_skills/issues/222)；关闭前阻塞 #212 自动重锚。
+- 事件因子决策：[Spec #222](https://github.com/daanZao/q_stock_skills/issues/222) 已确认 fore-only，back 不参与计算或 pending 门禁。
 - baostock 官方文档：[历史 A 股 K 线](https://www.baostock.com/mainContent?file=stockKData.md)、[复权因子信息](https://www.baostock.com/mainContent?file=factorInfo.md)、[本地日 K 与因子计算复权行情](https://www.baostock.com/mainContent?file=localdatafactorInfo.md)。

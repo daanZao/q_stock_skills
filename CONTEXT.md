@@ -182,8 +182,12 @@ _Avoid_: 回填、补数据（不加限定时）
 _Avoid_: 复权降级、静默回落
 
 **累计因子 B**:
-baostock `backAdjustFactor` 的累计复权因子口径；`adjustFacto(r)` 仅供原始审计，不进入业务派生。#208 证明 back-only 的 `B_prev/B_cur` 不能无条件自动重锚，事件主公式与异常门禁待 #222 决策；初始化之后只维护前向事件因子（ADR 0021）。
-_Avoid_: 把 adjustFacto(r) 当作累计 B 或单次事件因子、初始化补齐全历史因子
+baostock `backAdjustFactor` 的累计复权因子口径，属于旧 raw+B/hfq 模型和原始审计词汇；全局前复权读模型不消费 B，也不以其变化触发 pending。
+_Avoid_: 把 B 当作前复权段乘数、以 back 异常阻塞 qfq
+
+**前复权段乘数（fore）**:
+baostock `foreAdjustFactor` 的分段前复权乘数；直接价格为 `qfq=raw×fore`，事件重锚只使用相邻 fore 比值，back/adjustFacto(r) 不参与。
+_Avoid_: 用 back 或 adjustFactor 代替 fore、永久缓存随新事件重锚的 fore 绝对值
 
 **窗口基线 B0**:
 ADR 0018 旧影子模型的窗口归一锚，已随 #206 被 ADR 0021 淘汰；新模型不建立、不消费 B0，也不以窗口外基线决定 qfq 可用性。
@@ -202,7 +206,7 @@ _Avoid_: 把事件表 B 与 hfq 表 F 混为同一 factor_cum、新模型归一�
 _Avoid_: qfq 读时 hfq 派生、point-in-time qfq、固定历史前复权价
 
 **前复权重锚**:
-T 日事件以单次因子 `f_T` 只更新 `date<T` 的历史价格；T 日及之后的新行和非价格字段不变，每个事件至多应用一次。
+T 日事件以单次因子 `f_T=fore_prev/fore_cur` 只更新 `date<T` 的历史价格；T 日及之后的新行和非价格字段不变，每个事件至多应用一次。
 _Avoid_: 重放全部历史事件、每次事件重抓全历史、修改 T 日及之后价格
 
 **前复权锚日期**:
