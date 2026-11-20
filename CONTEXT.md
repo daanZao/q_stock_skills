@@ -182,7 +182,7 @@ _Avoid_: 回填、补数据（不加限定时）
 _Avoid_: 复权降级、静默回落
 
 **累计因子 B**:
-baostock `backAdjustFactor` 的累计复权因子口径；`adjustFacto(r)` 仅供原始审计，不进入业务派生。新模型用相邻事件派生单次因子 `f=B_prev/B_cur`，只维护初始化之后的前向事件因子（ADR 0021）。
+baostock `backAdjustFactor` 的累计复权因子口径；`adjustFacto(r)` 仅供原始审计，不进入业务派生。#208 证明 back-only 的 `B_prev/B_cur` 不能无条件自动重锚，事件主公式与异常门禁待 #222 决策；初始化之后只维护前向事件因子（ADR 0021）。
 _Avoid_: 把 adjustFacto(r) 当作累计 B 或单次事件因子、初始化补齐全历史因子
 
 **窗口基线 B0**:
